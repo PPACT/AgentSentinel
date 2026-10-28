@@ -82,22 +82,25 @@ graph TD
 
 ### 1. 环境准备
 
-本项目推荐使用 **Python 3.12+**，并基于 **AgentScope 2.0.6** 构建。推荐使用 `uv` 作为包管理器以提升依赖解析速度。
+本项目推荐使用 **Python 3.12+**，并基于 **AgentScope 2.0.8** 构建。推荐使用 `uv` 作为包管理器。
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/AgentSentinel.git
+git clone https://github.com/PPACT/AgentSentinel.git
 cd AgentSentinel
+
+# 初始化 Python 3.12 虚拟环境（严格遵守 AGENTS.md 规则）
+uv venv --python 3.12
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate   # Windows
 
 # 安装依赖
 uv pip install -r requirements.txt
-# 或使用 pip
-pip install -r requirements.txt
 ```
 
 ### 2. 环境变量配置
 
-请在项目根目录创建 `.env` 文件，配置大模型 API Key 及 Git 凭证：
+请在项目根目录创建 `.env` 文件，配置大模型 API Key 及 Git 凭证。⚠️ 注意：请务必确保 `.env` 文件已添加到 `.gitignore` 中，防止敏感凭证被意外提交。
 
 ```env
 OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxx
@@ -132,7 +135,7 @@ pipeline.run(task_prompt)
 
 ```txt
 # ===== 核心框架 =====
-agentscope[full]==2.0.6
+agentscope[full]==2.0.8
 
 # ===== 治理层（本项目特有） =====
 detect-secrets==1.5.0    # 脱敏扫描规则引擎
@@ -140,6 +143,11 @@ GitPython>=3.1.42        # Git 操作封装 (Push/Tag/Reset)
 pydantic-settings>=2.9.1 # 配置与契约校验
 python-dotenv>=1.0.1     # 环境变量加载
 structlog>=25.4.0        # 结构化审计日志输出
+
+# ===== 开发与质量检查（对应 AGENTS.md 红线） =====
+pytest>=8.0              # 单元测试
+ruff>=0.3.0              # 代码规范与格式化
+mypy>=1.8.0              # 静态类型检查
 ```
 
 ---

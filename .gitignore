@@ -1,0 +1,44 @@
+# ===== 敏感文件与密钥 =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+credentials*.json
+secrets*.json
+*.secret
+*.token
+
+# ===== 本地 / 机器相关配置 =====
+.claude/settings.local.json
+
+# ===== Python 虚拟环境 =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ===== 工具缓存 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 运行时产物 =====
+workspace/
+*.log
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 暂不纳入版本管理 =====
+docs/修订01.txt

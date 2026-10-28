@@ -38,30 +38,30 @@
 
 ```mermaid
 graph TD
-    User([用户/需求方]) -->|任务下发| Orchestrator[🧠 主编排 Agent<br/>Orchestrator]
+    User["👤 用户 / 需求方"] -->|任务下发| Orchestrator["🧠 主编排 Agent (Orchestrator)"]
 
     subgraph "Agent Pipeline (共享工作区)"
-        Orchestrator -->|分配任务| Coder[💻 代码 Agent<br/>Coder]
-        Orchestrator -->|分配任务| Tester[🧪 测试 Agent<br/>Tester]
-        Orchestrator -->|分配任务| Writer[📝 文档 Agent<br/>Writer]
-        Orchestrator -->|分配任务| Manager[🛡️ 管理 Agent<br/>Manager]
+        Orchestrator -->|分配任务| Coder["💻 代码 Agent (Coder)"]
+        Orchestrator -->|分配任务| Tester["🧪 测试 Agent (Tester)"]
+        Orchestrator -->|分配任务| Writer["📝 文档 Agent (Writer)"]
+        Orchestrator -->|分配任务| Manager["🛡️ 管理 Agent (Manager)"]
 
-        Coder -.->|写入 diff| SharedWorkspace[(📁 Shared Workspace)]
-        Tester -.->|读取 & 写入报告| SharedWorkspace
-        Writer -.->|读取 & 写入文档| SharedWorkspace
+        Coder -.->|写入 diff| SharedWorkspace["📁 Shared Workspace"]
+        Tester -.->|读取写入报告| SharedWorkspace
+        Writer -.->|读取写入文档| SharedWorkspace
         Manager -.->|读取产物| SharedWorkspace
     end
 
     subgraph "安全治理层 (Governance Layer)"
-        Manager -->|1. 触发扫描| Sanitizer{🔍 脱敏拦截器<br/>Sanitize Scan}
-        Sanitizer -->|ALLOW| GitPush[🚀 Git Push / Tag]
-        Sanitizer -->|DENY| Block[⛔ 阻断并回传错误]
-        Manager -->|2. 异常回退| GitReset[⏪ Reset to Baseline]
-        GitPush --> AuditLog[(📋 审计日志)]
+        Manager -->|1. 触发扫描| Sanitizer{"🔍 脱敏拦截器"}
+        Sanitizer -->|ALLOW| GitPush["🚀 Git Push / Tag"]
+        Sanitizer -->|DENY| Block["⛔ 阻断并回传错误"]
+        Manager -->|2. 异常回退| GitReset["⏪ Reset to Baseline"]
+        GitPush --> AuditLog["📋 审计日志"]
         GitReset --> AuditLog
     end
 
-    GitPush --> RemoteRepo([🌐 远程代码仓库])
+    GitPush --> RemoteRepo["🌐 远程代码仓库"]
 ```
 
 ---

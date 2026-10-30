@@ -1,0 +1,18 @@
+# 本项目仅在此放工具配置；运行时依赖统一由 requirements.txt 管理。
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["agentsentinel", "tests"]
+# ruff format 会重排 Markdown 里的 Python 代码块；文档归文档侧，不在此处格式化。
+extend-exclude = ["README.md", "docs"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 项目未以可安装包形式分发（依赖走 requirements.txt），测试时把仓库根加入导入路径。
+pythonpath = ["."]

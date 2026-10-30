@@ -43,5 +43,8 @@ workspace/
 .DS_Store
 Thumbs.db
 
+# ===== 工具生成（依赖来源为 requirements.txt，不跟踪 uv 锁文件） =====
+uv.lock
+
 # ===== 暂不纳入版本管理 =====
 docs/修订01.txt

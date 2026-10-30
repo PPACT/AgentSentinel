@@ -114,7 +114,7 @@ GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 ```python
 # main.py (示例)
 from agentsentinel.pipeline import TeamPipeline
-from agentsentinel.agents import Orchestrator, Coder, Tester, Writer, Manager
+from agentsentinel.roles import Orchestrator, Coder, Tester, Writer, Manager
 
 # 初始化各个 Agent (已绑定 Workspace 和 Permission)
 pipeline = TeamPipeline(

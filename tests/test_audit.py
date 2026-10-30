@@ -72,5 +72,7 @@ def test_all_spec_fields_are_present(tmp_path: Path) -> None:
         "scan_result",
         "test_result",
         "action_type",
+        "reason",
     }
+    assert payload["reason"] == ""
     assert payload["timestamp"] == "2026-10-30T12:00:00Z"

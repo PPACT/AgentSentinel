@@ -27,10 +27,14 @@ class ActionType(StrEnum):
 
 
 class ScanVerdict(StrEnum):
-    """脱敏扫描结论；与 AGENTS.md 的 ALLOW/DENY 口径一致。"""
+    """脱敏扫描结论。
+
+    NOT_RUN 表示扫描未执行（权限拒绝/ASK 等场景），调用方不得用 ALLOW 伪装。
+    """
 
     ALLOW = "ALLOW"
     DENY = "DENY"
+    NOT_RUN = "NOT_RUN"
 
 
 class TaskState(StrEnum):
@@ -67,6 +71,8 @@ class AuditRecord(BaseModel):
     scan_result: ScanVerdict
     test_result: TestStatus
     action_type: ActionType
+    # 权限拒绝固定 PERMISSION_DENIED；扫描拦截为 SCAN_DENIED:<原因>；正常为 ""。
+    reason: str = ""
 
 
 class TaskStatus(BaseModel):

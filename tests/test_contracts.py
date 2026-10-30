@@ -32,6 +32,11 @@ def test_test_report_round_trips_as_json() -> None:
     assert TestReport.model_validate_json(report.model_dump_json()) == report
 
 
+def test_scan_verdict_supports_not_run() -> None:
+    assert ScanVerdict.NOT_RUN == "NOT_RUN"
+    assert ScanVerdict("NOT_RUN") is ScanVerdict.NOT_RUN
+
+
 def test_test_report_rejects_unknown_status() -> None:
     with pytest.raises(ValidationError):
         TestReport.model_validate({"status": "SKIPPED", "summary": "x", "timestamp": NOW})
@@ -54,7 +59,9 @@ def test_audit_record_has_exactly_spec_fields() -> None:
         "scan_result",
         "test_result",
         "action_type",
+        "reason",
     }
+    assert record.reason == ""
     assert record.model_dump(mode="json")["action_type"] == "push"
 
 

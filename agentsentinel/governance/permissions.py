@@ -66,11 +66,14 @@ def ensure_mode_allowed(mode: PermissionMode) -> None:
 
 @dataclass(frozen=True)
 class PermissionCheck:
-    """一次权限检查的完整结论，供调用方决定是否继续。"""
+    """一次权限检查的完整结论，供调用方决定是否继续。
+
+    未走到扫描步骤时 scan_result 必须为 NOT_RUN，不得伪造成 ALLOW。
+    """
 
     decision: PermissionDecision
     reason: str = ""
-    scan_result: ScanVerdict = ScanVerdict.ALLOW
+    scan_result: ScanVerdict = ScanVerdict.NOT_RUN
 
 
 def preflight(
@@ -86,6 +89,7 @@ def preflight(
         return PermissionCheck(
             decision=decision,
             reason=f"permission {decision.value}: {tool} for {caller}",
+            scan_result=ScanVerdict.NOT_RUN,
         )
 
     scan = sanitizer.scan(payload)

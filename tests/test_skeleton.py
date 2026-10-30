@@ -15,16 +15,17 @@ from agentsentinel.agents import (
     Tester,
     Writer,
 )
-from agentsentinel.contracts import TestStatus
+from agentsentinel.contracts import ScanVerdict, TestStatus
 from agentsentinel.governance import (
     AllowAllPolicy,
     AllowAllSanitizer,
     MatrixPermissionPolicy,
+    RegexSanitizer,
 )
 from agentsentinel.governance.permissions import PermissionPolicy
 from agentsentinel.governance.sanitizer import Sanitizer
 from agentsentinel.pipeline import Pipeline
-from agentsentinel.tools import GitOps, StubGitOps
+from agentsentinel.tools import GitOps, ScanDeniedError, StubGitOps
 from agentsentinel.workspace import Workspace
 
 SKELETON_MODULES = (
@@ -135,6 +136,8 @@ def test_revert_rejection_is_audited(tmp_path: Path) -> None:
     assert records[-1]["action_type"] == "revert"
     assert records[-1]["caller"] == "Coder"
     assert records[-1]["commit_hash"] == "baseline-ref"
+    assert records[-1]["scan_result"] == ScanVerdict.NOT_RUN.value
+    assert records[-1]["reason"] == "PERMISSION_DENIED"
 
 
 def test_publish_denied_by_policy_is_audited(tmp_path: Path) -> None:
@@ -153,3 +156,67 @@ def test_publish_denied_by_policy_is_audited(tmp_path: Path) -> None:
     ]
     assert records[-1]["action_type"] == "push"
     assert records[-1]["caller"] == "Manager"
+    assert records[-1]["scan_result"] == ScanVerdict.NOT_RUN.value
+    assert records[-1]["reason"] == "PERMISSION_DENIED"
+
+
+def test_publish_scan_denial_audit_uses_scan_denied_reason(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    manager = Manager(
+        workspace=workspace,
+        sanitizer=RegexSanitizer(),
+        git_ops=StubGitOps(),
+        policy=MatrixPermissionPolicy(),
+    )
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+    published = manager.publish(
+        caller="Orchestrator",
+        commit_message="feat: demo",
+        payload=f'key = "{secret}"',
+        test_status=TestStatus.PASS,
+    )
+
+    assert published is False
+    records = [
+        json.loads(line) for line in manager.audit_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["scan_result"] == ScanVerdict.DENY.value
+    assert str(records[-1]["reason"]).startswith("SCAN_DENIED:custom:api_key")
+    assert secret not in str(records[-1]["reason"])
+
+
+def test_git_tool_second_scan_denial_is_audited(tmp_path: Path) -> None:
+    class _DenyingGitOps:
+        def commit(self, message: str, *, caller: str = "Manager") -> str:
+            return "abc123"
+
+        def push(self, *, caller: str = "Manager", payload: str = "") -> None:
+            raise ScanDeniedError("detect-secrets:AWS Access Key (line 7)")
+
+        def tag_baseline(self, name: str, *, caller: str = "Manager") -> None:
+            return None
+
+        def reset_to_baseline(self, ref: str, *, caller: str = "Orchestrator") -> None:
+            return None
+
+    manager = Manager(
+        workspace=Workspace(tmp_path / "workspace"),
+        sanitizer=AllowAllSanitizer(),
+        git_ops=_DenyingGitOps(),
+        policy=MatrixPermissionPolicy(),
+    )
+
+    published = manager.publish(
+        caller="Orchestrator",
+        commit_message="feat: demo",
+        payload="clean",
+        test_status=TestStatus.PASS,
+    )
+
+    assert published is False
+    records = [
+        json.loads(line) for line in manager.audit_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["scan_result"] == ScanVerdict.DENY.value
+    assert records[-1]["reason"] == "SCAN_DENIED:detect-secrets:AWS Access Key (line 7)"

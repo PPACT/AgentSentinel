@@ -29,14 +29,14 @@ DETECT_SECRETS_PLUGINS: tuple[dict[str, object], ...] = (
 # 命中原因只写规则名与行号，绝不回显密钥本身。
 CUSTOM_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        "API key",
+        "api_key",
         re.compile(
             r"\b(?:sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}"
             r"|xox[baprs]-[A-Za-z0-9-]{10,})\b"
         ),
     ),
     (
-        "内网 IP",
+        "private_ip",
         re.compile(
             r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
             r"|192\.168\.\d{1,3}\.\d{1,3}"
@@ -44,11 +44,11 @@ CUSTOM_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        "密码特征",
+        "password",
         re.compile(r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*['\"]?[^\s'\"]{4,}"),
     ),
     (
-        "身份证号",
+        "id_card",
         re.compile(
             r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])"
             r"(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)"
@@ -86,7 +86,7 @@ class RegexSanitizer:
                 if pattern.search(line):
                     return ScanResult(
                         verdict=ScanVerdict.DENY,
-                        reason=f"line {line_number}: 命中 {rule_name} 规则",
+                        reason=f"custom:{rule_name} (line {line_number})",
                     )
 
         hit = self._detect_secrets_hit(content)
@@ -94,7 +94,7 @@ class RegexSanitizer:
             line_number, secret_type = hit
             return ScanResult(
                 verdict=ScanVerdict.DENY,
-                reason=f"line {line_number}: detect-secrets 命中 {secret_type}",
+                reason=f"detect-secrets:{secret_type} (line {line_number})",
             )
         return ScanResult(verdict=ScanVerdict.ALLOW)
 

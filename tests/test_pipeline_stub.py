@@ -20,6 +20,7 @@ AUDIT_FIELDS = {
     "scan_result",
     "test_result",
     "action_type",
+    "reason",
 }
 
 
@@ -48,6 +49,7 @@ def test_normal_run_writes_artifacts_and_audit(tmp_path: Path) -> None:
     assert record["test_result"] == "PASS"
     assert record["caller"] == "Orchestrator"
     assert str(record["commit_hash"]).startswith("stub")
+    assert record["reason"] == ""
 
 
 def test_deny_blocks_before_any_git_call_and_is_audited(tmp_path: Path) -> None:
@@ -67,6 +69,7 @@ def test_deny_blocks_before_any_git_call_and_is_audited(tmp_path: Path) -> None:
     assert records[0]["scan_result"] == "DENY"
     assert records[0]["action_type"] == "push"
     assert records[0]["commit_hash"] == ""
+    assert str(records[0]["reason"]).startswith("SCAN_DENIED:")
 
 
 def test_run_makes_no_network_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

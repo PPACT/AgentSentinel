@@ -24,7 +24,7 @@ def test_api_key_is_denied_without_echoing_it() -> None:
     result = RegexSanitizer().scan(f'key = "{secret}"')
 
     assert result.verdict is ScanVerdict.DENY
-    assert "API key" in result.reason
+    assert result.reason.startswith("custom:api_key")
     assert secret not in result.reason
 
 
@@ -32,21 +32,21 @@ def test_internal_ip_is_denied() -> None:
     result = RegexSanitizer().scan("host = '192.168.1.10'")
 
     assert result.verdict is ScanVerdict.DENY
-    assert "内网 IP" in result.reason
+    assert result.reason.startswith("custom:private_ip")
 
 
 def test_password_pattern_is_denied() -> None:
     result = RegexSanitizer().scan('password = "hunter2"')
 
     assert result.verdict is ScanVerdict.DENY
-    assert "密码" in result.reason
+    assert result.reason.startswith("custom:password")
 
 
 def test_id_card_number_is_denied() -> None:
     result = RegexSanitizer().scan("身份证：11010519491231002X")
 
     assert result.verdict is ScanVerdict.DENY
-    assert "身份证号" in result.reason
+    assert result.reason.startswith("custom:id_card")
 
 
 def test_detect_secrets_engine_catches_non_custom_secret() -> None:
@@ -55,7 +55,17 @@ def test_detect_secrets_engine_catches_non_custom_secret() -> None:
     result = RegexSanitizer().scan(f'stripe_key = "{stripe_sample}"')
 
     assert result.verdict is ScanVerdict.DENY
-    assert "detect-secrets" in result.reason
+    assert result.reason.startswith("detect-secrets:")
+
+
+def test_sanitizer_never_returns_not_run() -> None:
+    sanitizer = RegexSanitizer()
+
+    assert sanitizer.scan(CLEAN_CODE).verdict in {ScanVerdict.ALLOW, ScanVerdict.DENY}
+    assert sanitizer.scan('password = "hunter2"').verdict in {
+        ScanVerdict.ALLOW,
+        ScanVerdict.DENY,
+    }
 
 
 def test_deny_is_terminal_and_repeatable() -> None:

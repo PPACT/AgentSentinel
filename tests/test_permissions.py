@@ -11,7 +11,11 @@ from agentsentinel.governance.permissions import (
     ensure_mode_allowed,
     preflight,
 )
-from agentsentinel.governance.sanitizer import DenyAllSanitizer, ScanResult
+from agentsentinel.governance.sanitizer import (
+    AllowAllSanitizer,
+    DenyAllSanitizer,
+    ScanResult,
+)
 
 
 def test_force_push_is_always_denied() -> None:
@@ -79,16 +83,23 @@ def test_preflight_skips_scan_when_matrix_already_denies() -> None:
     result = preflight(MatrixPermissionPolicy(), spy, "git_reset_to_baseline", "Coder", "anything")
 
     assert result.decision is PermissionDecision.DENY
+    assert result.scan_result is ScanVerdict.NOT_RUN
     assert spy.calls == 0
     assert isinstance(result, PermissionCheck)
 
 
-def test_preflight_allows_clean_payload() -> None:
-    from agentsentinel.governance.sanitizer import AllowAllSanitizer
+def test_preflight_ask_never_fakes_scan_result() -> None:
+    result = preflight(MatrixPermissionPolicy(), AllowAllSanitizer(), "git_push", "Manager", "x")
 
+    assert result.decision is PermissionDecision.ASK
+    assert result.scan_result is ScanVerdict.NOT_RUN
+
+
+def test_preflight_allows_clean_payload() -> None:
     result = preflight(
         MatrixPermissionPolicy(), AllowAllSanitizer(), "git_push", "Orchestrator", ""
     )
 
     assert result.decision is PermissionDecision.ALLOW
     assert result.scan_result is ScanVerdict.ALLOW
+    assert result.reason == ""

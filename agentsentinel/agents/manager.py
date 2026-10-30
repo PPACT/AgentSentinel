@@ -19,6 +19,9 @@ from agentsentinel.tools.git_ops import GitOps, ScanDeniedError
 from agentsentinel.workspace import Workspace
 
 AUDIT_LOG_NAME = "push-log.jsonl"
+PERMISSION_DENIED_REASON = "PERMISSION_DENIED"
+SCAN_DENIED_PREFIX = "SCAN_DENIED:"
+REVERT_NO_SCAN_REASON = "SCAN_NOT_REQUIRED"
 
 
 class Manager:
@@ -60,12 +63,19 @@ class Manager:
         """权限 + 扫描 → 提交 → 打基线 → 推送；DENY 为终态，不重试。"""
         check = preflight(self._policy, self._sanitizer, "git_push", caller, payload)
         if check.decision is not PermissionDecision.ALLOW:
+            if check.scan_result is ScanVerdict.NOT_RUN:
+                scan_result = ScanVerdict.NOT_RUN
+                reason = PERMISSION_DENIED_REASON
+            else:
+                scan_result = ScanVerdict.DENY
+                reason = f"{SCAN_DENIED_PREFIX}{check.reason}"
             self._write_audit(
                 caller=caller,
                 commit_hash="",
-                scan_result=check.scan_result,
+                scan_result=scan_result,
                 test_status=test_status,
                 action=ActionType.PUSH,
+                reason=reason,
             )
             return False
 
@@ -73,7 +83,7 @@ class Manager:
         self._git_ops.tag_baseline(f"baseline-{commit_hash}", caller=caller)
         try:
             self._git_ops.push(caller=caller, payload=payload)
-        except ScanDeniedError:
+        except ScanDeniedError as exc:
             # 工具层再次拦截；审计后终止，不重试。
             self._write_audit(
                 caller=caller,
@@ -81,6 +91,7 @@ class Manager:
                 scan_result=ScanVerdict.DENY,
                 test_status=test_status,
                 action=ActionType.PUSH,
+                reason=f"{SCAN_DENIED_PREFIX}{exc}",
             )
             return False
 
@@ -90,6 +101,7 @@ class Manager:
             scan_result=check.scan_result,
             test_status=test_status,
             action=ActionType.PUSH,
+            reason="",
         )
         return True
 
@@ -100,19 +112,22 @@ class Manager:
             self._write_audit(
                 caller=caller,
                 commit_hash=ref,
-                scan_result=ScanVerdict.ALLOW,
+                scan_result=ScanVerdict.NOT_RUN,
                 test_status=test_status,
                 action=ActionType.REVERT,
+                reason=PERMISSION_DENIED_REASON,
             )
             raise PermissionError(f"{caller} 无权执行回退")
 
         self._git_ops.reset_to_baseline(ref, caller=caller)
+        # 回退不涉及内容扫描，如实记录 NOT_RUN。
         self._write_audit(
             caller=caller,
             commit_hash=ref,
-            scan_result=ScanVerdict.ALLOW,
+            scan_result=ScanVerdict.NOT_RUN,
             test_status=test_status,
             action=ActionType.REVERT,
+            reason=REVERT_NO_SCAN_REASON,
         )
 
     def _write_audit(
@@ -122,6 +137,7 @@ class Manager:
         scan_result: ScanVerdict,
         test_status: TestStatus,
         action: ActionType,
+        reason: str,
     ) -> None:
         AuditLogger(self.audit_log_path).record(
             AuditRecord(
@@ -131,5 +147,6 @@ class Manager:
                 scan_result=scan_result,
                 test_result=test_status,
                 action_type=action,
+                reason=reason,
             )
         )

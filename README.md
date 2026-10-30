@@ -27,7 +27,7 @@
 - 🧠 **主管编排模式 (Supervisor Pattern)**：主编排 Agent 统筹全局，专家 Agent 独立执行，上下文物理隔离，避免长任务带来的上下文溢出。
 - 🚫 **不可绕过的脱敏拦截**：代码与文档在推送前强制经过静态扫描，基于底层权限系统（ALLOW/DENY/ASK），一旦发现敏感信息即刻终止，**拒绝自行重试绕过**。
 - 🔄 **版本回退与闭环反馈**：测试失败自动反馈至代码 Agent；严重故障时，由主编排一键触发仓库版本回退（Revert to Baseline）。
-- 📝 **全链路审计日志**：每次操作生成结构化记录（`workspace/audit/push-log.jsonl`），确保每一次推送、拦截和回退都有迹可循。
+- 📝 **全链路审计日志**：每次操作生成结构化记录（`audit/push-log.jsonl`），确保每一次推送、拦截和回退都有迹可循。
 - 🛠️ **基于 AgentScope 构建**：利用共享 Workspace 交换产物，天然支持大负载上下文卸载（Offloading）。
 
 ---
@@ -91,8 +91,8 @@ cd AgentSentinel
 
 # 初始化 Python 3.12 虚拟环境（严格遵守 AGENTS.md 规则）
 uv venv --python 3.12
-.venv\Scripts\activate      # Windows（本项目主要在 Windows 下开发）
-source .venv/bin/activate   # Linux/macOS
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate   # Windows
 
 # 安装依赖
 uv pip install -r requirements.txt
@@ -109,13 +109,10 @@ GIT_USER_EMAIL="bot@agentsentinel.local"
 GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 ```
 
-> 待确认：以上变量名尚未在 `agentsentinel/` 源码中落地，最终以配置模块为准。
-
 ### 3. 启动流水线
 
 ```python
 # main.py (示例)
-# 待确认：`pipeline` / `agents` 模块尚未在源码中落地；模块路径、类名与构造参数以最终实现为准。
 from agentsentinel.pipeline import TeamPipeline
 from agentsentinel.agents import Orchestrator, Coder, Tester, Writer, Manager
 

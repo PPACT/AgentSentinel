@@ -1,10 +1,13 @@
-"""五角色接口与 S1 桩实现；真实角色与 AgentScope 接入见 M3。"""
+"""五角色实现与组合接口；真实模型在 M4 注入。"""
 
 from agentsentinel.roles.base import (
     AgentResult,
     AgentRole,
     OrchestrationResult,
     PipelineOutcome,
+    RoleSpec,
+    build_role_agent,
+    load_prompt,
 )
 from agentsentinel.roles.coder import Coder
 from agentsentinel.roles.manager import Manager
@@ -20,6 +23,9 @@ __all__ = [
     "OrchestrationResult",
     "Orchestrator",
     "PipelineOutcome",
+    "RoleSpec",
     "Tester",
     "Writer",
+    "build_role_agent",
+    "load_prompt",
 ]

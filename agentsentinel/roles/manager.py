@@ -6,6 +6,9 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agentscope.agent import Agent
+from agentscope.model import ChatModelBase
+
 from agentsentinel.audit import AuditLogger
 from agentsentinel.contracts import ActionType, AuditRecord, ScanVerdict, TestStatus
 from agentsentinel.governance.permissions import (
@@ -15,6 +18,7 @@ from agentsentinel.governance.permissions import (
     preflight,
 )
 from agentsentinel.governance.sanitizer import Sanitizer
+from agentsentinel.roles.base import RoleSpec, build_role_agent
 from agentsentinel.tools.git_ops import GitOps, ScanDeniedError
 from agentsentinel.workspace import Workspace
 
@@ -36,6 +40,14 @@ class Manager:
         "git_reset_to_baseline",
         "audit_logger",
     )
+    spec: RoleSpec = RoleSpec(
+        name="Manager",
+        prompt_name="manager",
+        tools=tools,
+    )
+
+    def build_agent(self, model: ChatModelBase) -> Agent:
+        return build_role_agent(self.spec, model)
 
     def __init__(
         self,

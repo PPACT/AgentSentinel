@@ -80,12 +80,14 @@ def test_manager_owns_high_risk_tools() -> None:
     assert "git_reset_to_baseline" in Manager.tools
 
 
-def test_prompt_placeholders_exist_and_are_marked() -> None:
+def test_prompts_exist_and_are_not_placeholders() -> None:
     prompt_dir = Path(agentsentinel.__file__).parent / "prompts"
     for role in ("orchestrator", "coder", "tester", "writer", "manager"):
         prompt = prompt_dir / f"{role}.md"
         assert prompt.is_file()
-        assert "TODO(M3)" in prompt.read_text(encoding="utf-8")
+        text = prompt.read_text(encoding="utf-8")
+        assert text.strip()
+        assert "TODO(M3)" not in text
 
 
 def test_stub_git_ops_only_records_calls() -> None:

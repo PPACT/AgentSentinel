@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from agentsentinel.agents import (
+from agentsentinel.governance.permissions import MatrixPermissionPolicy, PermissionPolicy
+from agentsentinel.governance.sanitizer import RegexSanitizer, Sanitizer
+from agentsentinel.roles import (
     Coder,
     Manager,
     Orchestrator,
@@ -15,8 +17,6 @@ from agentsentinel.agents import (
     Tester,
     Writer,
 )
-from agentsentinel.governance.permissions import MatrixPermissionPolicy, PermissionPolicy
-from agentsentinel.governance.sanitizer import RegexSanitizer, Sanitizer
 from agentsentinel.tools.git_ops import GitOps, StubGitOps
 from agentsentinel.workspace import Workspace
 

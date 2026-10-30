@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime
 
-from agentsentinel.agents.base import AgentResult
 from agentsentinel.contracts import TestReport, TestStatus
+from agentsentinel.roles.base import AgentResult
 from agentsentinel.workspace import Workspace
 
 

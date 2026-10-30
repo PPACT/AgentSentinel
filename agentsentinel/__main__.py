@@ -3,8 +3,8 @@
 import argparse
 from collections.abc import Sequence
 
-from agentsentinel.agents import PipelineOutcome
 from agentsentinel.pipeline import StubPipeline
+from agentsentinel.roles import PipelineOutcome
 
 
 def main(argv: Sequence[str] | None = None) -> int:

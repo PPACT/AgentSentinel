@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from agentsentinel.__main__ import main
-from agentsentinel.agents import PipelineOutcome
 from agentsentinel.governance import DenyAllSanitizer
 from agentsentinel.pipeline import StubPipeline
+from agentsentinel.roles import PipelineOutcome
 from agentsentinel.tools import StubGitOps
 from agentsentinel.workspace import Workspace
 

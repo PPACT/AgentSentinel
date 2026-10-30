@@ -1,6 +1,6 @@
 """文档 Agent 的 S1 确定性桩；真实文档同步见 M3。"""
 
-from agentsentinel.agents.base import AgentResult
+from agentsentinel.roles.base import AgentResult
 from agentsentinel.workspace import Workspace
 
 SUMMARY_LIMIT = 200

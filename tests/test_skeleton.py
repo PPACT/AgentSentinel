@@ -7,14 +7,6 @@ from pathlib import Path
 import pytest
 
 import agentsentinel
-from agentsentinel.agents import (
-    AgentRole,
-    Coder,
-    Manager,
-    Orchestrator,
-    Tester,
-    Writer,
-)
 from agentsentinel.contracts import ScanVerdict, TestStatus
 from agentsentinel.governance import (
     AllowAllPolicy,
@@ -25,6 +17,14 @@ from agentsentinel.governance import (
 from agentsentinel.governance.permissions import PermissionPolicy
 from agentsentinel.governance.sanitizer import Sanitizer
 from agentsentinel.pipeline import Pipeline
+from agentsentinel.roles import (
+    AgentRole,
+    Coder,
+    Manager,
+    Orchestrator,
+    Tester,
+    Writer,
+)
 from agentsentinel.tools import GitOps, ScanDeniedError, StubGitOps
 from agentsentinel.workspace import Workspace
 
@@ -34,13 +34,13 @@ SKELETON_MODULES = (
     "agentsentinel.governance.permissions",
     "agentsentinel.tools",
     "agentsentinel.tools.git_ops",
-    "agentsentinel.agents",
-    "agentsentinel.agents.base",
-    "agentsentinel.agents.orchestrator",
-    "agentsentinel.agents.coder",
-    "agentsentinel.agents.tester",
-    "agentsentinel.agents.writer",
-    "agentsentinel.agents.manager",
+    "agentsentinel.roles",
+    "agentsentinel.roles.base",
+    "agentsentinel.roles.orchestrator",
+    "agentsentinel.roles.coder",
+    "agentsentinel.roles.tester",
+    "agentsentinel.roles.writer",
+    "agentsentinel.roles.manager",
     "agentsentinel.pipeline",
     "agentsentinel.__main__",
 )

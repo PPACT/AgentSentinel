@@ -2,13 +2,13 @@
 
 from pathlib import Path
 
-from agentsentinel.agents.base import (
+from agentsentinel.contracts import TestStatus
+from agentsentinel.roles.base import (
     AgentRole,
     OrchestrationResult,
     PipelineOutcome,
 )
-from agentsentinel.agents.manager import Manager
-from agentsentinel.contracts import TestStatus
+from agentsentinel.roles.manager import Manager
 from agentsentinel.workspace import Workspace
 
 

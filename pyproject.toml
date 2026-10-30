@@ -7,6 +7,9 @@ src = ["agentsentinel", "tests"]
 # ruff format 会重排 Markdown 里的 Python 代码块；文档归文档侧，不在此处格式化。
 extend-exclude = ["README.md", "docs"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["agentsentinel"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

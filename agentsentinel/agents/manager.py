@@ -1,6 +1,6 @@
-"""管理 Agent 的 S1 骨架：扫描、推送、回退一律走接口与审计。
+"""管理 Agent：扫描、推送、回退一律走治理接口并写审计。
 
-S1 不执行真实 git；权限矩阵与调用者鉴权的完整实现见 M2。
+所有审计集中在本类写入，避免同一操作产生重复 JSONL 记录。
 """
 
 from datetime import UTC, datetime
@@ -8,12 +8,16 @@ from pathlib import Path
 
 from agentsentinel.audit import AuditLogger
 from agentsentinel.contracts import ActionType, AuditRecord, ScanVerdict, TestStatus
-from agentsentinel.governance.permissions import PermissionDecision, PermissionPolicy
+from agentsentinel.governance.permissions import (
+    ORCHESTRATOR_NAME,
+    PermissionDecision,
+    PermissionPolicy,
+    preflight,
+)
 from agentsentinel.governance.sanitizer import Sanitizer
-from agentsentinel.tools.git_ops import GitOps
+from agentsentinel.tools.git_ops import GitOps, ScanDeniedError
 from agentsentinel.workspace import Workspace
 
-ORCHESTRATOR_NAME = "Orchestrator"
 AUDIT_LOG_NAME = "push-log.jsonl"
 
 
@@ -53,43 +57,56 @@ class Manager:
         payload: str,
         test_status: TestStatus,
     ) -> bool:
-        """扫描 → 提交 → 打基线 → 推送；DENY 为终态，不重试。"""
-        decision = self._policy.check("git_push", caller)
-        if decision is not PermissionDecision.ALLOW:
-            # TODO(M2): 权限拒绝的审计记录与 ASK 流程。
-            return False
-
-        scan = self._sanitizer.scan(payload)
-        if not scan.allowed:
-            # DENY 是业务终态：记录拦截后立即返回，不重试、不推送。
+        """权限 + 扫描 → 提交 → 打基线 → 推送；DENY 为终态，不重试。"""
+        check = preflight(self._policy, self._sanitizer, "git_push", caller, payload)
+        if check.decision is not PermissionDecision.ALLOW:
             self._write_audit(
                 caller=caller,
                 commit_hash="",
-                scan_result=scan.verdict,
+                scan_result=check.scan_result,
                 test_status=test_status,
                 action=ActionType.PUSH,
             )
             return False
 
-        commit_hash = self._git_ops.commit(commit_message)
-        self._git_ops.tag_baseline(f"baseline-{commit_hash}")
-        self._git_ops.push()
+        commit_hash = self._git_ops.commit(commit_message, caller=caller)
+        self._git_ops.tag_baseline(f"baseline-{commit_hash}", caller=caller)
+        try:
+            self._git_ops.push(caller=caller, payload=payload)
+        except ScanDeniedError:
+            # 工具层再次拦截；审计后终止，不重试。
+            self._write_audit(
+                caller=caller,
+                commit_hash=commit_hash,
+                scan_result=ScanVerdict.DENY,
+                test_status=test_status,
+                action=ActionType.PUSH,
+            )
+            return False
+
         self._write_audit(
             caller=caller,
             commit_hash=commit_hash,
-            scan_result=scan.verdict,
+            scan_result=check.scan_result,
             test_status=test_status,
             action=ActionType.PUSH,
         )
         return True
 
     def revert(self, caller: str, ref: str, test_status: TestStatus) -> None:
-        """回退仅接受主编排调用。TODO(M2): 权限拒绝时写审计。"""
+        """回退仅接受主编排调用；拒绝也写审计（规范 §5）。"""
         decision = self._policy.check("git_reset_to_baseline", caller)
         if caller != ORCHESTRATOR_NAME or decision is not PermissionDecision.ALLOW:
+            self._write_audit(
+                caller=caller,
+                commit_hash=ref,
+                scan_result=ScanVerdict.ALLOW,
+                test_status=test_status,
+                action=ActionType.REVERT,
+            )
             raise PermissionError(f"{caller} 无权执行回退")
 
-        self._git_ops.reset_to_baseline(ref)
+        self._git_ops.reset_to_baseline(ref, caller=caller)
         self._write_audit(
             caller=caller,
             commit_hash=ref,

@@ -1,6 +1,7 @@
 """S1 骨架：模块可导入、接口齐备、角色工具边界可见。"""
 
 import importlib
+import json
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from agentsentinel.contracts import TestStatus
 from agentsentinel.governance import (
     AllowAllPolicy,
     AllowAllSanitizer,
+    MatrixPermissionPolicy,
 )
 from agentsentinel.governance.permissions import PermissionPolicy
 from agentsentinel.governance.sanitizer import Sanitizer
@@ -102,14 +104,52 @@ def test_stub_git_ops_only_records_calls() -> None:
     ]
 
 
-def test_revert_rejects_non_orchestrator(tmp_path: Path) -> None:
-    workspace = Workspace(tmp_path / "workspace")
-    manager = Manager(
+def _manager(
+    workspace: Workspace,
+    policy: PermissionPolicy | None = None,
+) -> Manager:
+    return Manager(
         workspace=workspace,
         sanitizer=AllowAllSanitizer(),
         git_ops=StubGitOps(),
-        policy=AllowAllPolicy(),
+        policy=policy if policy is not None else AllowAllPolicy(),
     )
+
+
+def test_revert_rejects_non_orchestrator(tmp_path: Path) -> None:
+    manager = _manager(Workspace(tmp_path / "workspace"))
 
     with pytest.raises(PermissionError):
         manager.revert("Coder", "baseline-ref", TestStatus.FAIL)
+
+
+def test_revert_rejection_is_audited(tmp_path: Path) -> None:
+    manager = _manager(Workspace(tmp_path / "workspace"))
+
+    with pytest.raises(PermissionError):
+        manager.revert("Coder", "baseline-ref", TestStatus.FAIL)
+
+    records = [
+        json.loads(line) for line in manager.audit_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["action_type"] == "revert"
+    assert records[-1]["caller"] == "Coder"
+    assert records[-1]["commit_hash"] == "baseline-ref"
+
+
+def test_publish_denied_by_policy_is_audited(tmp_path: Path) -> None:
+    manager = _manager(Workspace(tmp_path / "workspace"), MatrixPermissionPolicy())
+
+    published = manager.publish(
+        caller="Manager",
+        commit_message="feat: demo",
+        payload="clean content",
+        test_status=TestStatus.PASS,
+    )
+
+    assert published is False
+    records = [
+        json.loads(line) for line in manager.audit_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["action_type"] == "push"
+    assert records[-1]["caller"] == "Manager"

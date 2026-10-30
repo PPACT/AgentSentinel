@@ -15,8 +15,8 @@ from agentsentinel.agents import (
     Tester,
     Writer,
 )
-from agentsentinel.governance.permissions import AllowAllPolicy, PermissionPolicy
-from agentsentinel.governance.sanitizer import AllowAllSanitizer, Sanitizer
+from agentsentinel.governance.permissions import MatrixPermissionPolicy, PermissionPolicy
+from agentsentinel.governance.sanitizer import RegexSanitizer, Sanitizer
 from agentsentinel.tools.git_ops import GitOps, StubGitOps
 from agentsentinel.workspace import Workspace
 
@@ -53,9 +53,9 @@ class StubPipeline:
         self._workspace.ensure()
         manager = Manager(
             workspace=self._workspace,
-            sanitizer=sanitizer if sanitizer is not None else AllowAllSanitizer(),
+            sanitizer=sanitizer if sanitizer is not None else RegexSanitizer(),
             git_ops=git_ops if git_ops is not None else StubGitOps(),
-            policy=policy if policy is not None else AllowAllPolicy(),
+            policy=policy if policy is not None else MatrixPermissionPolicy(),
         )
         self._manager = manager
         self._orchestrator = Orchestrator(

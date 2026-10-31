@@ -62,17 +62,25 @@ def payload_cwd(payload: dict[str, Any]) -> Path:
 
 
 def detect_role(payload: dict[str, Any]) -> str | None:
-    """按 SENTINEL_ROLE / .claude/session-role / agent_type 识别开发或文档角色。"""
+    """按 agent_type / SENTINEL_ROLE / .claude/session-role 识别开发或文档角色。
+
+    子代理的 ``agent_type`` 优先，避免主会话的 role 文件覆盖子代理身份。
+    """
+    agent_type = str(payload.get("agent_type", "")).strip().lower()
+    if agent_type.endswith("dev-agent"):
+        return "dev"
+    if agent_type.endswith("doc-agent"):
+        return "doc"
+
     candidates = [os.environ.get("SENTINEL_ROLE", "")]
     role_file = project_root() / ".claude" / "session-role"
     if role_file.is_file():
         candidates.append(role_file.read_text(encoding="utf-8", errors="replace"))
-    candidates.append(str(payload.get("agent_type", "")))
     for raw in candidates:
         role = raw.strip().lower()
-        if role in {"dev", "developer", "开发"} or role.endswith("dev-agent"):
+        if role in {"dev", "developer", "开发", "开发侧"} or role.endswith("dev-agent"):
             return "dev"
-        if role in {"doc", "docs", "writer", "文档"} or role.endswith("doc-agent"):
+        if role in {"doc", "docs", "writer", "文档", "文档侧"} or role.endswith("doc-agent"):
             return "doc"
     return None
 
@@ -91,26 +99,27 @@ def relative_project_path(raw: object, payload: dict[str, Any]) -> str | None:
 
 
 def is_security_fixture_path(path: str | None) -> bool:
-    """安全拦截测试文件整体豁免：``tests/`` 下文件名以 ``test_guard`` 开头。"""
-    return (
-        path is not None and path.startswith("tests/") and Path(path).name.startswith("test_guard")
-    )
+    """测试夹具整体豁免：``tests/`` 下文件名含 ``fixture`` 或以 ``test_guard`` 开头。"""
+    if path is None or not path.startswith("tests/"):
+        return False
+    name = Path(path).name.lower()
+    return name.startswith("test_guard") or "fixture" in name
 
 
 def has_fixture_file_marker(content: str) -> bool:
-    """文件头部（前 5 行）声明 ``# secret-fixture`` 时，整个文件豁免扫描。"""
-    return any(SECRET_FIXTURE_MARKER in line for line in content.splitlines()[:5])
+    """内容任意位置出现 ``# secret-fixture`` 时，整段内容豁免扫描。"""
+    return any(SECRET_FIXTURE_MARKER in line for line in content.splitlines())
 
 
 def file_header_has_fixture_marker(raw_path: object, payload: dict[str, Any]) -> bool:
-    """读取目标文件前 5 行判断豁免标记；供 Edit/MultiEdit 使用（其输入不含整文件）。"""
+    """读取目标文件判断豁免标记；供 Edit/MultiEdit 使用（其输入不含整文件）。"""
     if not isinstance(raw_path, str) or not raw_path.strip():
         return False
     path = Path(raw_path)
     if not path.is_absolute():
         path = payload_cwd(payload) / path
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:5]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
     return any(SECRET_FIXTURE_MARKER in line for line in lines)

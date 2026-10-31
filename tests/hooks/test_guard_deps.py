@@ -133,3 +133,15 @@ def test_unrelated_command_is_allowed(tmp_path: Path) -> None:
     result = run_hook("guard_deps.py", _bash("ls -la", tmp_path), project_dir=tmp_path)
 
     _assert_allowed(result)
+
+
+def test_uv_run_pytest_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(
+        run_hook("guard_deps.py", _bash("uv run pytest -q", tmp_path), project_dir=tmp_path)
+    )
+
+
+def test_uv_run_ruff_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(
+        run_hook("guard_deps.py", _bash("uv run ruff check .", tmp_path), project_dir=tmp_path)
+    )

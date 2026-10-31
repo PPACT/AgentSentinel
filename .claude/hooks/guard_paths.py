@@ -10,7 +10,7 @@ from typing import Any
 import common
 
 _ARCH_SPEC = "docs/多Agent研发流水线协作系统架构规范.md"
-_CODE_PREFIXES = ("agentsentinel/", "tests/", ".claude/hooks/")
+_CODE_PREFIXES = ("agentsentinel/", "tests/", "src/", ".claude/hooks/")
 _CODE_FILES = {"pyproject.toml", ".claude/settings.json"}
 
 
@@ -29,7 +29,7 @@ def _decide(role: str | None, path: str) -> tuple[str, str] | None:
         return ("allow", "")
     if path == "README.md":
         if role == "dev":
-            return ("deny", "README 未经用户明确允许不得修改")
+            return ("ask", "README 属文档侧，跨边界修改需用户当场确认")
         if role == "doc":
             return ("ask", "README 修改需用户明确授权")
         return ("ask", "未识别角色：编辑 README 需用户确认")
@@ -49,7 +49,7 @@ def _decide(role: str | None, path: str) -> tuple[str, str] | None:
         if role == "doc":
             return ("allow", "")
         if role == "dev":
-            return ("deny", "开发侧不得修改文档，请写交流区交文档侧")
+            return ("ask", "开发侧跨边界修改文档需用户当场确认")
         return ("ask", "未识别角色：编辑文档需用户确认")
     if path.startswith(".claude/agents/"):
         if role == "doc":

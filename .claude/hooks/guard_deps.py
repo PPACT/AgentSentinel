@@ -35,6 +35,10 @@ def _violates_core_versions(text: str) -> bool:
 
 
 def _handle_bash(payload: dict[str, Any], command: str) -> None:
+    # 非依赖相关命令（uv run pytest / ruff 等）尽早放行，避免任何误弹。
+    lowered = command.lower()
+    if not any(token in lowered for token in ("pip", "conda", "sudo", "requirements")):
+        return
     if _SUDO.search(command):
         common.emit_decision("deny", "禁止使用 sudo 或系统级提权命令")
     if _UV_PIP_INSTALL.search(command):

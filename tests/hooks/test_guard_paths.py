@@ -33,10 +33,10 @@ def _assert_allowed(result: subprocess.CompletedProcess[str]) -> None:
     assert result.stdout.strip() == ""
 
 
-def test_dev_cannot_write_readme(tmp_path: Path) -> None:
+def test_dev_readme_write_asks(tmp_path: Path) -> None:
     output = hook_output(_run(tmp_path / "README.md", tmp_path, "dev"))
 
-    assert output["permissionDecision"] == "deny"
+    assert output["permissionDecision"] == "ask"
 
 
 def test_doc_readme_write_asks(tmp_path: Path) -> None:
@@ -61,8 +61,33 @@ def test_doc_cannot_write_code(tmp_path: Path) -> None:
     assert output["permissionDecision"] == "deny"
 
 
-def test_dev_cannot_write_docs(tmp_path: Path) -> None:
+def test_dev_docs_write_asks(tmp_path: Path) -> None:
     output = hook_output(_run(tmp_path / "docs" / "guide.md", tmp_path, "dev"))
+
+    assert output["permissionDecision"] == "ask"
+
+
+def test_dev_can_write_src(tmp_path: Path) -> None:
+    _assert_allowed(_run(tmp_path / "src" / "main.py", tmp_path, "dev"))
+
+
+def test_agent_type_takes_priority_over_session_role(tmp_path: Path) -> None:
+    payload: dict[str, Any] = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(tmp_path / "tests" / "test_x.py"), "content": "x\n"},
+        "cwd": str(tmp_path),
+        "agent_type": "doc-agent",
+    }
+
+    output = hook_output(
+        run_hook(
+            "guard_paths.py",
+            payload,
+            project_dir=tmp_path,
+            env={"SENTINEL_ROLE": "dev"},
+        )
+    )
 
     assert output["permissionDecision"] == "deny"
 

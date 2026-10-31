@@ -127,6 +127,28 @@ def test_file_header_marker_exempts_whole_content(tmp_path: Path) -> None:
     _assert_allowed(_run(content, tmp_path))
 
 
+def test_fixture_filename_is_exempt(tmp_path: Path) -> None:
+    sample = "sk_" + "live_" + "a1" * 12
+    payload: dict[str, Any] = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": str(tmp_path / "tests" / "fixture_data.py"),
+            "content": f'key = "{sample}"\n',
+        },
+        "cwd": str(tmp_path),
+    }
+
+    _assert_allowed(run_hook("guard_fixtures.py", payload, project_dir=tmp_path))
+
+
+def test_marker_anywhere_exempts_whole_content(tmp_path: Path) -> None:
+    sample = "sk_" + "live_" + "a1" * 12
+    content = "\n".join(["line = 0"] * 9) + "\n# secret-fixture\n" + f'key = "{sample}"\n'
+
+    _assert_allowed(_run(content, tmp_path))
+
+
 def test_edit_is_exempt_when_existing_file_header_has_marker(tmp_path: Path) -> None:
     target = tmp_path / "fixture.py"
     body = "\n".join(f"line{index} = {index}" for index in range(10))

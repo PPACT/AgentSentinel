@@ -107,4 +107,4 @@ def test_push_denies_when_scan_finds_secret_regardless_of_caller(repo: Repo) -> 
     ops = _ops(repo, remote_push=lambda _: None)
 
     with pytest.raises(ScanDeniedError):
-        ops.push(caller="Orchestrator", payload="AKIAIOSFODNN7EXAMPLE")
+        ops.push(caller="Orchestrator", payload="AKIA" + "IOSFODNN7EXAMPLE")

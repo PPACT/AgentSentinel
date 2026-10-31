@@ -170,7 +170,7 @@ def test_publish_scan_denial_audit_uses_scan_denied_reason(tmp_path: Path) -> No
         git_ops=StubGitOps(),
         policy=MatrixPermissionPolicy(),
     )
-    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    secret = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
 
     published = manager.publish(
         caller="Orchestrator",

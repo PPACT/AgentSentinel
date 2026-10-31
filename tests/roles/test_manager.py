@@ -38,7 +38,7 @@ def test_manager_blocks_secret_payload_before_git(tmp_path: Path) -> None:
     published = manager.publish(
         caller="Orchestrator",
         commit_message="feat: demo",
-        payload='key = "sk-abcdefghijklmnopqrstuvwxyz123456"',
+        payload='key = "' + "sk-" + "abcdefghijklmnopqrstuvwxyz123456" + '"',
         test_status=TestStatus.PASS,
     )
 

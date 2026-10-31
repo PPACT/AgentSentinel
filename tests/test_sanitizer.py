@@ -44,7 +44,8 @@ def test_password_pattern_is_denied() -> None:
 
 
 def test_id_card_number_is_denied() -> None:
-    result = RegexSanitizer().scan("身份证：11010519491231002X")
+    # 999999 不是有效行政区划码，且校验位无效：只验证格式匹配，不对应任何真实身份。
+    result = RegexSanitizer().scan("身份证：999999199001011234")
 
     assert result.verdict is ScanVerdict.DENY
     assert result.reason.startswith("custom:id_card")

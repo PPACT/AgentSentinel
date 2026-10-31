@@ -103,7 +103,7 @@ uv pip install -r requirements.txt
 请在项目根目录创建 `.env` 文件，配置大模型 API Key 及 Git 凭证。⚠️ 注意：请务必确保 `.env` 文件已添加到 `.gitignore` 中，防止敏感凭证被意外提交。
 
 ```env
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxx
+OPENAI_API_KEY=<你的 API Key，形如 sk-<字母数字串>>
 GIT_USER_NAME="AgentSentinel Bot"
 GIT_USER_EMAIL="bot@agentsentinel.local"
 GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"

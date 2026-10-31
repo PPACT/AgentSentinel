@@ -22,7 +22,6 @@ def run_hook(
 ) -> subprocess.CompletedProcess[str]:
     process_env = os.environ.copy()
     process_env["PYTHONUTF8"] = "1"
-    process_env.pop("SENTINEL_ROLE", None)
     process_env["CLAUDE_PROJECT_DIR"] = str(project_dir or REPO_ROOT)
     if env is not None:
         process_env.update(env)

@@ -1,8 +1,4 @@
-"""Hook 公共工具：stdin 解析、项目根定位、角色识别、密钥/PII 扫描与统一输出。
-
-所有脚本都从 stdin 读取 UTF-8 JSON（Windows 下按字节读再解码），
-输出通过 JSON 的 ``hookSpecificOutput`` 交给 Claude Code。
-"""
+"""Hook 公共工具：stdin 解析、项目根定位、路径归一化与密钥/PII 扫描。"""
 
 from __future__ import annotations
 
@@ -17,10 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# 显式假数据标记：同一行出现即由人工确认为测试夹具，扫描放行。
 SECRET_FIXTURE_MARKER = "# secret-fixture"
 
-# 数据化白名单，便于审阅；命中任一模式的行不参与密钥扫描。
+# 数据化占位符白名单：明显是示例/占位值时不参与密钥扫描。
 WHITELIST_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)\bsk[_-]test[_-]"),
     re.compile(r"(?i)\b(?:x{8,}|0{8,}|\*{6,}|\.{6,})\b"),
@@ -34,7 +29,6 @@ _ID_CHECK_CODES = "10X98765432"
 
 
 def project_root() -> Path:
-    """优先使用 Claude Code 注入的项目根，便于测试与子目录运行。"""
     override = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
     return Path(override).resolve() if override else PROJECT_ROOT
 
@@ -61,30 +55,6 @@ def payload_cwd(payload: dict[str, Any]) -> Path:
     return project_root()
 
 
-def detect_role(payload: dict[str, Any]) -> str | None:
-    """按 agent_type / SENTINEL_ROLE / .claude/session-role 识别开发或文档角色。
-
-    子代理的 ``agent_type`` 优先，避免主会话的 role 文件覆盖子代理身份。
-    """
-    agent_type = str(payload.get("agent_type", "")).strip().lower()
-    if agent_type.endswith("dev-agent"):
-        return "dev"
-    if agent_type.endswith("doc-agent"):
-        return "doc"
-
-    candidates = [os.environ.get("SENTINEL_ROLE", "")]
-    role_file = project_root() / ".claude" / "session-role"
-    if role_file.is_file():
-        candidates.append(role_file.read_text(encoding="utf-8", errors="replace"))
-    for raw in candidates:
-        role = raw.strip().lower()
-        if role in {"dev", "developer", "开发", "开发侧"} or role.endswith("dev-agent"):
-            return "dev"
-        if role in {"doc", "docs", "writer", "文档", "文档侧"} or role.endswith("doc-agent"):
-            return "doc"
-    return None
-
-
 def relative_project_path(raw: object, payload: dict[str, Any]) -> str | None:
     """把工具入参里的路径归一化为项目内 POSIX 相对路径；项目外返回 None。"""
     if not isinstance(raw, str) or not raw.strip():
@@ -96,33 +66,6 @@ def relative_project_path(raw: object, payload: dict[str, Any]) -> str | None:
         return path.resolve().relative_to(project_root()).as_posix()
     except ValueError:
         return None
-
-
-def is_security_fixture_path(path: str | None) -> bool:
-    """测试夹具整体豁免：``tests/`` 下文件名含 ``fixture`` 或以 ``test_guard`` 开头。"""
-    if path is None or not path.startswith("tests/"):
-        return False
-    name = Path(path).name.lower()
-    return name.startswith("test_guard") or "fixture" in name
-
-
-def has_fixture_file_marker(content: str) -> bool:
-    """内容任意位置出现 ``# secret-fixture`` 时，整段内容豁免扫描。"""
-    return any(SECRET_FIXTURE_MARKER in line for line in content.splitlines())
-
-
-def file_header_has_fixture_marker(raw_path: object, payload: dict[str, Any]) -> bool:
-    """读取目标文件判断豁免标记；供 Edit/MultiEdit 使用（其输入不含整文件）。"""
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        return False
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = payload_cwd(payload) / path
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return False
-    return any(SECRET_FIXTURE_MARKER in line for line in lines)
 
 
 def content_texts(tool_in: dict[str, Any]) -> list[str]:
@@ -142,9 +85,7 @@ def content_texts(tool_in: dict[str, Any]) -> list[str]:
     return texts
 
 
-def _line_is_whitelisted(line: str) -> bool:
-    if SECRET_FIXTURE_MARKER in line:
-        return True
+def _line_is_placeholder(line: str) -> bool:
     return any(pattern.search(line) for pattern in WHITELIST_PATTERNS)
 
 
@@ -167,17 +108,20 @@ def _mask_synthetic_ids(line: str) -> str:
     )
 
 
-def scan_secrets(content: str) -> str | None:
+def scan_secrets(content: str, *, honor_markers: bool = True) -> str | None:
     """返回命中原因（不含密钥明文）；未命中返回 None。
 
-    白名单行与合成身份证号会被屏蔽，保持原行号后交给项目 ``RegexSanitizer``。
+    ``honor_markers`` 为真时，含 ``# secret-fixture`` 的行放行；业务目录应传 False。
     """
     from agentsentinel.contracts import ScanVerdict
     from agentsentinel.governance.sanitizer import RegexSanitizer
 
     lines: list[str] = []
     for line in content.splitlines():
-        lines.append("" if _line_is_whitelisted(line) else _mask_synthetic_ids(line))
+        if (honor_markers and SECRET_FIXTURE_MARKER in line) or _line_is_placeholder(line):
+            lines.append("")
+        else:
+            lines.append(_mask_synthetic_ids(line))
     result = RegexSanitizer().scan("\n".join(lines))
     if result.verdict is ScanVerdict.DENY:
         return result.reason
@@ -204,7 +148,6 @@ def emit_context(text: str) -> None:
             "additionalContext": text,
         }
     }
-    # ASCII 转义避免 Windows cp936 控制台把 UTF-8 输出显示成乱码。
     print(json.dumps(payload))
 
 

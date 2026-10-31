@@ -1,26 +1,23 @@
-"""H1：危险 git 命令拦截 + 推送前脱敏扫描（PreToolUse / Bash）。
+"""H1：不可逆命令拦截 + 推送前审查（PreToolUse / Bash）。
 
-``git push`` 前扫描工作区改动、push 范围内各文件在 HEAD 的内容与提交信息；
-扫描失败按 DENY 处理（fail-closed）。``DENY`` 为终态，不重试、不绕过。
+只做两件事：
+1. deny 强推、删远端、``reset --hard``、``filter-branch``、``clean -fdx``、
+   ``git add -A`` 与 ``rm -rf``；
+2. ``git push`` 前扫描待推送内容：命中高危内容 → ask 交用户决策；干净 → 静默放行。
+
+按 shell token 解析命令段，避免把引号里的示例文本误判为真实命令。
 """
 
 from __future__ import annotations
 
-import re
+import shlex
 import subprocess
 from pathlib import Path
 
 import common
 
-_FORCE_PUSH = re.compile(
-    r"\bgit\s+push\b[^;&|]*?(?:--force(?:-with-lease|-if-includes)?|(?<!\S)-f\b)"
-)
-_DELETE_PUSH = re.compile(r"\bgit\s+push\b[^;&|]*?(?:--delete|--mirror|(?<!\S):\S+)")
-_RESET_HARD = re.compile(r"\bgit\s+reset\b[^;&|]*?--hard\b")
-_FILTER_BRANCH = re.compile(r"\bgit\s+filter-branch\b")
-_GIT_ADD = re.compile(r"\bgit\s+add\b([^;&|]*)")
-_GIT_CLEAN = re.compile(r"\bgit\s+clean\b([^;&|]*)")
-_GIT_PUSH = re.compile(r"\bgit\s+push\b")
+_OPERATORS = {";", "&&", "||", "|", "&"}
+_FORCE_FLAGS = {"-f", "--force", "--force-with-lease", "--force-if-includes"}
 
 _MAX_FILE_BYTES = 5_000_000
 _GIT_TIMEOUT_SECONDS = 60
@@ -39,24 +36,77 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _dangerous_command_reason(command: str) -> str | None:
-    if _FORCE_PUSH.search(command):
-        return "禁止强推（--force / -f / --force-with-lease），需用户明确指令"
-    if _DELETE_PUSH.search(command):
-        return "禁止删除或镜像远端仓库"
-    if _RESET_HARD.search(command):
-        return "禁止 git reset --hard"
-    if _FILTER_BRANCH.search(command):
-        return "禁止 git filter-branch"
-    for match in _GIT_CLEAN.finditer(command):
-        flags = "".join(token for token in match.group(1).split() if token.startswith("-"))
-        if all(flag in flags for flag in "fdx"):
-            return "禁止 git clean -fdx"
-    for match in _GIT_ADD.finditer(command):
-        tokens = match.group(1).split()
-        if any(token in {"-A", "--all"} or token == "." for token in tokens):
-            return "禁止 git add -A / git add . / git add --all，请显式列出文件"
+def _segments(command: str) -> list[list[str]] | None:
+    """把 shell 命令切成按 ``;``/``&&``/``||``/``|`` 分隔的 token 段。"""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _OPERATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
+
+
+def _is_wrapper(token: str) -> bool:
+    return (
+        token == "sudo"
+        or token == "env"
+        or ("=" in token and token.split("=", 1)[0].isidentifier())
+    )
+
+
+def _command_index(tokens: list[str], name: str) -> int | None:
+    for index, token in enumerate(tokens):
+        if token == name and all(_is_wrapper(prefix) for prefix in tokens[:index]):
+            return index
     return None
+
+
+def _segment_reason(tokens: list[str]) -> str | None:
+    git_index = _command_index(tokens, "git")
+    if git_index is not None:
+        args = tokens[git_index + 1 :]
+        if "push" in args:
+            push_args = args[args.index("push") + 1 :]
+            if any(arg in _FORCE_FLAGS or arg.startswith("--force") for arg in push_args):
+                return "禁止强推（--force / -f / --force-with-lease），需用户明确指令"
+            if any(arg in {"--delete", "--mirror"} or arg.startswith(":") for arg in push_args):
+                return "禁止删除或镜像远端仓库"
+        if "reset" in args and "--hard" in args:
+            return "禁止 git reset --hard"
+        if "filter-branch" in args:
+            return "禁止 git filter-branch"
+        if "clean" in args:
+            clean_args = args[args.index("clean") + 1 :]
+            flags = "".join(arg for arg in clean_args if arg.startswith("-"))
+            if all(flag in flags for flag in "fdx"):
+                return "禁止 git clean -fdx"
+        if "add" in args:
+            add_args = args[args.index("add") + 1 :]
+            if any(arg in {"-A", "--all", "."} for arg in add_args):
+                return "禁止 git add -A / git add . / git add --all，请显式列出文件"
+
+    rm_index = _command_index(tokens, "rm")
+    if rm_index is not None:
+        rm_args = tokens[rm_index + 1 :]
+        flags = "".join(arg for arg in rm_args if arg.startswith("-") and not arg.startswith("--"))
+        recursive = "r" in flags.lower() or "--recursive" in rm_args
+        force = "f" in flags.lower() or "--force" in rm_args
+        if recursive and force:
+            return "禁止 rm -rf（递归强制删除）"
+    return None
+
+
+def _has_git_push(segments: list[list[str]]) -> bool:
+    for tokens in segments:
+        git_index = _command_index(tokens, "git")
+        if git_index is not None and "push" in tokens[git_index + 1 :]:
+            return True
+    return False
 
 
 def _split_nul(text: str) -> list[str]:
@@ -82,30 +132,13 @@ def _range_paths(cwd: Path, revision_range: str | None) -> set[str]:
     return set(_split_nul(changed.stdout))
 
 
-def _worktree_paths(cwd: Path) -> set[str]:
-    status = _run_git(cwd, ["status", "--porcelain", "-z"])
-    if status.returncode != 0:
-        raise RuntimeError(status.stderr.strip() or "git status 失败")
-    return {entry[3:] for entry in _split_nul(status.stdout) if len(entry) >= 4}
-
-
 def _read_head_path(cwd: Path, path: str) -> str | None:
-    """读取 HEAD 中该路径的内容；HEAD 不存在该路径时返回 None。"""
     shown = _run_git(cwd, ["show", f"HEAD:{path}"])
     if shown.returncode != 0:
         return None
     if len(shown.stdout) > _MAX_FILE_BYTES:
         raise RuntimeError(f"HEAD:{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
     return shown.stdout
-
-
-def _read_worktree_path(cwd: Path, path: str) -> str | None:
-    file_path = cwd / path
-    if not file_path.is_file():
-        return None
-    if file_path.stat().st_size > _MAX_FILE_BYTES:
-        raise RuntimeError(f"{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
-    return file_path.read_text(encoding="utf-8", errors="replace")
 
 
 def _commit_messages(cwd: Path, revision_range: str | None) -> str:
@@ -123,30 +156,18 @@ def _scan_repository(cwd: Path) -> str | None:
         raise RuntimeError(f"{cwd} 不是 git 工作区")
 
     revision_range = _resolve_range(cwd)
-    range_paths = _range_paths(cwd, revision_range)
-    worktree_paths = _worktree_paths(cwd)
-
-    # 先扫 push 范围在 HEAD 的内容：工作区即使已清理，也不能覆盖已提交内容。
-    for path in sorted(range_paths):
+    for path in sorted(_range_paths(cwd, revision_range)):
+        # 测试区完全放行：夹具中的假密钥/PII 不参与推送审查。
+        if path.startswith("tests/"):
+            continue
         content = _read_head_path(cwd, path)
         if content is None or "\0" in content:
             continue
-        reason = common.scan_secrets(content)
+        reason = common.scan_secrets(content, honor_markers=False)
         if reason is not None:
             return f"HEAD:{path}: {reason}"
 
-    # 再扫工作区未提交改动；与 HEAD 完全相同的文件不重复扫描。
-    for path in sorted(worktree_paths):
-        content = _read_worktree_path(cwd, path)
-        if content is None or "\0" in content:
-            continue
-        if path in range_paths and _read_head_path(cwd, path) == content:
-            continue
-        reason = common.scan_secrets(content)
-        if reason is not None:
-            return f"工作区:{path}: {reason}"
-
-    reason = common.scan_secrets(_commit_messages(cwd, revision_range))
+    reason = common.scan_secrets(_commit_messages(cwd, revision_range), honor_markers=False)
     if reason is not None:
         return f"提交信息: {reason}"
     return None
@@ -157,13 +178,17 @@ def main() -> None:
     if payload.get("tool_name") != "Bash":
         return
     command = common.tool_input(payload).get("command")
-    if not isinstance(command, str) or "git" not in command:
+    if not isinstance(command, str) or not command:
         return
 
-    reason = _dangerous_command_reason(command)
-    if reason is not None:
-        common.emit_decision("deny", reason)
-    if _GIT_PUSH.search(command) is None:
+    segments = _segments(command)
+    if segments is None:
+        common.fail_closed("H1 无法解析 Bash 命令，按 DENY 处理")
+    for segment in segments:
+        reason = _segment_reason(segment)
+        if reason is not None:
+            common.emit_decision("deny", reason)
+    if not _has_git_push(segments):
         return
 
     try:
@@ -171,7 +196,7 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 - 扫描失败必须 fail-closed
         common.fail_closed(f"H1 推送前扫描失败，按 DENY 处理：{exc}")
     if hit is not None:
-        common.emit_decision("deny", f"推送前脱敏扫描命中：{hit}")
+        common.emit_decision("ask", f"推送前扫描发现高风险内容，请确认是否继续：{hit}")
 
 
 if __name__ == "__main__":

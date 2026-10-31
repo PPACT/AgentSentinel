@@ -1,12 +1,13 @@
-"""H4：PII / 密钥夹具守卫（PreToolUse / Edit|Write|MultiEdit|NotebookEdit）。
+"""H4：业务目录 PII / 密钥写入扫描（PreToolUse / Edit|Write|MultiEdit|NotebookEdit）。
 
-写入前扫描 ``content`` / ``new_string`` / ``new_source``；真实密钥与 PII 一律 DENY。
-合法假数据由 ``common.WHITELIST_PATTERNS`` 与 ``# secret-fixture`` 标记放行。
+``tests/**`` 完全不扫描；只检查 ``src/**`` 与 ``agentsentinel/**``。
 """
 
 from __future__ import annotations
 
 import common
+
+_BUSINESS_PREFIXES = ("agentsentinel/", "src/")
 
 
 def main() -> None:
@@ -16,22 +17,14 @@ def main() -> None:
     tool_in = common.tool_input(payload)
     raw_path = tool_in.get("file_path") or tool_in.get("notebook_path")
     path = common.relative_project_path(raw_path, payload)
-    # 安全拦截测试文件整体放行：文件名以 test_guard 开头，避免写夹具时反复拦截。
-    if common.is_security_fixture_path(path):
-        return
-    # Edit/MultiEdit 的 new_string 不含文件头；读取目标文件前 5 行判断整文件豁免。
-    if common.file_header_has_fixture_marker(raw_path, payload):
+    if path is None or not path.startswith(_BUSINESS_PREFIXES):
         return
     for text in common.content_texts(tool_in):
-        # 文件头部声明 # secret-fixture 时，整个文件视为已人工确认的夹具。
-        if common.has_fixture_file_marker(text):
-            continue
-        reason = common.scan_secrets(text)
+        reason = common.scan_secrets(text, honor_markers=False)
         if reason is not None:
             common.emit_decision(
                 "deny",
-                "检测到真实密钥或 PII；测试夹具请改用合成值并加 # secret-fixture 标记"
-                f"（命中：{reason}）",
+                f"业务目录禁止硬编码真实密钥或 PII（命中：{reason}）",
             )
 
 

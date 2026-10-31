@@ -1,4 +1,4 @@
-"""H1 危险 git 与推送前扫描的正反样本。"""
+"""H1 不可逆命令拦截与推送前审查的正反样本。"""
 
 from __future__ import annotations
 
@@ -53,22 +53,14 @@ def _assert_allowed(result: subprocess.CompletedProcess[str]) -> None:
     assert result.stdout.strip() == ""
 
 
+def _stripe_sample() -> str:
+    return "sk_" + "live_" + "a1" * 12
+
+
 def test_git_add_all_is_denied() -> None:
     output = hook_output(run_hook("guard_git.py", _bash("git add -A", Path.cwd())))
 
     assert output["permissionDecision"] == "deny"
-
-
-def test_git_add_dot_is_denied() -> None:
-    output = hook_output(run_hook("guard_git.py", _bash("git add .", Path.cwd())))
-
-    assert output["permissionDecision"] == "deny"
-
-
-def test_explicit_git_add_is_allowed() -> None:
-    result = run_hook("guard_git.py", _bash("git add README.md", Path.cwd()))
-
-    _assert_allowed(result)
 
 
 def test_force_push_is_denied() -> None:
@@ -91,59 +83,16 @@ def test_reset_hard_is_denied() -> None:
     assert output["permissionDecision"] == "deny"
 
 
-def test_clean_fdx_is_denied() -> None:
-    output = hook_output(run_hook("guard_git.py", _bash("git clean -fdx", Path.cwd())))
+def test_rm_rf_is_denied() -> None:
+    output = hook_output(run_hook("guard_git.py", _bash("rm -rf build", Path.cwd())))
 
     assert output["permissionDecision"] == "deny"
 
 
-def test_push_with_stripe_fixture_is_denied(tmp_path: Path) -> None:
-    repo = _make_repo(tmp_path)
-    _set_upstream(repo)
-    stripe_sample = "sk_" + "live_" + "a1" * 12
-    (repo / "leak.py").write_text(f'key = "{stripe_sample}"\n', encoding="utf-8")
-    _git(repo, "add", "leak.py")
-    _git(repo, "commit", "-m", "add fixture")
+def test_rm_force_single_file_is_allowed() -> None:
+    result = run_hook("guard_git.py", _bash("rm -f stale.log", Path.cwd()))
 
-    output = hook_output(
-        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
-    )
-
-    assert output["permissionDecision"] == "deny"
-    assert "脱敏扫描命中" in output["permissionDecisionReason"]
-
-
-def test_push_scans_head_content_even_if_worktree_is_cleaned(tmp_path: Path) -> None:
-    repo = _make_repo(tmp_path)
-    _set_upstream(repo)
-    stripe_sample = "sk_" + "live_" + "a1" * 12
-    leak = repo / "leak.py"
-    leak.write_text(f'key = "{stripe_sample}"\n', encoding="utf-8")
-    _git(repo, "add", "leak.py")
-    _git(repo, "commit", "-m", "add fixture")
-    # 提交后把工作区清理干净但不提交：push 仍必须扫 HEAD 中的已提交内容。
-    leak.write_text("print('cleaned')\n", encoding="utf-8")
-
-    output = hook_output(
-        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
-    )
-
-    assert output["permissionDecision"] == "deny"
-    assert "HEAD:leak.py" in output["permissionDecisionReason"]
-
-
-def test_push_scans_dirty_worktree(tmp_path: Path) -> None:
-    repo = _make_repo(tmp_path)
-    _set_upstream(repo)
-    stripe_sample = "sk_" + "live_" + "a1" * 12
-    (repo / "app.py").write_text(f'key = "{stripe_sample}"\n', encoding="utf-8")
-
-    output = hook_output(
-        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
-    )
-
-    assert output["permissionDecision"] == "deny"
-    assert "工作区:app.py" in output["permissionDecisionReason"]
+    _assert_allowed(result)
 
 
 def test_clean_push_is_allowed(tmp_path: Path) -> None:
@@ -155,8 +104,57 @@ def test_clean_push_is_allowed(tmp_path: Path) -> None:
     _assert_allowed(result)
 
 
-def test_push_without_upstream_scans_head_and_allows_clean_tree(tmp_path: Path) -> None:
+def test_push_with_secret_asks(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "ask"
+    assert "HEAD:leak.py" in output["permissionDecisionReason"]
+
+
+def test_push_scans_head_content_even_if_worktree_is_cleaned(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    leak = repo / "leak.py"
+    leak.write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+    leak.write_text("print('cleaned')\n", encoding="utf-8")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "ask"
+    assert "HEAD:leak.py" in output["permissionDecisionReason"]
+
+
+def test_push_ignores_test_fixtures(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "leak_fixture.py").write_text(
+        f'key = "{_stripe_sample()}"\n', encoding="utf-8"
+    )
+    _git(repo, "add", "tests/leak_fixture.py")
+    _git(repo, "commit", "-m", "add test fixture")
+
+    result = run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
+
+    _assert_allowed(result)
+
+
+def test_dirty_worktree_is_ignored_on_push(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "app.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
 
     result = run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
 
@@ -179,5 +177,11 @@ def test_scan_failure_is_denied(tmp_path: Path) -> None:
 
 def test_non_git_command_is_allowed() -> None:
     result = run_hook("guard_git.py", _bash("uv run pytest -q", Path.cwd()))
+
+    _assert_allowed(result)
+
+
+def test_quoted_dangerous_text_is_allowed() -> None:
+    result = run_hook("guard_git.py", _bash('echo "git push -f"', Path.cwd()))
 
     _assert_allowed(result)

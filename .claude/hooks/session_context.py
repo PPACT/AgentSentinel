@@ -31,7 +31,8 @@ def _entry_is_closed(label: str, body: str) -> bool:
         return re.search(r"^- 结论", body, re.MULTILINE) is not None or "结论（" in body
     if label == "已派":
         return "回执：已执行 ·" in body
-    return re.search(r"(?<!待)认单", body) is not None
+    # 只认明确措辞，避免把「暂不认单」「待认单」误判为已结案。
+    return "已认单" in body or "文档侧认单" in body
 
 
 def _unclosed_entries(exchange_text: str) -> tuple[list[str], int]:

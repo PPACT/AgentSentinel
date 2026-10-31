@@ -67,6 +67,36 @@ def test_injects_status_and_unclosed_entries(tmp_path: Path) -> None:
     assert "最近一次交接：2026-10-31 doc-agent → dev-agent：测试交接" in text
 
 
+def test_pending_acknowledgment_is_not_closed(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        """### [已交] pending review · 2026-10-31 · dev
+
+- 文档侧复核：暂不认单，仍需修正
+""",
+    )
+
+    text = str(hook_output(_run(tmp_path))["additionalContext"])
+
+    assert "未结案条目（1）" in text
+    assert "pending review" in text
+
+
+def test_explicit_acknowledgment_is_closed(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        """### [已交] acknowledged · 2026-10-31 · dev
+
+- 文档侧认单（2026-10-31）：ok
+""",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
 def test_no_noise_when_everything_is_closed(tmp_path: Path) -> None:
     _write_files(
         tmp_path,

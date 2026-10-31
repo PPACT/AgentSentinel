@@ -71,9 +71,9 @@ graph TD
 | Agent 角色 | 核心职责 | 关键技能 / 工具 (Skills) | 权限管控要点 |
 | :--- | :--- | :--- | :--- |
 | **Orchestrator** <br/>🧠 主编排 | 拆解需求、分派任务、全局状态维护、触发回退 | `TeamAssign`, `query_task_status`, `request_publish`, `request_revert` | 禁止直接执行代码或 Git 操作 |
-| **Coder** <br/>💻 代码专家 | 根据需求实现代码、根据测试报告修复 Bug | `file_edit`, `bash` (仅限构建/语法检查) | 禁止执行 `git` 命令 |
-| **Tester** <br/>🧪 测试专家 | 独立验证代码产物、输出结构化测试报告 | `bash` (执行测试), `regression-suite` | 必须与 Coder 上下文隔离，防自我评估偏差 |
-| **Writer** <br/>📝 文档专家 | 根据代码 Diff 更新技术文档、生成变更摘要 | `file_write`, `doc-consistency-check` | 必须明确反映已通过测试的实际变更 |
+| **Coder** <br/>💻 代码专家 | 根据需求实现代码、根据测试报告修复 Bug | `file_write`, `file_edit`, `bash` (仅限构建/语法检查) | 禁止执行 `git` 命令 |
+| **Tester** <br/>🧪 测试专家 | 独立验证代码产物、输出结构化测试报告 | `file_read`, `bash` (执行测试，含 `regression-suite`) | 必须与 Coder 上下文隔离，防自我评估偏差 |
+| **Writer** <br/>📝 文档专家 | 根据代码 Diff 更新技术文档、生成变更摘要 | `file_read`, `file_write`, `file_edit` (含 `doc-consistency-check`) | 必须明确反映已通过测试的实际变更 |
 | **Manager** <br/>🛡️ 管理专家 | 脱敏扫描、仓库推送、打基线、版本回退、写审计日志 | `sanitize_scan`, `git_commit`, `git_push`, `git_tag_baseline`, `git_reset_to_baseline`, `audit_logger` | 高危工具强制设为 `ASK`，`force push` 设为 `DENY` |
 
 ---

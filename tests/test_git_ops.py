@@ -79,7 +79,9 @@ def test_push_with_secret_is_blocked_before_remote(repo: Repo) -> None:
     ops = _ops(repo, remote_push=pushed.append)
 
     with pytest.raises(ScanDeniedError):
-        ops.push(caller="Orchestrator", payload='password = "hunter2"')
+        ops.push(
+            caller="Orchestrator", payload="pass" + 'word = "hunter2"'
+        )  # secret-fixture: 假密码
 
     assert pushed == []
 

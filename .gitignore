@@ -16,6 +16,7 @@ secrets*.json
 
 # ===== 本地 / 机器相关配置 =====
 .claude/settings.local.json
+.claude/session-role
 .claude/agents/
 .claude/skills/
 docs/local/

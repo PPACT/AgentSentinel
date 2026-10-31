@@ -170,12 +170,12 @@ def test_publish_scan_denial_audit_uses_scan_denied_reason(tmp_path: Path) -> No
         git_ops=StubGitOps(),
         policy=MatrixPermissionPolicy(),
     )
-    secret = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
+    sample_value = "sk-" + "a1" * 10  # secret-fixture: 假密钥
 
     published = manager.publish(
         caller="Orchestrator",
         commit_message="feat: demo",
-        payload=f'key = "{secret}"',
+        payload=f'key = "{sample_value}"',
         test_status=TestStatus.PASS,
     )
 
@@ -185,7 +185,7 @@ def test_publish_scan_denial_audit_uses_scan_denied_reason(tmp_path: Path) -> No
     ]
     assert records[-1]["scan_result"] == ScanVerdict.DENY.value
     assert str(records[-1]["reason"]).startswith("SCAN_DENIED:custom:api_key")
-    assert secret not in str(records[-1]["reason"])
+    assert sample_value not in str(records[-1]["reason"])
 
 
 def test_git_tool_second_scan_denial_is_audited(tmp_path: Path) -> None:

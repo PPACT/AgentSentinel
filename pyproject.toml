@@ -14,6 +14,8 @@ known-first-party = ["agentsentinel"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
+# hook 脚本以 `python .claude/hooks/<script>.py` 直接运行，`common` 是脚本同目录模块。
+mypy_path = ".claude/hooks"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

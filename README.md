@@ -27,14 +27,14 @@
 - 🧠 **主管编排模式 (Supervisor Pattern)**：主编排 Agent 统筹全局，专家 Agent 独立执行，上下文物理隔离，避免长任务带来的上下文溢出。
 - 🚫 **不可绕过的脱敏拦截**：代码与文档在推送前强制经过静态扫描，基于底层权限系统（ALLOW/DENY/ASK），一旦发现敏感信息即刻终止，**拒绝自行重试绕过**。
 - 🔄 **版本回退与闭环反馈**：测试失败自动反馈至代码 Agent；严重故障时，由主编排一键触发仓库版本回退（Revert to Baseline）。
-- 📝 **全链路审计日志**：每次操作生成结构化记录（`audit/push-log.jsonl`），确保每一次推送、拦截和回退都有迹可循。
+- 📝 **全链路审计日志**：每次操作生成结构化记录（`workspace/audit/push-log.jsonl`），确保每一次推送、拦截和回退都有迹可循。
 - 🛠️ **基于 AgentScope 构建**：利用共享 Workspace 交换产物，天然支持大负载上下文卸载（Offloading）。
 
 ---
 
 ## 🏗️ 系统架构 (Architecture)
 
-本项目采用 **TeamPipeline**（队长-成员）模式。主编排 Agent 作为中枢，通过共享工作区与工具调用调度四大专家。
+本项目采用 **Supervisor** 模式：`SentinelPipeline` 负责编排，主编排 Agent 作为中枢，通过共享工作区与工具调用调度四大专家。AgentScope 2.0.8 不提供 `TeamPipeline`，编排基于 `Agent` + 工具调用 + 会话状态机实现。
 
 ```mermaid
 graph TD
@@ -70,11 +70,11 @@ graph TD
 
 | Agent 角色 | 核心职责 | 关键技能 / 工具 (Skills) | 权限管控要点 |
 | :--- | :--- | :--- | :--- |
-| **Orchestrator** <br/>🧠 主编排 | 拆解需求、分派任务、全局状态维护、触发回退 | `TeamAssign`, `query_task_status` | 禁止直接执行代码或 Git 操作 |
+| **Orchestrator** <br/>🧠 主编排 | 拆解需求、分派任务、全局状态维护、触发回退 | `TeamAssign`, `query_task_status`, `request_publish`, `request_revert` | 禁止直接执行代码或 Git 操作 |
 | **Coder** <br/>💻 代码专家 | 根据需求实现代码、根据测试报告修复 Bug | `file_edit`, `bash` (仅限构建/语法检查) | 禁止执行 `git` 命令 |
 | **Tester** <br/>🧪 测试专家 | 独立验证代码产物、输出结构化测试报告 | `bash` (执行测试), `regression-suite` | 必须与 Coder 上下文隔离，防自我评估偏差 |
 | **Writer** <br/>📝 文档专家 | 根据代码 Diff 更新技术文档、生成变更摘要 | `file_write`, `doc-consistency-check` | 必须明确反映已通过测试的实际变更 |
-| **Manager** <br/>🛡️ 管理专家 | 脱敏扫描、仓库推送、打基线、版本回退、写审计日志 | `sanitize_scan`, `git_push`, `git_reset_to_baseline` | 高危工具强制设为 `ASK`，`force push` 设为 `DENY` |
+| **Manager** <br/>🛡️ 管理专家 | 脱敏扫描、仓库推送、打基线、版本回退、写审计日志 | `sanitize_scan`, `git_commit`, `git_push`, `git_tag_baseline`, `git_reset_to_baseline`, `audit_logger` | 高危工具强制设为 `ASK`，`force push` 设为 `DENY` |
 
 ---
 
@@ -113,18 +113,23 @@ GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 
 ```python
 # main.py (示例)
-from agentsentinel.pipeline import TeamPipeline
-from agentsentinel.roles import Orchestrator, Coder, Tester, Writer, Manager
+from agentsentinel.pipeline import SentinelPipeline
 
-# 初始化各个 Agent (已绑定 Workspace 和 Permission)
-pipeline = TeamPipeline(
-    leader=Orchestrator(),
-    members=[Coder(), Tester(), Writer(), Manager()]
-)
+# 初始化流水线（默认注入离线脚本模型与受控 Git 工具）
+pipeline = SentinelPipeline()
 
 # 下发研发任务
 task_prompt = "请开发一个用户登录接口，包含 JWT 鉴权，并补充单元测试和相关文档。"
-pipeline.run(task_prompt)
+result = pipeline.run(task_prompt)
+print(result.status.value, result.audit_log)
+```
+
+离线演示可直接运行：
+
+```bash
+uv run python -m agentsentinel run --task "实现用户登录接口"
+# 兼容旧参数
+uv run python -m agentsentinel --stub
 ```
 
 ---

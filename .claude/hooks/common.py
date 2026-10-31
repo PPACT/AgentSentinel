@@ -102,6 +102,20 @@ def has_fixture_file_marker(content: str) -> bool:
     return any(SECRET_FIXTURE_MARKER in line for line in content.splitlines()[:5])
 
 
+def file_header_has_fixture_marker(raw_path: object, payload: dict[str, Any]) -> bool:
+    """读取目标文件前 5 行判断豁免标记；供 Edit/MultiEdit 使用（其输入不含整文件）。"""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = payload_cwd(payload) / path
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:5]
+    except OSError:
+        return False
+    return any(SECRET_FIXTURE_MARKER in line for line in lines)
+
+
 def content_texts(tool_in: dict[str, Any]) -> list[str]:
     """收集 Write/Edit/MultiEdit/NotebookEdit 中真正会写入的文本。"""
     texts: list[str] = []
@@ -169,7 +183,8 @@ def emit_decision(decision: str, reason: str) -> NoReturn:
             "permissionDecisionReason": reason,
         }
     }
-    print(json.dumps(payload, ensure_ascii=False))
+    # ASCII 转义避免 Windows cp936 控制台把 UTF-8 输出显示成乱码。
+    print(json.dumps(payload))
     raise SystemExit(0)
 
 
@@ -180,7 +195,8 @@ def emit_context(text: str) -> None:
             "additionalContext": text,
         }
     }
-    print(json.dumps(payload, ensure_ascii=False))
+    # ASCII 转义避免 Windows cp936 控制台把 UTF-8 输出显示成乱码。
+    print(json.dumps(payload))
 
 
 def fail_closed(message: str) -> NoReturn:

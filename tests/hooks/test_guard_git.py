@@ -113,6 +113,39 @@ def test_push_with_stripe_fixture_is_denied(tmp_path: Path) -> None:
     assert "脱敏扫描命中" in output["permissionDecisionReason"]
 
 
+def test_push_scans_head_content_even_if_worktree_is_cleaned(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    stripe_sample = "sk_" + "live_" + "a1" * 12
+    leak = repo / "leak.py"
+    leak.write_text(f'key = "{stripe_sample}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+    # 提交后把工作区清理干净但不提交：push 仍必须扫 HEAD 中的已提交内容。
+    leak.write_text("print('cleaned')\n", encoding="utf-8")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "deny"
+    assert "HEAD:leak.py" in output["permissionDecisionReason"]
+
+
+def test_push_scans_dirty_worktree(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    stripe_sample = "sk_" + "live_" + "a1" * 12
+    (repo / "app.py").write_text(f'key = "{stripe_sample}"\n', encoding="utf-8")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin main", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "deny"
+    assert "工作区:app.py" in output["permissionDecisionReason"]
+
+
 def test_clean_push_is_allowed(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     _set_upstream(repo)

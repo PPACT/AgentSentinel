@@ -19,6 +19,9 @@ def main() -> None:
     # 安全拦截测试文件整体放行：文件名以 test_guard 开头，避免写夹具时反复拦截。
     if common.is_security_fixture_path(path):
         return
+    # Edit/MultiEdit 的 new_string 不含文件头；读取目标文件前 5 行判断整文件豁免。
+    if common.file_header_has_fixture_marker(raw_path, payload):
+        return
     for text in common.content_texts(tool_in):
         # 文件头部声明 # secret-fixture 时，整个文件视为已人工确认的夹具。
         if common.has_fixture_file_marker(text):

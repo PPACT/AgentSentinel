@@ -71,34 +71,41 @@ def _resolve_range(cwd: Path) -> str | None:
     return f"{name}..HEAD" if name else None
 
 
-def _paths_to_scan(cwd: Path, revision_range: str | None) -> set[str]:
+def _range_paths(cwd: Path, revision_range: str | None) -> set[str]:
+    """push 范围内的路径；无 upstream 时退化为 HEAD 全量树。"""
     if revision_range is not None:
         changed = _run_git(cwd, ["diff", "--name-only", "-z", revision_range])
     else:
         changed = _run_git(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])
     if changed.returncode != 0:
         raise RuntimeError(changed.stderr.strip() or "无法列出推送范围")
+    return set(_split_nul(changed.stdout))
 
-    paths = set(_split_nul(changed.stdout))
+
+def _worktree_paths(cwd: Path) -> set[str]:
     status = _run_git(cwd, ["status", "--porcelain", "-z"])
     if status.returncode != 0:
         raise RuntimeError(status.stderr.strip() or "git status 失败")
-    for entry in _split_nul(status.stdout):
-        if len(entry) >= 4:
-            paths.add(entry[3:])
-    return paths
+    return {entry[3:] for entry in _split_nul(status.stdout) if len(entry) >= 4}
 
 
-def _read_path(cwd: Path, path: str) -> str:
-    file_path = cwd / path
-    if file_path.is_file():
-        if file_path.stat().st_size > _MAX_FILE_BYTES:
-            raise RuntimeError(f"{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
-        return file_path.read_text(encoding="utf-8", errors="replace")
+def _read_head_path(cwd: Path, path: str) -> str | None:
+    """读取 HEAD 中该路径的内容；HEAD 不存在该路径时返回 None。"""
     shown = _run_git(cwd, ["show", f"HEAD:{path}"])
     if shown.returncode != 0:
-        return ""
+        return None
+    if len(shown.stdout) > _MAX_FILE_BYTES:
+        raise RuntimeError(f"HEAD:{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
     return shown.stdout
+
+
+def _read_worktree_path(cwd: Path, path: str) -> str | None:
+    file_path = cwd / path
+    if not file_path.is_file():
+        return None
+    if file_path.stat().st_size > _MAX_FILE_BYTES:
+        raise RuntimeError(f"{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
+    return file_path.read_text(encoding="utf-8", errors="replace")
 
 
 def _commit_messages(cwd: Path, revision_range: str | None) -> str:
@@ -116,13 +123,28 @@ def _scan_repository(cwd: Path) -> str | None:
         raise RuntimeError(f"{cwd} 不是 git 工作区")
 
     revision_range = _resolve_range(cwd)
-    for path in sorted(_paths_to_scan(cwd, revision_range)):
-        content = _read_path(cwd, path)
-        if "\0" in content:
+    range_paths = _range_paths(cwd, revision_range)
+    worktree_paths = _worktree_paths(cwd)
+
+    # 先扫 push 范围在 HEAD 的内容：工作区即使已清理，也不能覆盖已提交内容。
+    for path in sorted(range_paths):
+        content = _read_head_path(cwd, path)
+        if content is None or "\0" in content:
             continue
         reason = common.scan_secrets(content)
         if reason is not None:
-            return f"{path}: {reason}"
+            return f"HEAD:{path}: {reason}"
+
+    # 再扫工作区未提交改动；与 HEAD 完全相同的文件不重复扫描。
+    for path in sorted(worktree_paths):
+        content = _read_worktree_path(cwd, path)
+        if content is None or "\0" in content:
+            continue
+        if path in range_paths and _read_head_path(cwd, path) == content:
+            continue
+        reason = common.scan_secrets(content)
+        if reason is not None:
+            return f"工作区:{path}: {reason}"
 
     reason = common.scan_secrets(_commit_messages(cwd, revision_range))
     if reason is not None:

@@ -4,6 +4,7 @@ from agentscope.agent import Agent
 from agentscope.model import ChatModelBase
 
 from agentsentinel.roles.base import AgentResult, RoleSpec, build_role_agent
+from agentsentinel.roles.toolkit import build_toolkit
 from agentsentinel.workspace import Workspace
 
 
@@ -25,7 +26,7 @@ class Coder:
     )
 
     def build_agent(self, model: ChatModelBase) -> Agent:
-        return build_role_agent(self.spec, model)
+        return build_role_agent(self.spec, model, toolkit=build_toolkit(self.spec))
 
     def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
         fix_note = ""

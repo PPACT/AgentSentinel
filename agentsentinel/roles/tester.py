@@ -10,6 +10,7 @@ from agentscope.model import ChatModelBase
 
 from agentsentinel.contracts import TestReport, TestStatus
 from agentsentinel.roles.base import AgentResult, RoleSpec, build_role_agent
+from agentsentinel.roles.toolkit import build_toolkit
 from agentsentinel.workspace import Workspace
 
 
@@ -33,7 +34,7 @@ class Tester:
     )
 
     def build_agent(self, model: ChatModelBase) -> Agent:
-        return build_role_agent(self.spec, model)
+        return build_role_agent(self.spec, model, toolkit=build_toolkit(self.spec))
 
     def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
         code = workspace.read_text("code/main.py")

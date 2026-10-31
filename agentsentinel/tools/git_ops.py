@@ -3,7 +3,7 @@
 测试通过注入 remote_push / reset_runner 模拟远端与回退，不触网、不动真实仓库。
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -15,6 +15,10 @@ from agentsentinel.governance.permissions import (
     PermissionPolicy,
 )
 from agentsentinel.governance.sanitizer import Sanitizer
+from agentsentinel.workspace import ARTIFACT_DIRS
+
+# 只提交 workspace 下的产物目录，禁止 git add -A 把仓库其它改动一并带走。
+DEFAULT_ADD_PATHS: tuple[str, ...] = tuple(f"workspace/{name}" for name in ARTIFACT_DIRS)
 
 
 class ScanDeniedError(Exception):
@@ -65,6 +69,7 @@ class GitPythonOps:
         remote_push: Callable[[Repo], None] | None = None,
         reset_runner: Callable[[Repo, str], None] | None = None,
         remote_name: str = "origin",
+        add_paths: Sequence[str] = DEFAULT_ADD_PATHS,
     ) -> None:
         self._repo_path = Path(repo_path)
         self._policy = policy
@@ -72,11 +77,15 @@ class GitPythonOps:
         self._remote_push = remote_push
         self._reset_runner = reset_runner
         self._remote_name = remote_name
+        self._add_paths = tuple(add_paths)
 
     def commit(self, message: str, *, caller: str = "Manager") -> str:
         self._authorize("git_commit", caller)
         repo = Repo(self._repo_path)
-        repo.git.add(A=True)
+        existing = [path for path in self._add_paths if (self._repo_path / path).exists()]
+        if not existing:
+            raise ValueError(f"没有可提交的工作区产物: {list(self._add_paths)}")
+        repo.git.add("--", *existing)
         return repo.index.commit(message).hexsha
 
     def push(self, *, caller: str = "Manager", payload: str = "") -> None:

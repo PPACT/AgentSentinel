@@ -11,8 +11,18 @@ from agentsentinel.roles.base import (
 )
 from agentsentinel.roles.coder import Coder
 from agentsentinel.roles.manager import Manager
-from agentsentinel.roles.orchestrator import Orchestrator
+from agentsentinel.roles.offload import WorkspaceOffloader
+from agentsentinel.roles.orchestrator import (
+    OrchestrationSession,
+    Orchestrator,
+    SessionState,
+    SubTask,
+    TaskBoard,
+    decompose_task,
+)
+from agentsentinel.roles.runtime import StubChatModel, run_agent_sync, text_reply, tool_call
 from agentsentinel.roles.tester import Tester
+from agentsentinel.roles.toolkit import UnknownToolError, build_toolkit
 from agentsentinel.roles.writer import Writer
 
 __all__ = [
@@ -21,11 +31,23 @@ __all__ = [
     "Coder",
     "Manager",
     "OrchestrationResult",
+    "OrchestrationSession",
     "Orchestrator",
     "PipelineOutcome",
     "RoleSpec",
+    "SessionState",
+    "StubChatModel",
+    "SubTask",
+    "TaskBoard",
     "Tester",
+    "UnknownToolError",
+    "WorkspaceOffloader",
     "Writer",
     "build_role_agent",
+    "build_toolkit",
+    "decompose_task",
     "load_prompt",
+    "run_agent_sync",
+    "text_reply",
+    "tool_call",
 ]

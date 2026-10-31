@@ -11,8 +11,11 @@ from typing import Protocol
 
 from agentscope.agent import Agent
 from agentscope.model import ChatModelBase
+from agentscope.tool import Toolkit
+from agentscope.workspace import Offloader
 
-from agentsentinel.contracts import TestStatus
+from agentsentinel.contracts import TaskStatus, TestStatus
+from agentsentinel.governance.permissions import role_permission_mode
 from agentsentinel.workspace import Workspace
 
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -57,6 +60,8 @@ class OrchestrationResult:
     summary: str
     artifacts: tuple[Path, ...] = ()
     attempts: int = 1
+    # 主编排维护的任务状态快照（规范 §2.1）。
+    task_statuses: tuple[TaskStatus, ...] = ()
 
 
 class AgentRole(Protocol):
@@ -79,6 +84,23 @@ def load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def build_role_agent(spec: RoleSpec, model: ChatModelBase) -> Agent:
-    """组合 Agent + 提示词 + 模型；工具白名单由 M4 的 Toolkit 绑定。"""
-    return Agent(name=spec.name, system_prompt=spec.system_prompt(), model=model)
+def build_role_agent(
+    spec: RoleSpec,
+    model: ChatModelBase,
+    *,
+    toolkit: Toolkit | None = None,
+    offloader: Offloader | None = None,
+) -> Agent:
+    """组合 Agent + 提示词 + 模型 + 工具白名单 + 上下文卸载。
+
+    权限模式按规范 §3.2 由角色决定；BYPASS 不在映射表内，构造不出。
+    """
+    agent = Agent(
+        name=spec.name,
+        system_prompt=spec.system_prompt(),
+        model=model,
+        toolkit=toolkit,
+        offloader=offloader,
+    )
+    agent.state.permission_context.mode = role_permission_mode(spec.name)
+    return agent

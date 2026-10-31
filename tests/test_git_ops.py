@@ -16,7 +16,9 @@ def repo(tmp_path: Path) -> Repo:
     with repository.config_writer() as config:
         config.set_value("user", "name", "Test")
         config.set_value("user", "email", "test@example.com")
-    (tmp_path / "artifact.txt").write_text("clean\n", encoding="utf-8")
+    artifact = tmp_path / "workspace" / "code" / "main.py"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("def main() -> str:\n    return 'ok'\n", encoding="utf-8")
     return repository
 
 

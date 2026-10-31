@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from agentscope.permission import PermissionMode
+from agentscope.permission import PermissionBehavior, PermissionMode
 
 from agentsentinel.contracts import ScanVerdict
 from agentsentinel.governance.sanitizer import Sanitizer
@@ -58,10 +58,58 @@ class MatrixPermissionPolicy:
         return PermissionDecision.ALLOW
 
 
+ROLE_PERMISSION_MODES: dict[str, PermissionMode] = {
+    # 规范 §3.2：执行型角色用 ACCEPT_EDITS（工作区内编辑自动放行）。
+    "Orchestrator": PermissionMode.ACCEPT_EDITS,
+    "Coder": PermissionMode.ACCEPT_EDITS,
+    "Tester": PermissionMode.ACCEPT_EDITS,
+    "Writer": PermissionMode.ACCEPT_EDITS,
+    # 管理角色离线无人值守：ASK 一律降级为 DENY，绝不静默放行。
+    "Manager": PermissionMode.DONT_ASK,
+}
+
+
+def role_permission_mode(role: str) -> PermissionMode:
+    """返回角色对应的 AgentScope 权限模式；未知角色退回最保守的 DEFAULT。"""
+    return ROLE_PERMISSION_MODES.get(role, PermissionMode.DEFAULT)
+
+
 def ensure_mode_allowed(mode: PermissionMode) -> None:
     """规范 §3.2：任何角色都不得使用 BYPASS 模式。"""
     if mode is PermissionMode.BYPASS:
         raise ValueError("禁止使用 BYPASS 权限模式")
+
+
+def to_behavior(decision: PermissionDecision) -> PermissionBehavior:
+    """项目判定映射到 AgentScope 权限行为。"""
+    return {
+        PermissionDecision.ALLOW: PermissionBehavior.ALLOW,
+        PermissionDecision.DENY: PermissionBehavior.DENY,
+        PermissionDecision.ASK: PermissionBehavior.ASK,
+    }[decision]
+
+
+def from_behavior(behavior: PermissionBehavior) -> PermissionDecision:
+    """AgentScope 权限行为映射回项目判定；PASSTHROUGH 表示交给规则决定，按 ASK 处理。"""
+    return {
+        PermissionBehavior.ALLOW: PermissionDecision.ALLOW,
+        PermissionBehavior.DENY: PermissionDecision.DENY,
+        PermissionBehavior.ASK: PermissionDecision.ASK,
+        PermissionBehavior.PASSTHROUGH: PermissionDecision.ASK,
+    }[behavior]
+
+
+def apply_mode(decision: PermissionDecision, mode: PermissionMode) -> PermissionDecision:
+    """按权限模式收敛判定（M2 延后的模式映射，M4 落地）。
+
+    - BYPASS：直接拒绝该模式本身；
+    - DONT_ASK：无人值守，ASK 一律降级为 DENY；
+    - 其余模式：判定不变（编辑放行由框架引擎按工作目录处理）。
+    """
+    ensure_mode_allowed(mode)
+    if mode is PermissionMode.DONT_ASK and decision is PermissionDecision.ASK:
+        return PermissionDecision.DENY
+    return decision
 
 
 @dataclass(frozen=True)

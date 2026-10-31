@@ -51,6 +51,12 @@ class Workspace:
         target.write_text(content, encoding="utf-8")
         return target
 
+    def write_bytes(self, relative_path: Path | str, content: bytes) -> Path:
+        target = self._resolve(relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return target
+
     def read_text(self, relative_path: Path | str) -> str:
         return self._resolve(relative_path).read_text(encoding="utf-8")
 

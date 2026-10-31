@@ -73,10 +73,21 @@ def test_deny_blocks_before_any_git_call_and_is_audited(tmp_path: Path) -> None:
 
 
 def test_run_makes_no_network_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def _no_network(*args: object, **kwargs: object) -> None:
-        raise AssertionError("network access attempted")
+    # 只放行回环地址：Windows 事件循环的自管道会走 127.0.0.1 socketpair。
+    original_connect = socket.socket.connect
 
-    monkeypatch.setattr(socket, "socket", _no_network)
+    def _guard_connect(sock: socket.socket, address: object) -> None:
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if host not in {"127.0.0.1", "::1", "localhost"}:
+            raise AssertionError(f"network access attempted: {address}")
+        original_connect(sock, address)  # type: ignore[arg-type]
+
+    def _no_dns(*args: object, **kwargs: object) -> None:
+        raise AssertionError("DNS lookup attempted")
+
+    monkeypatch.setattr(socket.socket, "connect", _guard_connect)
+    monkeypatch.setattr(socket, "create_connection", _no_dns)
+    monkeypatch.setattr(socket, "getaddrinfo", _no_dns)
 
     result = StubPipeline(Workspace(tmp_path / "workspace")).run("离线演示任务")
 

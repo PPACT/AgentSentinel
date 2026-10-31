@@ -170,7 +170,7 @@ mypy>=1.8.0              # 静态类型检查
 ## 🤝 贡献与致谢 (Contributing)
 
 - 欢迎提交 Issue 或 Pull Request 优化 Agent 提示词与工作流。
-- 本项目架构灵感来源于 [AgentScope](https://github.com/modelscope/agentscope) 的 TeamPipeline 与内置权限系统。
+- 本项目架构灵感来源于 [AgentScope](https://github.com/modelscope/agentscope) 的多智能体协作机制与内置权限系统。
 
 <div align="center">
 

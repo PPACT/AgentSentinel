@@ -13,6 +13,9 @@ import common
 _EXCHANGE_DIR = Path("docs/local/交流区")
 _STATUS_KEYS = ("当前阶段", "正在做", "等谁", "阻塞")
 _HEADING = re.compile(r"^### \[(待裁|已派|已交|已裁)\][^\n]*$", re.MULTILINE)
+# 只认独立成行的认单语句：行首（允许列表前缀）明确出现「已认单」/「文档侧认单」。
+# 正文引用该措辞的说明文字，以及「暂不认单」「待认单」「不认单」「未认单」一律不算结案。
+_ACK_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:已认单|文档侧认单)\s*[（(：:]", re.MULTILINE)
 _LINE_THRESHOLD = 800
 _UNARCHIVED_THRESHOLD = 10
 
@@ -31,8 +34,8 @@ def _entry_is_closed(label: str, body: str) -> bool:
         return re.search(r"^- 结论", body, re.MULTILINE) is not None or "结论（" in body
     if label == "已派":
         return "回执：已执行 ·" in body
-    # 只认明确措辞，避免把「暂不认单」「待认单」误判为已结案。
-    return "已认单" in body or "文档侧认单" in body
+    # 只认独立成行的认单语句，避免正文引用「文档侧认单（」等措辞时误判为已结案。
+    return _ACK_LINE.search(body) is not None
 
 
 def _unclosed_entries(exchange_text: str) -> tuple[list[str], int]:

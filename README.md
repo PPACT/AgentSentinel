@@ -25,6 +25,7 @@
 ## ✨ 核心特性 (Features)
 
 - 🧠 **主管编排模式 (Supervisor Pattern)**：主编排 Agent 统筹全局，专家 Agent 独立执行，上下文物理隔离，避免长任务带来的上下文溢出。
+- 🚪 **入口治理 (Ingress Governance)**：Webhook 先做 HMAC-SHA256 签名校验；固定命令走 Fast Path 直接执行，唤醒词或系统标签触发 Slow Path，其余请求直接丢弃，减少无效模型调用。
 - 🚫 **不可绕过的脱敏拦截**：代码与文档在推送前强制经过静态扫描，基于底层权限系统（ALLOW/DENY/ASK），一旦发现敏感信息即刻终止，**拒绝自行重试绕过**。
 - 🔄 **版本回退与闭环反馈**：测试失败自动反馈至代码 Agent；严重故障时，由主编排一键触发仓库版本回退（Revert to Baseline）。
 - 📝 **全链路审计日志**：每次操作生成结构化记录（`workspace/audit/push-log.jsonl`），确保每一次推送、拦截和回退都有迹可循。
@@ -34,11 +35,16 @@
 
 ## 🏗️ 系统架构 (Architecture)
 
-本项目采用 **Supervisor** 模式：`SentinelPipeline` 负责编排，主编排 Agent 作为中枢，通过共享工作区与工具调用调度四大专家。AgentScope 2.0.8 不提供 `TeamPipeline`，编排基于 `Agent` + 工具调用 + 会话状态机实现。
+本项目采用 **Supervisor** 模式：`SentinelPipeline` 负责编排，主编排 Agent 作为中枢，通过共享工作区与工具调用调度四大专家。CLI 直接唤起流水线；外部 Webhook 先经 `api/` 入口网关完成 HMAC 验签与 Fast/Slow Path 判定，只有 Slow Path 进入编排。AgentScope 2.0.8 不提供 `TeamPipeline`，编排基于 `Agent` + 工具调用 + 会话状态机实现。
 
 ```mermaid
 graph TD
-    User["👤 用户 / 需求方"] -->|任务下发| Orchestrator["🧠 主编排 Agent (Orchestrator)"]
+    User["👤 用户 / 需求方"] -->|CLI 任务下发| Orchestrator["🧠 主编排 Agent (Orchestrator)"]
+    Webhook["🌐 外部 Webhook"] -->|POST /api/webhook| Ingress{"🚪 入口网关 (api/)"}
+    Ingress -->|HMAC 验签失败| Reject["⛔ 401 拒绝"]
+    Ingress -->|Fast Path 固定命令| FastCmd["⚡ /run-test · /sync-docs"]
+    Ingress -->|Slow Path 唤醒词 / 标签| Orchestrator
+    Ingress -->|其余| Drop["🚮 丢弃"]
 
     subgraph "Agent Pipeline (共享工作区)"
         Orchestrator -->|分配任务| Coder["💻 代码 Agent (Coder)"]
@@ -74,7 +80,7 @@ graph TD
 | **Coder** <br/>💻 代码专家 | 根据需求实现代码、根据测试报告修复 Bug | `file_write`, `file_edit`, `bash` (仅限构建/语法检查) | 禁止执行 `git` 命令 |
 | **Tester** <br/>🧪 测试专家 | 独立验证代码产物、输出结构化测试报告 | `file_read`, `bash` (执行测试，含 `regression-suite`) | 必须与 Coder 上下文隔离，防自我评估偏差 |
 | **Writer** <br/>📝 文档专家 | 根据代码 Diff 更新技术文档、生成变更摘要 | `file_read`, `file_write`, `file_edit` (含 `doc-consistency-check`) | 必须明确反映已通过测试的实际变更 |
-| **Manager** <br/>🛡️ 管理专家 | 脱敏扫描、仓库推送、打基线、版本回退、写审计日志 | `sanitize_scan`, `git_commit`, `git_push`, `git_tag_baseline`, `git_reset_to_baseline`, `audit_logger` | 高危工具强制设为 `ASK`，`force push` 设为 `DENY` |
+| **Manager** <br/>🛡️ 管理专家 | 脱敏扫描、仓库推送、打基线、版本回退、写审计日志 | `sanitize_scan`, `git_commit`, `git_push`, `git_tag_baseline`, `git_reset_to_baseline`, `audit_logger` | 高危工具经权限矩阵校验，`ASK` 一律降级 `DENY`（fail-closed）；`force push` 为 `DENY` |
 
 ---
 
@@ -104,10 +110,13 @@ uv pip install -r requirements.txt
 
 ```env
 SENTINEL_OPENAI_API_KEY=<你的 API Key，形如 sk-<字母数字串>>
+SENTINEL_WEBHOOK_SECRET=<Webhook HMAC 密钥>
 SENTINEL_GIT_USER_NAME="AgentSentinel Bot"
 SENTINEL_GIT_USER_EMAIL="bot@agentsentinel.local"
 SENTINEL_GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 ```
+
+Webhook 入口通过 `create_app_from_settings()` 构造；`SENTINEL_WEBHOOK_SECRET` 缺失或为空时拒绝启动。
 
 ### 3. 启动流水线
 
@@ -142,8 +151,12 @@ uv run python -m agentsentinel --stub
 # ===== 核心框架 =====
 agentscope[full]==2.0.8
 
+# ===== 入口层（本项目特有） =====
+fastapi==0.162.0         # 入口网关与 Webhook 骨架
+
 # ===== 治理层（本项目特有） =====
 detect-secrets==1.5.0    # 脱敏扫描规则引擎
+email-validator>=2.3.0   # EmailStr 校验（配置）
 GitPython>=3.1.42        # Git 操作封装 (Push/Tag/Reset)
 pydantic-settings>=2.9.1 # 配置与契约校验
 python-dotenv>=1.0.1     # 环境变量加载
@@ -163,7 +176,9 @@ mypy>=1.8.0              # 静态类型检查
 
 1. **硬性脱敏拦截**：`sanitize_scan` 工具在 `checkPermissions` 阶段进行运行时正则匹配。若检出敏感信息，抛出 `DENY`，此状态为**业务终态**，严禁 Agent 自动重试。
 2. **调用者身份校验**：`git_reset_to_baseline` 等回退指令，需经过严格的 Caller Identity 校验，仅限 Orchestrator 可调用。
-3. **审计追踪**：每一次推送、拦截、回退均写入不可篡改的本地 JSONL 日志。
+3. **审计追踪**：每一次推送、拦截、回退均以追加方式写入本地 JSONL 审计日志（`workspace/audit/push-log.jsonl`）；审计仅覆盖 push / revert / DENY，不承载状态流转。
+4. **Webhook 来源校验**：`POST /api/webhook/{source}` 先校验 `X-Hub-Signature-256`（HMAC-SHA256，常量时间比较），失败返回 `401`；验签通过后才进行 Fast/Slow Path 判定。GitHub 的 `comment` / `issue` / `pull_request` 载荷会归一为统一入口事件。
+5. **开发期 Hook 兜底**：`.claude/hooks/` 在开发会话中拦截强推、`reset --hard`、危险 `git clean` 组合与 `git add -A`，并在 `git push` 前扫描推送范围；命中交人工确认，扫描失败 fail-closed。
 
 ---
 

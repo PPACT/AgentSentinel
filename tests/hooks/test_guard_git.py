@@ -115,6 +115,17 @@ def test_git_clean_dry_run_is_allowed() -> None:
     _assert_allowed(run_hook("guard_git.py", _bash("git clean -n", Path.cwd())))
 
 
+def test_git_clean_long_force_with_dirs_or_excludes_is_denied() -> None:
+    for command in ("git clean --force -d", "git clean --force -x"):
+        output = hook_output(run_hook("guard_git.py", _bash(command, Path.cwd())))
+        assert output["permissionDecision"] == "deny", command
+
+
+def test_git_clean_dry_run_overrides_force() -> None:
+    for command in ("git clean -ndf", "git clean --dry-run --force -d"):
+        _assert_allowed(run_hook("guard_git.py", _bash(command, Path.cwd())))
+
+
 def test_clean_push_is_allowed(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     _set_upstream(repo)
@@ -310,6 +321,42 @@ def test_push_with_redirection_still_scans(tmp_path: Path) -> None:
     )
 
     assert output["permissionDecision"] == "ask"
+
+
+def test_multiple_push_segments_scan_all_push_ranges(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    _git(repo, "branch", "clean")
+    _git(repo, "checkout", "-b", "leak")
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+    _git(repo, "checkout", "main")
+
+    output = hook_output(
+        run_hook(
+            "guard_git.py",
+            _bash("git push origin clean && git push origin leak", repo),
+            project_dir=repo,
+        )
+    )
+
+    assert output["permissionDecision"] == "ask"
+    assert "leak.py" in output["permissionDecisionReason"]
+
+
+def test_multiple_clean_push_segments_are_allowed(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    _git(repo, "branch", "clean")
+
+    result = run_hook(
+        "guard_git.py",
+        _bash("git push origin clean && git push origin main", repo),
+        project_dir=repo,
+    )
+
+    _assert_allowed(result)
 
 
 def test_clean_push_with_redirection_is_allowed(tmp_path: Path) -> None:

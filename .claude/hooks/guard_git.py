@@ -127,8 +127,11 @@ def _segment_reason(tokens: list[str]) -> str | None:
             return "禁止 git filter-branch"
         elif subcommand == "clean":
             letters = _short_flag_letters(args)
-            if "f" in letters and ("d" in letters or "x" in letters):
-                return "禁止 git clean 的 -f 与 -d/-x 组合（如 -fd、-dfx、-fx）"
+            long_flags = {arg for arg in args if arg in {"--dry-run", "--force"}}
+            dry_run = "n" in letters or "--dry-run" in long_flags
+            force = "f" in letters or "--force" in long_flags
+            if not dry_run and force and ("d" in letters or "x" in letters):
+                return "禁止 git clean 的 force 与 -d/-x 组合（如 -fd、-dfx、--force -d）"
         elif subcommand == "add":
             if any(
                 arg in {".", "--all"}
@@ -148,16 +151,17 @@ def _segment_reason(tokens: list[str]) -> str | None:
     return None
 
 
-def _push_rest(segments: list[list[str]]) -> list[str] | None:
-    """返回第一条真实 ``git push`` 命令的参数；没有则返回 None。"""
+def _push_rests(segments: list[list[str]]) -> list[list[str]]:
+    """返回每条真实 ``git push`` 命令的参数；没有则返回空列表。"""
+    rests: list[list[str]] = []
     for tokens in segments:
         git_index = _command_index(tokens, "git")
         if git_index is None:
             continue
         subcommand, rest = _git_subcommand(tokens, git_index)
         if subcommand == "push":
-            return rest
-    return None
+            rests.append(rest)
+    return rests
 
 
 def _push_refspecs(rest: list[str]) -> tuple[str, list[str]] | None:
@@ -345,16 +349,18 @@ def main() -> None:
         reason = _segment_reason(segment)
         if reason is not None:
             common.emit_decision("deny", reason)
-    push_rest = _push_rest(segments)
-    if push_rest is None:
+    push_rests = _push_rests(segments)
+    if not push_rests:
         return
 
     try:
-        hit = _scan_repository(common.payload_cwd(payload), push_rest)
+        cwd = common.payload_cwd(payload)
+        for push_rest in push_rests:
+            hit = _scan_repository(cwd, push_rest)
+            if hit is not None:
+                common.emit_decision("ask", f"推送前扫描发现高风险内容，请确认是否继续：{hit}")
     except Exception as exc:  # noqa: BLE001 - 扫描失败必须 fail-closed
         common.fail_closed(f"H1 推送前扫描失败，按 DENY 处理：{exc}")
-    if hit is not None:
-        common.emit_decision("ask", f"推送前扫描发现高风险内容，请确认是否继续：{hit}")
 
 
 if __name__ == "__main__":

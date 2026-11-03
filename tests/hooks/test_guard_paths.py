@@ -77,3 +77,17 @@ def test_config_write_is_allowed(tmp_path: Path) -> None:
 
 def test_outside_project_is_allowed(tmp_path: Path) -> None:
     _assert_allowed(_run(tmp_path.parent / "outside.txt", tmp_path))
+
+
+def test_subdirectory_readme_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(_run(tmp_path / "docs" / "README.md", tmp_path))
+
+
+def test_subdirectory_agents_md_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(_run(tmp_path / "content" / "AGENTS.md", tmp_path))
+
+
+def test_nested_env_is_still_denied(tmp_path: Path) -> None:
+    output = hook_output(_run(tmp_path / "docs" / ".env", tmp_path))
+
+    assert output["permissionDecision"] == "deny"

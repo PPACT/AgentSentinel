@@ -15,7 +15,8 @@ _PROTECTED_NAMES = {"README.md", "AGENTS.md"}
 
 def _protected_reason(path: str) -> str | None:
     name = Path(path).name
-    if name in _PROTECTED_NAMES:
+    # README.md / AGENTS.md 只保护项目根目录下的那一份，子目录同名文件放行。
+    if name in _PROTECTED_NAMES and "/" not in path:
         return f"{name} 为受保护文件，未经用户明确授权不得修改"
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
         return ".env 系列文件禁止编辑（.env.example 除外）"

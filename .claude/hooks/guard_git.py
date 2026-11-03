@@ -1,15 +1,19 @@
 """H1：不可逆命令拦截 + 推送前审查（PreToolUse / Bash）。
 
 只做两件事：
-1. deny 强推、删远端、``reset --hard``、``filter-branch``、``clean -fdx``、
-   ``git add -A`` 与 ``rm -rf``；
+1. deny 强推、删远端、``reset --hard``、``filter-branch``、``clean`` 的
+   ``-f`` 与 ``-d``/``-x`` 组合、``git add`` 的 ``-A`` 组合与 ``rm -rf``；
 2. ``git push`` 前扫描待推送内容：命中高危内容 → ask 交用户决策；干净 → 静默放行。
+   显式 refspec（``git push origin <branch>`` / ``<local>:<remote>``）按被推送的
+   ref 范围扫描，而不是当前分支 upstream。
 
-按 shell token 解析命令段，避免把引号里的示例文本误判为真实命令。
+按 shell token 解析命令段与 ``git`` 子命令，避免把引号里的示例文本或提交信息
+误判为真实命令。
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -18,6 +22,23 @@ import common
 
 _OPERATORS = {";", "&&", "||", "|", "&"}
 _FORCE_FLAGS = {"-f", "--force", "--force-with-lease", "--force-if-includes"}
+# git 全局选项中带一个取值的项，用于定位真正的子命令（如 ``git -c k=v push``）。
+_GIT_VALUE_OPTIONS = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--super-prefix",
+    "--config-env",
+}
+# git push 自身带一个取值的选项，用于挑出 repository 与 refspec。
+_PUSH_VALUE_OPTIONS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+# shell 重定向 token：单独操作符（如 ``>``、``2>``）需连同目标一起跳过；
+# 自带目标的形式（如 ``2>&1``、``>/dev/null``）只跳过自身。
+_REDIRECT_ONLY = re.compile(r"^\d*(?:>>?|<<?|<<<|&>>?|>&|<&)$")
+_REDIRECT_WITH_TARGET = re.compile(r"^\d*(?:>>?|<<?|<<<|&>>?|>&|<&).+$")
 
 _MAX_FILE_BYTES = 5_000_000
 _GIT_TIMEOUT_SECONDS = 60
@@ -66,28 +87,54 @@ def _command_index(tokens: list[str], name: str) -> int | None:
     return None
 
 
+def _git_subcommand(tokens: list[str], git_index: int) -> tuple[str | None, list[str]]:
+    """返回 ``git`` 的子命令与其参数；跳过全局选项，避免把参数当子命令。"""
+    args = tokens[git_index + 1 :]
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in _GIT_VALUE_OPTIONS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, args[index + 1 :]
+    return None, []
+
+
+def _short_flag_letters(args: list[str]) -> set[str]:
+    """收集组合短选项里的字母，如 ``-dfx`` → ``{"d", "f", "x"}``。"""
+    letters: set[str] = set()
+    for arg in args:
+        if arg.startswith("-") and not arg.startswith("--"):
+            letters.update(arg[1:])
+    return letters
+
+
 def _segment_reason(tokens: list[str]) -> str | None:
     git_index = _command_index(tokens, "git")
     if git_index is not None:
-        args = tokens[git_index + 1 :]
-        if "push" in args:
-            push_args = args[args.index("push") + 1 :]
-            if any(arg in _FORCE_FLAGS or arg.startswith("--force") for arg in push_args):
+        subcommand, args = _git_subcommand(tokens, git_index)
+        if subcommand == "push":
+            if any(arg in _FORCE_FLAGS or arg.startswith("--force") for arg in args):
                 return "禁止强推（--force / -f / --force-with-lease），需用户明确指令"
-            if any(arg in {"--delete", "--mirror"} or arg.startswith(":") for arg in push_args):
+            if any(arg in {"--delete", "--mirror"} or arg.startswith(":") for arg in args):
                 return "禁止删除或镜像远端仓库"
-        if "reset" in args and "--hard" in args:
+        elif subcommand == "reset" and "--hard" in args:
             return "禁止 git reset --hard"
-        if "filter-branch" in args:
+        elif subcommand == "filter-branch":
             return "禁止 git filter-branch"
-        if "clean" in args:
-            clean_args = args[args.index("clean") + 1 :]
-            flags = "".join(arg for arg in clean_args if arg.startswith("-"))
-            if all(flag in flags for flag in "fdx"):
-                return "禁止 git clean -fdx"
-        if "add" in args:
-            add_args = args[args.index("add") + 1 :]
-            if any(arg in {"-A", "--all", "."} for arg in add_args):
+        elif subcommand == "clean":
+            letters = _short_flag_letters(args)
+            if "f" in letters and ("d" in letters or "x" in letters):
+                return "禁止 git clean 的 -f 与 -d/-x 组合（如 -fd、-dfx、-fx）"
+        elif subcommand == "add":
+            if any(
+                arg in {".", "--all"}
+                or (arg.startswith("-") and not arg.startswith("--") and "A" in arg)
+                for arg in args
+            ):
                 return "禁止 git add -A / git add . / git add --all，请显式列出文件"
 
     rm_index = _command_index(tokens, "rm")
@@ -101,12 +148,94 @@ def _segment_reason(tokens: list[str]) -> str | None:
     return None
 
 
-def _has_git_push(segments: list[list[str]]) -> bool:
+def _push_rest(segments: list[list[str]]) -> list[str] | None:
+    """返回第一条真实 ``git push`` 命令的参数；没有则返回 None。"""
     for tokens in segments:
         git_index = _command_index(tokens, "git")
-        if git_index is not None and "push" in tokens[git_index + 1 :]:
-            return True
-    return False
+        if git_index is None:
+            continue
+        subcommand, rest = _git_subcommand(tokens, git_index)
+        if subcommand == "push":
+            return rest
+    return None
+
+
+def _push_refspecs(rest: list[str]) -> tuple[str, list[str]] | None:
+    """从 push 参数中挑出 repository 与显式 refspec；无显式 refspec 返回 None。"""
+    positionals: list[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if _REDIRECT_ONLY.match(token):
+            index += 2
+            continue
+        if _REDIRECT_WITH_TARGET.match(token):
+            index += 1
+            continue
+        if token in _PUSH_VALUE_OPTIONS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        positionals.append(token)
+        index += 1
+    if len(positionals) < 2:
+        return None
+    return positionals[0], positionals[1:]
+
+
+def _parse_refspec(refspec: str) -> tuple[str, str] | None:
+    refspec = refspec.removeprefix("+")
+    if not refspec or refspec.startswith(":"):
+        return None
+    if ":" in refspec:
+        src, dst = refspec.split(":", 1)
+    else:
+        src = dst = refspec
+    return (src, dst) if src else None
+
+
+def _tracking_ref(remote: str, dst: str) -> str | None:
+    """远端分支对应的 tracking ref；URL 形式远端或 tag 推送返回 None。"""
+    if ":" in remote or "/" in remote:
+        return None
+    name = dst.removeprefix("refs/heads/")
+    if name.startswith("refs/") or not name or name == "HEAD":
+        return None
+    return f"refs/remotes/{remote}/{name}"
+
+
+def _resolve_sha(cwd: Path, revision: str) -> str | None:
+    resolved = _run_git(cwd, ["rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"])
+    if resolved.returncode != 0:
+        return None
+    return resolved.stdout.strip() or None
+
+
+def _push_scopes(cwd: Path, rest: list[str]) -> list[tuple[str, str | None]]:
+    """把显式 refspec 解析成 (revision, 扫描范围)；无 refspec 返回空列表。"""
+    parsed = _push_refspecs(rest)
+    if parsed is None:
+        return []
+    remote, refspecs = parsed
+    head_sha = _resolve_sha(cwd, "HEAD")
+    scopes: list[tuple[str, str | None]] = []
+    for refspec in refspecs:
+        parts = _parse_refspec(refspec)
+        if parts is None:
+            continue
+        src, dst = parts
+        src_sha = _resolve_sha(cwd, src)
+        if src_sha is None:
+            raise RuntimeError(f"无法解析推送源 {src}")
+        revision = "HEAD" if src_sha == head_sha else src
+        tracking = _tracking_ref(remote, dst)
+        if tracking is not None and _resolve_sha(cwd, tracking) is not None:
+            scopes.append((revision, f"{tracking}..{revision}"))
+        else:
+            scopes.append((revision, None))
+    return scopes
 
 
 def _split_nul(text: str) -> list[str]:
@@ -121,55 +250,83 @@ def _resolve_range(cwd: Path) -> str | None:
     return f"{name}..HEAD" if name else None
 
 
-def _range_paths(cwd: Path, revision_range: str | None) -> set[str]:
-    """push 范围内的路径；无 upstream 时退化为 HEAD 全量树。"""
+def _range_paths(cwd: Path, revision_range: str | None, revision: str = "HEAD") -> set[str]:
+    """推送范围内的路径；无可用范围时退化为该 revision 的全量树。"""
     if revision_range is not None:
         changed = _run_git(cwd, ["diff", "--name-only", "-z", revision_range])
     else:
-        changed = _run_git(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])
+        changed = _run_git(cwd, ["ls-tree", "-r", "--name-only", "-z", revision])
     if changed.returncode != 0:
         raise RuntimeError(changed.stderr.strip() or "无法列出推送范围")
     return set(_split_nul(changed.stdout))
 
 
-def _read_head_path(cwd: Path, path: str) -> str | None:
-    shown = _run_git(cwd, ["show", f"HEAD:{path}"])
+def _read_revision_path(cwd: Path, revision: str, path: str) -> str | None:
+    shown = _run_git(cwd, ["show", f"{revision}:{path}"])
     if shown.returncode != 0:
         return None
     if len(shown.stdout) > _MAX_FILE_BYTES:
-        raise RuntimeError(f"HEAD:{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
+        raise RuntimeError(f"{revision}:{path} 超过 {_MAX_FILE_BYTES} 字节，无法安全扫描")
     return shown.stdout
 
 
-def _commit_messages(cwd: Path, revision_range: str | None) -> str:
+def _commit_messages(
+    cwd: Path, revision_range: str | None, revision: str, *, only_tip: bool
+) -> str:
     args = ["log", "--format=%B"]
-    args.extend([revision_range] if revision_range is not None else ["-n", "1", "HEAD"])
+    if revision_range is not None:
+        args.append(revision_range)
+    elif only_tip:
+        args.extend(["-n", "1", revision])
+    else:
+        args.append(revision)
     result = _run_git(cwd, args)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "无法读取提交信息")
     return result.stdout
 
 
-def _scan_repository(cwd: Path) -> str | None:
+def _scan_repository(cwd: Path, push_rest: list[str]) -> str | None:
     inside = _run_git(cwd, ["rev-parse", "--is-inside-work-tree"])
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         raise RuntimeError(f"{cwd} 不是 git 工作区")
 
-    revision_range = _resolve_range(cwd)
-    for path in sorted(_range_paths(cwd, revision_range)):
+    scopes = _push_scopes(cwd, push_rest)
+    if scopes:
+        targets = [
+            (revision, path)
+            for revision, revision_range in scopes
+            for path in _range_paths(cwd, revision_range, revision)
+        ]
+        messages = [
+            _commit_messages(cwd, revision_range, revision, only_tip=False)
+            for revision, revision_range in scopes
+        ]
+    else:
+        # 无显式 refspec：沿用当前分支 upstream 口径（无 upstream 时扫 HEAD）。
+        revision_range = _resolve_range(cwd)
+        targets = [("HEAD", path) for path in _range_paths(cwd, revision_range, "HEAD")]
+        messages = [_commit_messages(cwd, revision_range, "HEAD", only_tip=True)]
+
+    seen: set[tuple[str, str]] = set()
+    for revision, path in targets:
+        if (revision, path) in seen:
+            continue
+        seen.add((revision, path))
         # 测试区完全放行：夹具中的假密钥/PII 不参与推送审查。
         if path.startswith("tests/"):
             continue
-        content = _read_head_path(cwd, path)
+        content = _read_revision_path(cwd, revision, path)
         if content is None or "\0" in content:
             continue
         reason = common.scan_secrets(content, honor_markers=False)
         if reason is not None:
-            return f"HEAD:{path}: {reason}"
+            return f"{revision}:{path}: {reason}"
 
-    reason = common.scan_secrets(_commit_messages(cwd, revision_range), honor_markers=False)
-    if reason is not None:
-        return f"提交信息: {reason}"
+    for message in messages:
+        reason = common.scan_secrets(message, honor_markers=False)
+        if reason is not None:
+            return f"提交信息: {reason}"
     return None
 
 
@@ -188,11 +345,12 @@ def main() -> None:
         reason = _segment_reason(segment)
         if reason is not None:
             common.emit_decision("deny", reason)
-    if not _has_git_push(segments):
+    push_rest = _push_rest(segments)
+    if push_rest is None:
         return
 
     try:
-        hit = _scan_repository(common.payload_cwd(payload))
+        hit = _scan_repository(common.payload_cwd(payload), push_rest)
     except Exception as exc:  # noqa: BLE001 - 扫描失败必须 fail-closed
         common.fail_closed(f"H1 推送前扫描失败，按 DENY 处理：{exc}")
     if hit is not None:

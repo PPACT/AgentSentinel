@@ -63,6 +63,16 @@ def test_git_add_all_is_denied() -> None:
     assert output["permissionDecision"] == "deny"
 
 
+def test_git_add_combined_all_flag_is_denied() -> None:
+    for command in ("git add -Av", "git add -vA"):
+        output = hook_output(run_hook("guard_git.py", _bash(command, Path.cwd())))
+        assert output["permissionDecision"] == "deny", command
+
+
+def test_git_add_verbose_with_explicit_file_is_allowed() -> None:
+    _assert_allowed(run_hook("guard_git.py", _bash("git add -v app.py", Path.cwd())))
+
+
 def test_force_push_is_denied() -> None:
     output = hook_output(
         run_hook("guard_git.py", _bash("git push --force origin main", Path.cwd()))
@@ -93,6 +103,16 @@ def test_rm_force_single_file_is_allowed() -> None:
     result = run_hook("guard_git.py", _bash("rm -f stale.log", Path.cwd()))
 
     _assert_allowed(result)
+
+
+def test_git_clean_force_delete_combinations_are_denied() -> None:
+    for command in ("git clean -fd", "git clean -dfx", "git clean -fx"):
+        output = hook_output(run_hook("guard_git.py", _bash(command, Path.cwd())))
+        assert output["permissionDecision"] == "deny", command
+
+
+def test_git_clean_dry_run_is_allowed() -> None:
+    _assert_allowed(run_hook("guard_git.py", _bash("git clean -n", Path.cwd())))
 
 
 def test_clean_push_is_allowed(tmp_path: Path) -> None:
@@ -151,6 +171,51 @@ def test_push_ignores_test_fixtures(tmp_path: Path) -> None:
     _assert_allowed(result)
 
 
+def test_explicit_refspec_scans_pushed_branch(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    _git(repo, "checkout", "-b", "leak")
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+    _git(repo, "checkout", "main")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin leak", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "ask"
+    assert "leak.py" in output["permissionDecisionReason"]
+
+
+def test_explicit_refspec_clean_branch_is_allowed(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    _git(repo, "branch", "clean")
+
+    result = run_hook("guard_git.py", _bash("git push origin clean", repo), project_dir=repo)
+
+    _assert_allowed(result)
+
+
+def test_colon_refspec_scans_against_remote_tracking(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    _git(repo, "update-ref", "refs/remotes/origin/release", "HEAD")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+    _git(repo, "checkout", "main")
+
+    output = hook_output(
+        run_hook("guard_git.py", _bash("git push origin feature:release", repo), project_dir=repo)
+    )
+
+    assert output["permissionDecision"] == "ask"
+    assert "leak.py" in output["permissionDecisionReason"]
+
+
 def test_dirty_worktree_is_ignored_on_push(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     _set_upstream(repo)
@@ -183,5 +248,78 @@ def test_non_git_command_is_allowed() -> None:
 
 def test_quoted_dangerous_text_is_allowed() -> None:
     result = run_hook("guard_git.py", _bash('echo "git push -f"', Path.cwd()))
+
+    _assert_allowed(result)
+
+
+def test_commit_message_with_push_does_not_trigger_scan(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+
+    result = run_hook("guard_git.py", _bash("git commit -m push", repo), project_dir=repo)
+
+    _assert_allowed(result)
+
+
+def test_log_grep_push_does_not_trigger_scan(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+
+    result = run_hook("guard_git.py", _bash("git log --grep push", repo), project_dir=repo)
+
+    _assert_allowed(result)
+
+
+def test_push_with_global_option_still_scans(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+
+    output = hook_output(
+        run_hook(
+            "guard_git.py",
+            _bash("git -c core.quotepath=false push origin main", repo),
+            project_dir=repo,
+        )
+    )
+
+    assert output["permissionDecision"] == "ask"
+
+
+def test_push_with_redirection_still_scans(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+    (repo / "leak.py").write_text(f'key = "{_stripe_sample()}"\n', encoding="utf-8")
+    _git(repo, "add", "leak.py")
+    _git(repo, "commit", "-m", "add fixture")
+
+    output = hook_output(
+        run_hook(
+            "guard_git.py",
+            _bash("git push origin main 2>&1 | tail -5", repo),
+            project_dir=repo,
+        )
+    )
+
+    assert output["permissionDecision"] == "ask"
+
+
+def test_clean_push_with_redirection_is_allowed(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    _set_upstream(repo)
+
+    result = run_hook(
+        "guard_git.py",
+        _bash("git push origin main > /dev/null 2>&1", repo),
+        project_dir=repo,
+    )
 
     _assert_allowed(result)

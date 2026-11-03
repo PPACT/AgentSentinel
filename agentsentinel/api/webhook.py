@@ -12,12 +12,14 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agentsentinel.api.adapters import parse_github_event
 from agentsentinel.api.ingress import (
     IngressDecision,
     IngressEvent,
     classify,
     verify_signature,
 )
+from agentsentinel.config import Settings
 
 SIGNATURE_HEADER = "X-Hub-Signature-256"
 
@@ -38,6 +40,8 @@ def _parse_event(source: str, body: bytes) -> IngressEvent | None:
         return None
     if not isinstance(payload, dict):
         return None
+    if source == "github":
+        return parse_github_event(payload, source)
     text = payload.get("text")
     if not isinstance(text, str):
         return None
@@ -82,3 +86,13 @@ def create_app(
         return JSONResponse({"decision": result.decision.value}, status_code=202)
 
     return app
+
+
+def create_app_from_settings(settings: Settings | None = None) -> FastAPI:
+    """按运行时配置构造应用；Webhook 密钥缺失或为空时拒绝启动。"""
+    resolved = settings if settings is not None else Settings()
+    secret = resolved.webhook_secret
+    secret_value = secret.get_secret_value() if secret is not None else ""
+    if not secret_value:
+        raise RuntimeError("SENTINEL_WEBHOOK_SECRET 未配置，拒绝启动 Webhook")
+    return create_app(secret=secret_value)

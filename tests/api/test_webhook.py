@@ -9,12 +9,19 @@ import json
 from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
+import pytest
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import SecretStr
 from starlette.requests import Request
 from starlette.types import Receive, Scope
 
-from agentsentinel.api.webhook import SIGNATURE_HEADER, create_app
+from agentsentinel.api.webhook import (
+    SIGNATURE_HEADER,
+    create_app,
+    create_app_from_settings,
+)
+from agentsentinel.config import Settings
 
 # secret-fixture: 分段拼接的测试值，避免完整密钥形态落盘
 SIGNING_VALUE = "test" + "-secret"
@@ -70,10 +77,11 @@ def _call(
     body: bytes,
     signature: str | None,
     background_tasks: BackgroundTasks | None = None,
+    source: str = "slack",
 ) -> JSONResponse:
     return asyncio.run(
         _endpoint(app)(
-            source="slack",
+            source=source,
             request=_request(body, signature),
             background_tasks=background_tasks or BackgroundTasks(),
         )
@@ -153,3 +161,83 @@ def test_invalid_payload_returns_400() -> None:
     response = _call(app, body, _sign(body))
 
     assert response.status_code == 400
+
+
+def test_github_source_uses_adapter() -> None:
+    runs: list[str] = []
+    tasks = BackgroundTasks()
+    app = create_app(secret=SIGNING_VALUE, pipeline_runner=runs.append)
+    body = _body({"issue": {"title": "@AgentSentinel 重构鉴权"}})
+
+    response = _call(app, body, _sign(body), tasks, source="github")
+
+    assert response.status_code == 202
+    assert _json(response) == {"decision": "SLOW_PATH"}
+    assert len(tasks.tasks) == 1
+    asyncio.run(tasks())
+    assert runs == ["重构鉴权"]
+
+
+def test_github_unrecognized_payload_returns_400() -> None:
+    app = create_app(secret=SIGNING_VALUE)
+    body = _body({"zen": "Keep it logically awesome."})
+
+    response = _call(app, body, _sign(body), source="github")
+
+    assert response.status_code == 400
+
+
+def test_generic_source_still_uses_text_payload() -> None:
+    app = create_app(secret=SIGNING_VALUE)
+    body = _body({"text": "普通聊天"})
+
+    response = _call(app, body, _sign(body), source="slack")
+
+    assert response.status_code == 202
+    assert _json(response) == {"decision": "DROP"}
+
+
+def test_create_app_from_settings_with_secret_accepts_signed_request() -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        webhook_secret=SecretStr(SIGNING_VALUE),
+    )
+    app = create_app_from_settings(settings)
+    body = _body({"text": "/run-test smoke"})
+
+    response = _call(app, body, _sign(body))
+
+    assert response.status_code == 202
+    assert _json(response) == {"decision": "FAST_PATH"}
+
+
+def test_create_app_from_settings_without_secret_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SENTINEL_WEBHOOK_SECRET", raising=False)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    with pytest.raises(RuntimeError):
+        create_app_from_settings(settings)
+
+
+def test_create_app_from_settings_empty_secret_raises() -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        webhook_secret=SecretStr(""),
+    )
+
+    with pytest.raises(RuntimeError):
+        create_app_from_settings(settings)
+
+
+def test_create_app_from_settings_loads_environment_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SENTINEL_WEBHOOK_SECRET", SIGNING_VALUE)
+    app = create_app_from_settings()
+    body = _body({"text": "/run-test smoke"})
+
+    response = _call(app, body, _sign(body))
+
+    assert response.status_code == 202

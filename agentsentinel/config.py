@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     )
 
     openai_api_key: SecretStr | None = None
+    webhook_secret: SecretStr | None = None
     git_user_name: str = ""
     git_user_email: EmailStr | None = None
     git_remote_url: str = ""

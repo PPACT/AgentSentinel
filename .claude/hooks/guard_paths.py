@@ -1,7 +1,7 @@
-"""H3：受保护文件写入拦截（PreToolUse / Edit|Write|MultiEdit|NotebookEdit）。
+"""H3：高危文件写入拦截（PreToolUse / Edit|Write|MultiEdit|NotebookEdit）。
 
-只拦 ``README.md``、``.env`` 系列与 ``AGENTS.md``；其余日常写入一律放行。
-不做角色鉴权，角色行为由提示词约束。
+只拦 ``.env`` / ``.env.*``（``.env.example`` 除外）；其余日常写入（含 ``README.md``、
+``AGENTS.md``）一律放行。不做角色鉴权，角色行为由提示词约束。
 """
 
 from __future__ import annotations
@@ -10,14 +10,9 @@ from pathlib import Path
 
 import common
 
-_PROTECTED_NAMES = {"README.md", "AGENTS.md"}
-
 
 def _protected_reason(path: str) -> str | None:
     name = Path(path).name
-    # README.md / AGENTS.md 只保护项目根目录下的那一份，子目录同名文件放行。
-    if name in _PROTECTED_NAMES and "/" not in path:
-        return f"{name} 为受保护文件，未经用户明确授权不得修改"
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
         return ".env 系列文件禁止编辑（.env.example 除外）"
     return None

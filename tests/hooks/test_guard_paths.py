@@ -18,8 +18,21 @@ def _write(file_path: Path, project_dir: Path) -> dict[str, Any]:
     }
 
 
+def _edit(file_path: Path, project_dir: Path) -> dict[str, Any]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(file_path), "old_string": "x", "new_string": "y"},
+        "cwd": str(project_dir),
+    }
+
+
 def _run(file_path: Path, project_dir: Path) -> subprocess.CompletedProcess[str]:
     return run_hook("guard_paths.py", _write(file_path, project_dir), project_dir=project_dir)
+
+
+def _run_edit(file_path: Path, project_dir: Path) -> subprocess.CompletedProcess[str]:
+    return run_hook("guard_paths.py", _edit(file_path, project_dir), project_dir=project_dir)
 
 
 def _assert_allowed(result: subprocess.CompletedProcess[str]) -> None:
@@ -27,10 +40,12 @@ def _assert_allowed(result: subprocess.CompletedProcess[str]) -> None:
     assert result.stdout.strip() == ""
 
 
-def test_readme_is_denied(tmp_path: Path) -> None:
-    output = hook_output(_run(tmp_path / "README.md", tmp_path))
+def test_root_readme_write_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(_run(tmp_path / "README.md", tmp_path))
 
-    assert output["permissionDecision"] == "deny"
+
+def test_root_readme_edit_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(_run_edit(tmp_path / "README.md", tmp_path))
 
 
 def test_env_is_denied(tmp_path: Path) -> None:
@@ -49,10 +64,8 @@ def test_env_example_is_allowed(tmp_path: Path) -> None:
     _assert_allowed(_run(tmp_path / ".env.example", tmp_path))
 
 
-def test_agents_md_is_denied(tmp_path: Path) -> None:
-    output = hook_output(_run(tmp_path / "AGENTS.md", tmp_path))
-
-    assert output["permissionDecision"] == "deny"
+def test_root_agents_md_is_allowed(tmp_path: Path) -> None:
+    _assert_allowed(_run(tmp_path / "AGENTS.md", tmp_path))
 
 
 def test_ordinary_code_write_is_allowed(tmp_path: Path) -> None:

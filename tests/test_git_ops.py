@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from git import Repo
 
-from agentsentinel.governance.permissions import MatrixPermissionPolicy
+from agentsentinel.governance import (
+    ACTION_PUSH,
+    ACTION_REVERT,
+    Mandate,
+    MatrixPermissionPolicy,
+)
 from agentsentinel.governance.sanitizer import RegexSanitizer
 from agentsentinel.tools.git_ops import GitPythonOps, ScanDeniedError
 
@@ -20,6 +25,20 @@ def repo(tmp_path: Path) -> Repo:
     artifact.parent.mkdir(parents=True)
     artifact.write_text("def main() -> str:\n    return 'ok'\n", encoding="utf-8")
     return repository
+
+
+def _mandate(
+    repo: Repo,
+    action: str = ACTION_PUSH,
+    *,
+    caller: str = "Orchestrator",
+    target_branch: str | None = None,
+) -> Mandate:
+    return Mandate(
+        caller=caller,
+        allowed_action=action,
+        target_branch=repo.active_branch.name if target_branch is None else target_branch,
+    )
 
 
 def _ops(
@@ -69,7 +88,7 @@ def test_push_uses_mocked_remote(repo: Repo) -> None:
     ops = _ops(repo, remote_push=pushed.append)
     ops.commit("feat: demo", caller="Orchestrator")
 
-    ops.push(caller="Orchestrator", payload="clean content")
+    ops.push(caller="Orchestrator", mandate=_mandate(repo), payload="clean content")
 
     assert pushed == [repo]
 
@@ -80,7 +99,9 @@ def test_push_with_secret_is_blocked_before_remote(repo: Repo) -> None:
 
     with pytest.raises(ScanDeniedError):
         ops.push(
-            caller="Orchestrator", payload="pass" + 'word = "hunter2"'
+            caller="Orchestrator",
+            mandate=_mandate(repo),
+            payload="pass" + 'word = "hunter2"',
         )  # secret-fixture: 假密码
 
     assert pushed == []
@@ -91,7 +112,7 @@ def test_reset_rejects_non_orchestrator_and_skips_runner(repo: Repo) -> None:
     ops = _ops(repo, reset_runner=lambda repository, ref: calls.append((repository, ref)))
 
     with pytest.raises(PermissionError):
-        ops.reset_to_baseline("HEAD", caller="Manager")
+        ops.reset_to_baseline("HEAD", caller="Manager", mandate=_mandate(repo, ACTION_REVERT))
 
     assert calls == []
 
@@ -100,7 +121,9 @@ def test_reset_uses_injected_runner_for_orchestrator(repo: Repo) -> None:
     calls: list[tuple[Repo, str]] = []
     ops = _ops(repo, reset_runner=lambda repository, ref: calls.append((repository, ref)))
 
-    ops.reset_to_baseline("baseline-1", caller="Orchestrator")
+    ops.reset_to_baseline(
+        "baseline-1", caller="Orchestrator", mandate=_mandate(repo, ACTION_REVERT)
+    )
 
     assert calls == [(repo, "baseline-1")]
 
@@ -109,4 +132,4 @@ def test_push_denies_when_scan_finds_secret_regardless_of_caller(repo: Repo) -> 
     ops = _ops(repo, remote_push=lambda _: None)
 
     with pytest.raises(ScanDeniedError):
-        ops.push(caller="Orchestrator", payload="AKIA" + "IOSFODNN7EXAMPLE")
+        ops.push(caller="Orchestrator", mandate=_mandate(repo), payload="AKIA" + "IOSFODNN7EXAMPLE")

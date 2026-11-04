@@ -96,6 +96,7 @@ class SentinelPipeline:
         git_ops: GitOps | None = None,
         baseline_ref: str | None = None,
         max_attempts: int = 2,
+        target_branch: str = "main",
         model_factory: Callable[[OrchestrationSession], ChatModelBase] | None = None,
         coder: AgentRole | None = None,
         tester: AgentRole | None = None,
@@ -108,6 +109,7 @@ class SentinelPipeline:
             sanitizer=sanitizer if sanitizer is not None else RegexSanitizer(),
             git_ops=git_ops if git_ops is not None else StubGitOps(),
             policy=policy if policy is not None else MatrixPermissionPolicy(),
+            target_branch=target_branch,
         )
         self._orchestrator = Orchestrator(
             coder=coder if coder is not None else Coder(),
@@ -116,6 +118,7 @@ class SentinelPipeline:
             manager=self._manager,
             max_attempts=max_attempts,
             baseline_ref=baseline_ref,
+            target_branch=target_branch,
         )
         self._model_factory = model_factory
 

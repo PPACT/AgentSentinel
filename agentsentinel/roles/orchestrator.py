@@ -18,7 +18,12 @@ from agentscope.message import UserMsg
 from agentscope.model import ChatModelBase
 
 from agentsentinel.contracts import TaskState, TaskStatus, TestStatus
-from agentsentinel.governance.permissions import ORCHESTRATOR_NAME
+from agentsentinel.governance.permissions import (
+    ACTION_PUSH,
+    ACTION_REVERT,
+    ORCHESTRATOR_NAME,
+    Mandate,
+)
 from agentsentinel.roles.base import (
     AgentResult,
     AgentRole,
@@ -127,6 +132,7 @@ class OrchestrationSession:
         manager: Manager,
         max_attempts: int,
         baseline_ref: str | None,
+        target_branch: str = "main",
     ) -> None:
         self.task = task
         self.workspace = workspace
@@ -142,6 +148,7 @@ class OrchestrationSession:
         self._manager = manager
         self._max_attempts = max_attempts
         self._baseline_ref = baseline_ref
+        self._target_branch = target_branch
         self._reverted_to: str | None = None
         self._blocked_reason = ""
 
@@ -169,6 +176,11 @@ class OrchestrationSession:
         published = self._manager.publish(
             caller=ORCHESTRATOR_NAME,
             commit_message=commit_message,
+            mandate=Mandate(
+                caller=ORCHESTRATOR_NAME,
+                allowed_action=ACTION_PUSH,
+                target_branch=self._target_branch,
+            ),
             test_status=TestStatus.PASS,
             artifacts=tuple(self.artifacts),
         )
@@ -260,7 +272,16 @@ class OrchestrationSession:
 
     def _revert(self) -> str:
         ref = self._resolve_baseline()
-        self._manager.revert(caller=ORCHESTRATOR_NAME, ref=ref, test_status=TestStatus.FAIL)
+        self._manager.revert(
+            caller=ORCHESTRATOR_NAME,
+            ref=ref,
+            test_status=TestStatus.FAIL,
+            mandate=Mandate(
+                caller=ORCHESTRATOR_NAME,
+                allowed_action=ACTION_REVERT,
+                target_branch=self._target_branch,
+            ),
+        )
         self.state = SessionState.REVERTED
         self._reverted_to = ref
         self.board.update(TaskState.FAILED, f"连续失败，已回退到 {ref}")
@@ -323,6 +344,7 @@ class Orchestrator:
         *,
         max_attempts: int = 2,
         baseline_ref: str | None = None,
+        target_branch: str = "main",
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts 必须至少为 1")
@@ -333,6 +355,7 @@ class Orchestrator:
         self._max_attempts = max_attempts
         # 必须传入真实基线 tag；None 时回退会报错，绝不静默使用 HEAD。
         self._baseline_ref = baseline_ref
+        self._target_branch = target_branch
         self._active_session: OrchestrationSession | None = None
         self._last_agent: Agent | None = None
 
@@ -352,6 +375,7 @@ class Orchestrator:
             manager=self._manager,
             max_attempts=self._max_attempts,
             baseline_ref=self._baseline_ref,
+            target_branch=self._target_branch,
         )
         self._active_session = session
         return session

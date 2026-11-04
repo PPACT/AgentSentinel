@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from agentscope.permission import PermissionBehavior, PermissionMode
+from pydantic import BaseModel, ConfigDict
 
 from agentsentinel.contracts import ScanVerdict
 from agentsentinel.governance.sanitizer import Sanitizer
@@ -19,6 +20,10 @@ ORCHESTRATOR_NAME = "Orchestrator"
 RESET_TOOL = "git_reset_to_baseline"
 HIGH_RISK_TOOLS = frozenset({"git_commit", "git_push", "git_tag_baseline"})
 FORCE_PUSH_TOOLS = frozenset({"git_push_force", "git_force_push"})
+
+# Mandate 票据的动作口径与工具名一致。
+ACTION_PUSH = "git_push"
+ACTION_REVERT = "git_reset_to_baseline"
 
 
 class PermissionDecision(StrEnum):
@@ -31,6 +36,40 @@ class PermissionDecision(StrEnum):
 
 class PermissionPolicy(Protocol):
     def check(self, tool: str, caller: str) -> PermissionDecision: ...
+
+
+class Mandate(BaseModel):
+    """MVP 授权票据：纯 JSON 最小字段，首期不做加密/签名。
+
+    字段口径（总体规划 §11.2）：``caller`` 发起方、``allowed_action`` 允许动作、
+    ``target_branch`` 目标分支。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    caller: str
+    allowed_action: str
+    target_branch: str
+
+
+def verify_mandate(
+    mandate: Mandate | None,
+    *,
+    caller: str,
+    action: str,
+    target_branch: str | None,
+) -> PermissionDecision:
+    """按调用方、动作与目标分支逐字段比对票据；缺票据即 DENY。
+
+    ``target_branch`` 为空表示调用点不比对分支。
+    """
+    if mandate is None:
+        return PermissionDecision.DENY
+    if mandate.caller != caller or mandate.allowed_action != action:
+        return PermissionDecision.DENY
+    if target_branch and mandate.target_branch != target_branch:
+        return PermissionDecision.DENY
+    return PermissionDecision.ALLOW
 
 
 class AllowAllPolicy:

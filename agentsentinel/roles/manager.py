@@ -9,14 +9,19 @@ from pathlib import Path
 
 from agentscope.agent import Agent
 from agentscope.model import ChatModelBase
+from pydantic import ValidationError
 
 from agentsentinel.audit import AuditLogger
 from agentsentinel.contracts import ActionType, AuditRecord, ScanVerdict, TestStatus
 from agentsentinel.governance.permissions import (
+    ACTION_PUSH,
+    ACTION_REVERT,
     ORCHESTRATOR_NAME,
+    Mandate,
     PermissionDecision,
     PermissionPolicy,
     preflight,
+    verify_mandate,
 )
 from agentsentinel.governance.sanitizer import Sanitizer
 from agentsentinel.roles.base import RoleSpec, build_role_agent
@@ -58,11 +63,14 @@ class Manager:
         sanitizer: Sanitizer,
         git_ops: GitOps,
         policy: PermissionPolicy,
+        *,
+        target_branch: str = "main",
     ) -> None:
         self._workspace = workspace
         self._sanitizer = sanitizer
         self._git_ops = git_ops
         self._policy = policy
+        self._target_branch = target_branch
         self._last_baseline_tag: str | None = None
 
     @property
@@ -78,17 +86,38 @@ class Manager:
         self,
         caller: str,
         commit_message: str,
+        *,
+        mandate: Mandate | None,
         payload: str = "",
         test_status: TestStatus = TestStatus.PASS,
         artifacts: Sequence[Path] = (),
     ) -> bool:
-        """权限 + 扫描 → 提交 → 打基线 → 推送；DENY 为终态，不重试。
+        """票据 + 权限 + 扫描 → 提交 → 打基线 → 推送；DENY 为终态，不重试。
 
         传入 ``artifacts`` 时由 Manager 从工作区读取内容用于扫描，
         主编排只需交出路径（上下文卸载）。
         """
         if artifacts:
             payload = "\n\n".join(path.read_text(encoding="utf-8") for path in artifacts)
+        if (
+            mandate is None
+            or verify_mandate(
+                mandate,
+                caller=caller,
+                action=ACTION_PUSH,
+                target_branch=self._target_branch,
+            )
+            is not PermissionDecision.ALLOW
+        ):
+            self._write_audit(
+                caller=caller,
+                commit_hash="",
+                scan_result=ScanVerdict.NOT_RUN,
+                test_status=test_status,
+                action=ActionType.PUSH,
+                reason=PERMISSION_DENIED_REASON,
+            )
+            return False
         check = preflight(self._policy, self._sanitizer, "git_push", caller, payload)
         if check.decision is not PermissionDecision.ALLOW:
             if check.scan_result is ScanVerdict.NOT_RUN:
@@ -112,7 +141,7 @@ class Manager:
         self._git_ops.tag_baseline(baseline_tag, caller=caller)
         self._last_baseline_tag = baseline_tag
         try:
-            self._git_ops.push(caller=caller, payload=payload)
+            self._git_ops.push(caller=caller, payload=payload, mandate=mandate)
         except ScanDeniedError as exc:
             # 工具层再次拦截；审计后终止，不重试。
             self._write_audit(
@@ -135,8 +164,35 @@ class Manager:
         )
         return True
 
-    def revert(self, caller: str, ref: str, test_status: TestStatus) -> None:
-        """回退仅接受主编排调用；拒绝也写审计（规范 §5）。"""
+    def revert(
+        self,
+        caller: str,
+        ref: str,
+        test_status: TestStatus,
+        *,
+        mandate: Mandate | None,
+    ) -> None:
+        """回退仅接受主编排凭有效票据调用；拒绝也写审计（规范 §5）。"""
+        if (
+            mandate is None
+            or verify_mandate(
+                mandate,
+                caller=caller,
+                action=ACTION_REVERT,
+                target_branch=self._target_branch,
+            )
+            is not PermissionDecision.ALLOW
+        ):
+            self._write_audit(
+                caller=caller,
+                commit_hash=ref,
+                scan_result=ScanVerdict.NOT_RUN,
+                test_status=test_status,
+                action=ActionType.REVERT,
+                reason=PERMISSION_DENIED_REASON,
+            )
+            raise PermissionError(f"{caller} 的 Mandate 不足以执行回退")
+
         decision = self._policy.check("git_reset_to_baseline", caller)
         if caller != ORCHESTRATOR_NAME or decision is not PermissionDecision.ALLOW:
             self._write_audit(
@@ -149,7 +205,7 @@ class Manager:
             )
             raise PermissionError(f"{caller} 无权执行回退")
 
-        self._git_ops.reset_to_baseline(ref, caller=caller)
+        self._git_ops.reset_to_baseline(ref, caller=caller, mandate=mandate)
         # 回退不涉及内容扫描，如实记录 NOT_RUN。
         self._write_audit(
             caller=caller,
@@ -159,6 +215,14 @@ class Manager:
             action=ActionType.REVERT,
             reason=REVERT_NO_SCAN_REASON,
         )
+
+    @staticmethod
+    def _require_mandate(mandate: Mandate | None) -> Mandate:
+        """模型工具入口收到的是 JSON 票据；缺失或字段非法一律按拒绝处理。"""
+        try:
+            return Mandate.model_validate(mandate)
+        except ValidationError as exc:
+            raise PermissionError("缺少有效 Mandate 票据") from exc
 
     def toolkit_extras(self) -> Mapping[str, Callable[..., object]]:
         """Manager 白名单工具的具体实现；高危工具仍受权限矩阵约束。"""
@@ -180,13 +244,18 @@ class Manager:
             """
             return self._git_ops.commit(message, caller=self.name)
 
-        def git_push(payload: str = "") -> str:
+        def git_push(payload: str = "", mandate: Mandate | None = None) -> str:
             """Push to the remote after a second scan.
 
             Args:
                 payload: Text to scan before pushing.
+                mandate: Mandate ticket (caller / allowed_action / target_branch).
             """
-            self._git_ops.push(caller=self.name, payload=payload)
+            self._git_ops.push(
+                caller=self.name,
+                payload=payload,
+                mandate=self._require_mandate(mandate),
+            )
             return "pushed"
 
         def git_tag_baseline(name: str) -> str:
@@ -198,13 +267,18 @@ class Manager:
             self._git_ops.tag_baseline(name, caller=self.name)
             return name
 
-        def git_reset_to_baseline(ref: str) -> str:
+        def git_reset_to_baseline(ref: str, mandate: Mandate | None = None) -> str:
             """Roll back to a baseline tag. Orchestrator only.
 
             Args:
                 ref: Baseline tag.
+                mandate: Mandate ticket (caller / allowed_action / target_branch).
             """
-            self._git_ops.reset_to_baseline(ref, caller=self.name)
+            self._git_ops.reset_to_baseline(
+                ref,
+                caller=self.name,
+                mandate=self._require_mandate(mandate),
+            )
             return ref
 
         def audit_logger(

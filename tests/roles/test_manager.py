@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from agentsentinel.contracts import ScanVerdict, TestStatus
-from agentsentinel.governance import MatrixPermissionPolicy, RegexSanitizer
+from agentsentinel.governance import (
+    ACTION_PUSH,
+    Mandate,
+    MatrixPermissionPolicy,
+    RegexSanitizer,
+)
 from agentsentinel.roles import Manager
 from agentsentinel.tools import StubGitOps
 from agentsentinel.workspace import Workspace
@@ -34,11 +39,17 @@ def test_manager_uses_manager_prompt() -> None:
 
 def test_manager_blocks_secret_payload_before_git(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
+    sample_value = "sk-" + "a1" * 10  # secret-fixture: 假密钥
 
     published = manager.publish(
         caller="Orchestrator",
         commit_message="feat: demo",
-        payload='key = "' + "sk-" + "abcdefghijklmnopqrstuvwxyz123456" + '"',
+        mandate=Mandate(
+            caller="Orchestrator",
+            allowed_action=ACTION_PUSH,
+            target_branch="main",
+        ),
+        payload=f'key = "{sample_value}"',
         test_status=TestStatus.PASS,
     )
 

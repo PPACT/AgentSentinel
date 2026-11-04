@@ -16,7 +16,13 @@ from agentscope.message import Base64Source, DataBlock, URLSource, UserMsg
 
 from agentsentinel.__main__ import main
 from agentsentinel.contracts import TaskState, TestStatus
-from agentsentinel.governance import DenyAllSanitizer, MatrixPermissionPolicy, RegexSanitizer
+from agentsentinel.governance import (
+    ACTION_REVERT,
+    DenyAllSanitizer,
+    Mandate,
+    MatrixPermissionPolicy,
+    RegexSanitizer,
+)
 from agentsentinel.pipeline import SentinelPipeline
 from agentsentinel.roles import (
     AgentResult,
@@ -224,7 +230,16 @@ def test_revert_is_rejected_and_audited_for_non_orchestrator(tmp_path: Path) -> 
     pipeline = SentinelPipeline(workspace, git_ops=git_ops, baseline_ref="baseline-seed")
 
     with pytest.raises(PermissionError):
-        pipeline.manager.revert(caller="Coder", ref="baseline-seed", test_status=TestStatus.FAIL)
+        pipeline.manager.revert(
+            caller="Coder",
+            ref="baseline-seed",
+            test_status=TestStatus.FAIL,
+            mandate=Mandate(
+                caller="Coder",
+                allowed_action=ACTION_REVERT,
+                target_branch="main",
+            ),
+        )
 
     assert not any(call[0] == "reset_to_baseline" for call in git_ops.calls)
     record = _read_audit(pipeline.manager.audit_log_path)[-1]

@@ -9,8 +9,11 @@ import pytest
 import agentsentinel
 from agentsentinel.contracts import ScanVerdict, TestStatus
 from agentsentinel.governance import (
+    ACTION_PUSH,
+    ACTION_REVERT,
     AllowAllPolicy,
     AllowAllSanitizer,
+    Mandate,
     MatrixPermissionPolicy,
     RegexSanitizer,
 )
@@ -90,13 +93,17 @@ def test_prompts_exist_and_are_not_placeholders() -> None:
         assert "TODO(M3)" not in text
 
 
+def _mandate(caller: str, action: str) -> Mandate:
+    return Mandate(caller=caller, allowed_action=action, target_branch="main")
+
+
 def test_stub_git_ops_only_records_calls() -> None:
     git_ops = StubGitOps()
 
     commit_hash = git_ops.commit("msg")
     git_ops.tag_baseline("baseline")
-    git_ops.push()
-    git_ops.reset_to_baseline("ref")
+    git_ops.push(mandate=_mandate("Manager", ACTION_PUSH))
+    git_ops.reset_to_baseline("ref", mandate=_mandate("Orchestrator", ACTION_REVERT))
 
     assert commit_hash == "stub0000001"
     assert git_ops.calls == [
@@ -123,14 +130,24 @@ def test_revert_rejects_non_orchestrator(tmp_path: Path) -> None:
     manager = _manager(Workspace(tmp_path / "workspace"))
 
     with pytest.raises(PermissionError):
-        manager.revert("Coder", "baseline-ref", TestStatus.FAIL)
+        manager.revert(
+            "Coder",
+            "baseline-ref",
+            TestStatus.FAIL,
+            mandate=_mandate("Coder", ACTION_REVERT),
+        )
 
 
 def test_revert_rejection_is_audited(tmp_path: Path) -> None:
     manager = _manager(Workspace(tmp_path / "workspace"))
 
     with pytest.raises(PermissionError):
-        manager.revert("Coder", "baseline-ref", TestStatus.FAIL)
+        manager.revert(
+            "Coder",
+            "baseline-ref",
+            TestStatus.FAIL,
+            mandate=_mandate("Coder", ACTION_REVERT),
+        )
 
     records = [
         json.loads(line) for line in manager.audit_log_path.read_text(encoding="utf-8").splitlines()
@@ -148,6 +165,7 @@ def test_publish_denied_by_policy_is_audited(tmp_path: Path) -> None:
     published = manager.publish(
         caller="Manager",
         commit_message="feat: demo",
+        mandate=_mandate("Manager", ACTION_PUSH),
         payload="clean content",
         test_status=TestStatus.PASS,
     )
@@ -175,6 +193,7 @@ def test_publish_scan_denial_audit_uses_scan_denied_reason(tmp_path: Path) -> No
     published = manager.publish(
         caller="Orchestrator",
         commit_message="feat: demo",
+        mandate=_mandate("Orchestrator", ACTION_PUSH),
         payload=f'key = "{sample_value}"',
         test_status=TestStatus.PASS,
     )
@@ -193,13 +212,25 @@ def test_git_tool_second_scan_denial_is_audited(tmp_path: Path) -> None:
         def commit(self, message: str, *, caller: str = "Manager") -> str:
             return "abc123"
 
-        def push(self, *, caller: str = "Manager", payload: str = "") -> None:
+        def push(
+            self,
+            *,
+            mandate: Mandate,
+            caller: str = "Manager",
+            payload: str = "",
+        ) -> None:
             raise ScanDeniedError("detect-secrets:AWS Access Key (line 7)")
 
         def tag_baseline(self, name: str, *, caller: str = "Manager") -> None:
             return None
 
-        def reset_to_baseline(self, ref: str, *, caller: str = "Orchestrator") -> None:
+        def reset_to_baseline(
+            self,
+            ref: str,
+            *,
+            mandate: Mandate,
+            caller: str = "Orchestrator",
+        ) -> None:
             return None
 
     manager = Manager(
@@ -212,6 +243,7 @@ def test_git_tool_second_scan_denial_is_audited(tmp_path: Path) -> None:
     published = manager.publish(
         caller="Orchestrator",
         commit_message="feat: demo",
+        mandate=_mandate("Orchestrator", ACTION_PUSH),
         payload="clean",
         test_status=TestStatus.PASS,
     )

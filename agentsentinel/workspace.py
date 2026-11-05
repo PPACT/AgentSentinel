@@ -40,6 +40,11 @@ class Workspace:
     def audit_dir(self) -> Path:
         return self._root / "audit"
 
+    @property
+    def pipeline_state_path(self) -> Path:
+        """会话状态流转日志；与测试报告同目录，独立于审计日志。"""
+        return self.reports_dir / "pipeline-state.jsonl"
+
     def ensure(self) -> None:
         """创建四类产物目录；重复调用不破坏已有内容。"""
         for name in ARTIFACT_DIRS:

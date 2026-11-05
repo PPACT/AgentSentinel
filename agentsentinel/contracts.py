@@ -75,6 +75,20 @@ class AuditRecord(BaseModel):
     reason: str = ""
 
 
+class StateRecord(BaseModel):
+    """会话状态流转记录；写入 workspace/reports/pipeline-state.jsonl。
+
+    与 AuditRecord 解耦：审计只保留 push / revert / DENY，状态流转单独成流。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    timestamp: datetime
+    from_state: str
+    to_state: str
+    detail: str = ""
+
+
 class TaskStatus(BaseModel):
     """主编排维护的任务状态快照。"""
 

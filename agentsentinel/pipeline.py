@@ -27,6 +27,7 @@ from agentsentinel.roles import (
 )
 from agentsentinel.roles.orchestrator import OrchestrationSession, SessionState
 from agentsentinel.roles.runtime import StubChatModel, text_reply, tool_call
+from agentsentinel.state import StateLogger
 from agentsentinel.tools.git_ops import GitOps, StubGitOps
 from agentsentinel.workspace import Workspace
 
@@ -119,6 +120,7 @@ class SentinelPipeline:
             max_attempts=max_attempts,
             baseline_ref=baseline_ref,
             target_branch=target_branch,
+            state_logger=StateLogger(self._workspace.pipeline_state_path),
         )
         self._model_factory = model_factory
 

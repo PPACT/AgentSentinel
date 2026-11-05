@@ -17,7 +17,7 @@ from agentscope.agent import Agent
 from agentscope.message import UserMsg
 from agentscope.model import ChatModelBase
 
-from agentsentinel.contracts import TaskState, TaskStatus, TestStatus
+from agentsentinel.contracts import StateRecord, TaskState, TaskStatus, TestStatus
 from agentsentinel.governance.permissions import (
     ACTION_PUSH,
     ACTION_REVERT,
@@ -36,6 +36,7 @@ from agentsentinel.roles.manager import Manager
 from agentsentinel.roles.offload import WorkspaceOffloader
 from agentsentinel.roles.runtime import run_agent_sync
 from agentsentinel.roles.toolkit import build_toolkit
+from agentsentinel.state import StateLogger
 from agentsentinel.workspace import Workspace
 
 TASK_STATUS_FILE = "reports/task-status.json"
@@ -133,6 +134,7 @@ class OrchestrationSession:
         max_attempts: int,
         baseline_ref: str | None,
         target_branch: str = "main",
+        state_logger: StateLogger | None = None,
     ) -> None:
         self.task = task
         self.workspace = workspace
@@ -149,6 +151,9 @@ class OrchestrationSession:
         self._max_attempts = max_attempts
         self._baseline_ref = baseline_ref
         self._target_branch = target_branch
+        self._state_logger = (
+            state_logger if state_logger is not None else StateLogger(workspace.pipeline_state_path)
+        )
         self._reverted_to: str | None = None
         self._blocked_reason = ""
 
@@ -185,9 +190,9 @@ class OrchestrationSession:
             artifacts=tuple(self.artifacts),
         )
         if not published:
-            self.state = SessionState.DENIED
+            self._transition(SessionState.DENIED)
             return "推送被治理层阻断：DENY 为终态，不重试"
-        self.state = SessionState.PUBLISHED
+        self._transition(SessionState.PUBLISHED)
         return f"已推送；审计 {self._manager.audit_log_path}"
 
     def revert(self) -> str:
@@ -231,7 +236,7 @@ class OrchestrationSession:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Coder")
         result = self._coder.handle(task, self.workspace, feedback=feedback)
         self.artifacts.extend(result.artifacts)
-        self.state = SessionState.CODED
+        self._transition(SessionState.CODED, "编码完成，等待测试")
         self.board.update(TaskState.IN_PROGRESS, "编码完成，等待测试")
         return self._summary(result)
 
@@ -241,7 +246,7 @@ class OrchestrationSession:
         result = self._tester.handle(task, self.workspace, feedback=self.feedback)
         self.artifacts.extend(result.artifacts)
         if result.status is TestStatus.PASS:
-            self.state = SessionState.TEST_PASSED
+            self._transition(SessionState.TEST_PASSED, "测试通过")
             self.board.update(TaskState.PASSED, "测试通过")
             return self._summary(result)
 
@@ -252,12 +257,12 @@ class OrchestrationSession:
                 ref = self._revert()
             except ValueError as exc:
                 # 没有真实基线 tag 时不得静默回退到 HEAD：终止并如实报告。
-                self.state = SessionState.BLOCKED
                 self._blocked_reason = str(exc)
+                self._transition(SessionState.BLOCKED, str(exc))
                 self.board.update(TaskState.FAILED, str(exc))
                 return f"{self._summary(result)}；回退失败：{exc}"
             return f"{self._summary(result)}；连续失败 {self.attempts} 次，已回退到 {ref}"
-        self.state = SessionState.TEST_FAILED
+        self._transition(SessionState.TEST_FAILED, result.summary)
         self.board.update(TaskState.FAILED, result.summary)
         return f"{self._summary(result)}；第 {self.attempts} 次失败，回传 Coder 局部修复"
 
@@ -266,7 +271,7 @@ class OrchestrationSession:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Writer")
         result = self._writer.handle(task, self.workspace, feedback=self.feedback)
         self.artifacts.extend(result.artifacts)
-        self.state = SessionState.DOC_READY
+        self._transition(SessionState.DOC_READY, "文档已更新，等待推送")
         self.board.update(TaskState.PASSED, "文档已更新，等待推送")
         return self._summary(result)
 
@@ -282,10 +287,23 @@ class OrchestrationSession:
                 target_branch=self._target_branch,
             ),
         )
-        self.state = SessionState.REVERTED
+        self._transition(SessionState.REVERTED, f"连续失败，已回退到 {ref}")
         self._reverted_to = ref
         self.board.update(TaskState.FAILED, f"连续失败，已回退到 {ref}")
         return ref
+
+    def _transition(self, target: SessionState, detail: str = "") -> None:
+        """先落状态再写流转记录；from_state 取变更前的真实状态。"""
+        origin = self.state
+        self.state = target
+        self._state_logger.record(
+            StateRecord(
+                timestamp=datetime.now(UTC),
+                from_state=origin.value,
+                to_state=target.value,
+                detail=detail,
+            )
+        )
 
     def _resolve_baseline(self) -> str:
         ref = self._baseline_ref or self._manager.last_baseline_tag
@@ -345,6 +363,7 @@ class Orchestrator:
         max_attempts: int = 2,
         baseline_ref: str | None = None,
         target_branch: str = "main",
+        state_logger: StateLogger | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts 必须至少为 1")
@@ -356,6 +375,7 @@ class Orchestrator:
         # 必须传入真实基线 tag；None 时回退会报错，绝不静默使用 HEAD。
         self._baseline_ref = baseline_ref
         self._target_branch = target_branch
+        self._state_logger = state_logger
         self._active_session: OrchestrationSession | None = None
         self._last_agent: Agent | None = None
 
@@ -376,6 +396,7 @@ class Orchestrator:
             max_attempts=self._max_attempts,
             baseline_ref=self._baseline_ref,
             target_branch=self._target_branch,
+            state_logger=self._state_logger,
         )
         self._active_session = session
         return session

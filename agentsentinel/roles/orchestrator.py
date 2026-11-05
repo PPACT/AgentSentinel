@@ -135,6 +135,7 @@ class OrchestrationSession:
         baseline_ref: str | None,
         target_branch: str = "main",
         state_logger: StateLogger | None = None,
+        role_model_for: Callable[[str], ChatModelBase | None] | None = None,
     ) -> None:
         self.task = task
         self.workspace = workspace
@@ -154,6 +155,7 @@ class OrchestrationSession:
         self._state_logger = (
             state_logger if state_logger is not None else StateLogger(workspace.pipeline_state_path)
         )
+        self._role_model_for = role_model_for
         self._reverted_to: str | None = None
         self._blocked_reason = ""
 
@@ -234,8 +236,20 @@ class OrchestrationSession:
     def _assign_coder(self, task: str, feedback: str) -> str:
         if self.state not in {SessionState.CODING, SessionState.TEST_FAILED}:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Coder")
-        result = self._coder.handle(task, self.workspace, feedback=feedback)
+        model = self._model_for("coder")
+        result = (
+            self._coder.handle(task, self.workspace, feedback=feedback)
+            if model is None
+            else self._coder.handle(task, self.workspace, feedback=feedback, model=model)
+        )
         self.artifacts.extend(result.artifacts)
+        if result.status is TestStatus.FAIL:
+            # Coder 未产出任何文件：这是真实模式下的失败，不得进入 Writer。
+            detail = f"Coder 未产出可用文件：{result.summary}"
+            self._blocked_reason = detail
+            self._transition(SessionState.BLOCKED, detail)
+            self.board.update(TaskState.FAILED, detail)
+            return self._summary(result)
         self._transition(SessionState.CODED, "编码完成，等待测试")
         self.board.update(TaskState.IN_PROGRESS, "编码完成，等待测试")
         return self._summary(result)
@@ -248,8 +262,9 @@ class OrchestrationSession:
         """
         if self.state is not SessionState.CODED:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Tester")
+        model = self._model_for("tester")
         repairs = 0
-        result = self._tester.handle(task, self.workspace, feedback=self.feedback)
+        result = self._run_tester(task, model)
         self.artifacts.extend(result.artifacts)
 
         while result.status is not TestStatus.PASS:
@@ -269,9 +284,11 @@ class OrchestrationSession:
             # 直通消息复用 AgentResult.summary：失败摘要不经过主编排模型。
             self._transition(SessionState.TEST_FAILED, result.summary)
             self.board.update(TaskState.FAILED, result.summary)
-            self._assign_coder(task, result.summary)
+            coder_report = self._assign_coder(task, result.summary)
             repairs += 1
-            result = self._tester.handle(task, self.workspace, feedback=self.feedback)
+            if self.terminal:
+                return f"{self._summary(result)}；{coder_report}"
+            result = self._run_tester(task, model)
             self.artifacts.extend(result.artifacts)
 
         self._transition(SessionState.TEST_PASSED, "测试通过")
@@ -280,10 +297,20 @@ class OrchestrationSession:
             return f"{self._summary(result)}；Coder 局部修复 {repairs} 次后重测通过"
         return self._summary(result)
 
+    def _run_tester(self, task: str, model: ChatModelBase | None) -> AgentResult:
+        if model is None:
+            return self._tester.handle(task, self.workspace, feedback=self.feedback)
+        return self._tester.handle(task, self.workspace, feedback=self.feedback, model=model)
+
     def _assign_writer(self, task: str) -> str:
         if self.state is not SessionState.TEST_PASSED:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Writer")
-        result = self._writer.handle(task, self.workspace, feedback=self.feedback)
+        model = self._model_for("writer")
+        result = (
+            self._writer.handle(task, self.workspace, feedback=self.feedback)
+            if model is None
+            else self._writer.handle(task, self.workspace, feedback=self.feedback, model=model)
+        )
         self.artifacts.extend(result.artifacts)
         self._transition(SessionState.DOC_READY, "文档已更新，等待推送")
         self.board.update(TaskState.PASSED, "文档已更新，等待推送")
@@ -325,6 +352,12 @@ class OrchestrationSession:
             raise ValueError("缺少真实基线 tag：未传入 baseline_ref，且本会话尚无成功推送")
         return ref
 
+    def _model_for(self, role: str) -> ChatModelBase | None:
+        """真实模式下按角色取模型；未注入时返回 None，走确定性 ``handle``。"""
+        if self._role_model_for is None:
+            return None
+        return self._role_model_for(role)
+
     def _summary(self, result: AgentResult) -> str:
         paths = ", ".join(str(path) for path in result.artifacts)
         return f"{result.agent}: {result.summary}" + (f"；产物 {paths}" if paths else "")
@@ -338,7 +371,9 @@ class OrchestrationSession:
             case SessionState.REVERTED:
                 return f"测试连续失败 {self.attempts} 次，已回退到 {self._reverted_to}"
             case SessionState.BLOCKED:
-                return f"测试连续失败 {self.attempts} 次；{self._blocked_reason}"
+                if self.attempts:
+                    return f"测试连续失败 {self.attempts} 次；{self._blocked_reason}"
+                return self._blocked_reason
             case _:
                 return f"编排未完成，最终状态 {self.state.value}"
 
@@ -378,6 +413,7 @@ class Orchestrator:
         baseline_ref: str | None = None,
         target_branch: str = "main",
         state_logger: StateLogger | None = None,
+        role_model_for: Callable[[str], ChatModelBase | None] | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts 必须至少为 1")
@@ -390,6 +426,7 @@ class Orchestrator:
         self._baseline_ref = baseline_ref
         self._target_branch = target_branch
         self._state_logger = state_logger
+        self._role_model_for = role_model_for
         self._active_session: OrchestrationSession | None = None
         self._last_agent: Agent | None = None
 
@@ -411,6 +448,7 @@ class Orchestrator:
             baseline_ref=self._baseline_ref,
             target_branch=self._target_branch,
             state_logger=self._state_logger,
+            role_model_for=self._role_model_for,
         )
         self._active_session = session
         return session

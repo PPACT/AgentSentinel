@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from agentscope.agent import Agent
 from agentscope.message import Base64Source, DataBlock, URLSource, UserMsg
+from agentscope.model import ChatModelBase
 
 from agentsentinel.__main__ import main
 from agentsentinel.contracts import TaskState, TestStatus
@@ -58,7 +59,14 @@ AUDIT_FIELDS = {
 class _AlwaysFailingTester(Tester):
     """固定返回 FAIL，用于触发连续失败回退。"""
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         return AgentResult(agent=self.name, summary="forced failure", status=TestStatus.FAIL)
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from agentscope.message import Msg, ToolResultBlock
-from agentscope.model import ChatResponse
+from agentscope.model import ChatModelBase, ChatResponse
 
 from agentsentinel.contracts import TestStatus
 from agentsentinel.governance import MatrixPermissionPolicy, RegexSanitizer
@@ -31,7 +31,14 @@ class _AlwaysFailingTester(Tester):
     def __init__(self) -> None:
         self.calls = 0
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         self.calls += 1
         return AgentResult(
             agent=self.name,
@@ -47,7 +54,14 @@ class _FailThenPassTester(Tester):
         self.calls = 0
         self.feedback_seen: list[str] = []
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         self.calls += 1
         self.feedback_seen.append(feedback)
         if self.calls == 1:
@@ -56,16 +70,23 @@ class _FailThenPassTester(Tester):
                 summary="stub check failed: main missing",
                 status=TestStatus.FAIL,
             )
-        return super().handle(task, workspace, feedback=feedback)
+        return super().handle(task, workspace, feedback=feedback, model=model)
 
 
 class _CountingCoder(Coder):
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         self.calls.append(feedback)
-        return super().handle(task, workspace, feedback=feedback)
+        return super().handle(task, workspace, feedback=feedback, model=model)
 
 
 def _build_orchestrator(

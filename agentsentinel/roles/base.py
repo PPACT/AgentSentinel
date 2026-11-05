@@ -71,7 +71,14 @@ class AgentRole(Protocol):
     tools: tuple[str, ...]
     spec: RoleSpec
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult: ...
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult: ...
 
     def build_agent(self, model: ChatModelBase) -> Agent: ...
 

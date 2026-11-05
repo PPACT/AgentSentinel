@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from agentscope.model import ChatModelBase
 from git import Repo
 from pydantic import ValidationError
 
@@ -334,7 +335,14 @@ class _RecordingGitOps(StubGitOps):
 
 
 class _AlwaysFailingTester(Tester):
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         return AgentResult(agent=self.name, summary="forced failure", status=TestStatus.FAIL)
 
 

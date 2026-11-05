@@ -8,6 +8,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from agentscope.agent import Agent
@@ -80,9 +81,19 @@ async def _reply(agent: Agent, message: Msg) -> Msg:
 
 
 def run_agent_sync(agent: Agent, message: Msg) -> Msg:
-    """在同步编排中执行一次 Agent 回复；禁止嵌套在已有事件循环里调用。"""
+    """在同步编排中执行一次 Agent 回复。
+
+    无运行中的事件循环时直接 ``asyncio.run``；若已有事件循环（编排 Agent 的
+    工具在异步上下文中调用专家模型），在独立线程开新循环，避免嵌套
+    ``asyncio.run`` 报错。专家 Agent 与其模型只在该线程内使用。
+    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(_reply(agent, message))
-    raise RuntimeError("离线编排不能在已运行的事件循环中同步调用")
+
+    def _run_in_thread() -> Msg:
+        return asyncio.run(_reply(agent, message))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run_in_thread).result()

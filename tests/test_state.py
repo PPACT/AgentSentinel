@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from agentscope.model import ChatModelBase
 from pydantic import ValidationError
 
 from agentsentinel.contracts import StateRecord, TestStatus
@@ -21,7 +22,14 @@ from agentsentinel.workspace import Workspace
 
 
 class _AlwaysFailingTester(Tester):
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         return AgentResult(agent=self.name, summary="forced failure", status=TestStatus.FAIL)
 
 
@@ -31,7 +39,14 @@ class _FailOnceTester(Tester):
     def __init__(self) -> None:
         self.calls = 0
 
-    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+    def handle(
+        self,
+        task: str,
+        workspace: Workspace,
+        *,
+        feedback: str = "",
+        model: ChatModelBase | None = None,
+    ) -> AgentResult:
         self.calls += 1
         if self.calls == 1:
             return AgentResult(
@@ -39,7 +54,7 @@ class _FailOnceTester(Tester):
                 summary="stub check failed: main missing",
                 status=TestStatus.FAIL,
             )
-        return super().handle(task, workspace, feedback=feedback)
+        return super().handle(task, workspace, feedback=feedback, model=model)
 
 
 def _read_lines(path: Path) -> list[dict[str, object]]:

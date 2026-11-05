@@ -8,14 +8,16 @@ AgentScope 2.0.8 没有 ``TeamPipeline``；可用编排原语是 ``Agent`` 与 `
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from agentscope.message import Msg
 from agentscope.model import ChatModelBase, ChatResponse
 
+from agentsentinel.config import Settings
 from agentsentinel.contracts import TaskStatus
 from agentsentinel.governance.permissions import MatrixPermissionPolicy, PermissionPolicy
 from agentsentinel.governance.sanitizer import RegexSanitizer, Sanitizer
+from agentsentinel.models import ModelRouter
 from agentsentinel.roles import (
     AgentRole,
     Coder,
@@ -86,7 +88,11 @@ def scripted_model(session: OrchestrationSession) -> ChatModelBase:
 
 
 class SentinelPipeline:
-    """按规范 §4 串起分派 → 编码 → 测试 → 修复/回退 → 文档 → 扫描 → 推送 → 审计。"""
+    """按规范 §4 串起分派 → 编码 → 测试 → 修复/回退 → 文档 → 扫描 → 推送 → 审计。
+
+    默认 ``model_backend="stub"``：脚本模型驱动，零网络、行为与既有测试一致。
+    ``real`` 模式按 ``ModelRouter`` 逐角色下发真实模型；专家角色只拿工作区受限工具。
+    """
 
     def __init__(
         self,
@@ -102,7 +108,16 @@ class SentinelPipeline:
         coder: AgentRole | None = None,
         tester: AgentRole | None = None,
         writer: AgentRole | None = None,
+        model_backend: Literal["stub", "real"] = "stub",
+        model_router: ModelRouter | None = None,
+        settings: Settings | None = None,
     ) -> None:
+        if model_backend not in {"stub", "real"}:
+            raise ValueError(f"未知 model_backend: {model_backend}")
+        self._model_backend = model_backend
+        if model_backend == "real" and model_router is None:
+            model_router = ModelRouter(settings if settings is not None else Settings())
+        self._model_router = model_router
         self._workspace = workspace if workspace is not None else Workspace()
         self._workspace.ensure()
         self._manager = Manager(
@@ -121,6 +136,11 @@ class SentinelPipeline:
             baseline_ref=baseline_ref,
             target_branch=target_branch,
             state_logger=StateLogger(self._workspace.pipeline_state_path),
+            role_model_for=(
+                model_router.for_role
+                if model_backend == "real" and model_router is not None
+                else None
+            ),
         )
         self._model_factory = model_factory
 
@@ -133,8 +153,9 @@ class SentinelPipeline:
         return self._manager
 
     def run(self, task: str) -> PipelineResult:
-        factory = self._model_factory if self._model_factory is not None else scripted_model
-        outcome = self._orchestrator.run_with_model(task, self._workspace, factory)
+        outcome = self._orchestrator.run_with_model(
+            task, self._workspace, self._resolve_model_factory()
+        )
         return PipelineResult(
             status=outcome.status,
             summary=outcome.summary,
@@ -143,6 +164,22 @@ class SentinelPipeline:
             task_statuses=outcome.task_statuses,
             attempts=outcome.attempts,
         )
+
+    def _resolve_model_factory(self) -> Callable[[OrchestrationSession], ChatModelBase]:
+        """显式 model_factory > real 模式的 router > 默认脚本模型。"""
+        if self._model_factory is not None:
+            return self._model_factory
+        if self._model_backend == "real" and self._model_router is not None:
+            router = self._model_router
+
+            def orchestrator_factory(session: OrchestrationSession) -> ChatModelBase:
+                model = router.for_role("orchestrator")
+                if model is None:
+                    raise RuntimeError("real 模式缺少 orchestrator 模型")
+                return model
+
+            return orchestrator_factory
+        return scripted_model
 
 
 # 兼容 S1/M2/M3 的既有调用点；实现已替换为模型驱动的 SentinelPipeline。

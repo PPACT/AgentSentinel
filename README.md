@@ -124,7 +124,7 @@ SENTINEL_ECONOMY_API_KEY=
 
 SENTINEL_WEBHOOK_SECRET=<Webhook HMAC 密钥>
 SENTINEL_GIT_USER_NAME="AgentSentinel Bot"
-SENTINEL_GIT_USER_EMAIL="bot@agentsentinel.local"
+SENTINEL_GIT_USER_EMAIL="bot@example.com"
 SENTINEL_GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 ```
 

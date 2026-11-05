@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -22,6 +23,7 @@ from agentsentinel.api.webhook import (
     create_app_from_settings,
 )
 from agentsentinel.config import Settings
+from agentsentinel.workspace import Workspace
 
 # secret-fixture: 分段拼接的测试值，避免完整密钥形态落盘
 SIGNING_VALUE = "test" + "-secret"
@@ -86,6 +88,13 @@ def _call(
             background_tasks=background_tasks or BackgroundTasks(),
         )
     )
+
+
+def _workspace(tmp_path: Path) -> Workspace:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.ensure()
+    workspace.write_text("code/main.py", "def main() -> None:\n    pass\n")
+    return workspace
 
 
 def test_bad_signature_returns_401_without_dispatch() -> None:
@@ -197,18 +206,20 @@ def test_generic_source_still_uses_text_payload() -> None:
     assert _json(response) == {"decision": "DROP"}
 
 
-def test_create_app_from_settings_with_secret_accepts_signed_request() -> None:
+def test_create_app_from_settings_with_secret_accepts_signed_request(tmp_path: Path) -> None:
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
         webhook_secret=SecretStr(SIGNING_VALUE),
     )
-    app = create_app_from_settings(settings)
+    workspace = _workspace(tmp_path)
+    app = create_app_from_settings(settings, workspace=workspace)
     body = _body({"text": "/run-test smoke"})
 
     response = _call(app, body, _sign(body))
 
     assert response.status_code == 202
     assert _json(response) == {"decision": "FAST_PATH"}
+    assert len(list(workspace.reports_dir.glob("test-*.json"))) == 1
 
 
 def test_create_app_from_settings_without_secret_raises(
@@ -232,12 +243,65 @@ def test_create_app_from_settings_empty_secret_raises() -> None:
 
 
 def test_create_app_from_settings_loads_environment_when_omitted(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SENTINEL_WEBHOOK_SECRET", SIGNING_VALUE)
-    app = create_app_from_settings()
+    workspace = _workspace(tmp_path)
+    app = create_app_from_settings(workspace=workspace)
     body = _body({"text": "/run-test smoke"})
 
     response = _call(app, body, _sign(body))
 
     assert response.status_code == 202
+
+
+def test_create_app_from_settings_wires_sync_docs(tmp_path: Path) -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        webhook_secret=SecretStr(SIGNING_VALUE),
+    )
+    workspace = _workspace(tmp_path)
+    app = create_app_from_settings(settings, workspace=workspace)
+    body = _body({"text": "/sync-docs 更新说明"})
+
+    response = _call(app, body, _sign(body))
+
+    assert response.status_code == 202
+    assert _json(response) == {"decision": "FAST_PATH"}
+    changelog = workspace.docs_dir / "CHANGELOG.md"
+    assert changelog.is_file()
+    assert "更新说明" in changelog.read_text(encoding="utf-8")
+
+
+def test_create_app_from_settings_command_handlers_override_defaults(tmp_path: Path) -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        webhook_secret=SecretStr(SIGNING_VALUE),
+    )
+    workspace = _workspace(tmp_path)
+    calls: list[str] = []
+    app = create_app_from_settings(
+        settings,
+        workspace=workspace,
+        command_handlers={"run-test": calls.append},
+    )
+    body = _body({"text": "/run-test smoke"})
+
+    response = _call(app, body, _sign(body))
+
+    assert response.status_code == 202
+    assert calls == ["smoke"]
+    assert list(workspace.reports_dir.glob("test-*.json")) == []
+
+
+def test_create_app_from_settings_rejects_unsigned_request(tmp_path: Path) -> None:
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        webhook_secret=SecretStr(SIGNING_VALUE),
+    )
+    app = create_app_from_settings(settings, workspace=_workspace(tmp_path))
+    body = _body({"text": "/run-test smoke"})
+
+    response = _call(app, body, None)
+
+    assert response.status_code == 401

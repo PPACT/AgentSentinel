@@ -68,7 +68,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # 既有字段保持不变
+    # 既有字段保持不变；openai_api_key 仅为 legacy 兼容，不参与模型路由
     openai_api_key: SecretStr | None = None
     webhook_secret: SecretStr | None = None
     git_user_name: str = ""
@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     premium_model: ModelProfile = ModelProfile(temperature=0.0, max_tokens=8192)
     economy_model: ModelProfile = ModelProfile(temperature=0.2, max_tokens=4096)
 ```
+
+> 实现落地（`5489f05`）：`Settings` 采用扁平字段 + `AliasChoices`，同时兼容
+> `SENTINEL_PREMIUM_MODEL` 与 `SENTINEL_PREMIUM_MODEL__MODEL`；`premium_model` /
+> `economy_model` 为只读属性。空字符串/纯空白的 `model` 与 `api_key` 一律按缺失处理。
+> `openai_api_key` 仅为 legacy 兼容，不参与路由；`.env.example` 只保留两档模板。
 
 `.env.example`（新增，值留空或占位）：
 
@@ -171,7 +176,11 @@ class ModelRouter:
 1. `tests/test_model_config.py`：默认 stub；`real` 缺 Key 的报错包含缺失变量名；嵌套环境变量覆盖；`repr` 不含 Key。
 2. `tests/test_model_router.py`：角色→档位映射；同档复用实例；未知角色抛错；`base_url` 为空时不传；构造参数正确。用 monkeypatch 替换 `OpenAIChatModel`，不触网。
 3. `tests/roles/test_model_driven_roles.py`：用 `StubChatModel` 发脚本化工具调用，验证 Coder/Writer/Tester 的工作区工具、越界拒绝、未写文件/未交报告判失败。
-4. 既有 257 条测试保持通过。
+4. 既有 257 条测试保持通过（交付时 pytest 283 passed，新增 26 条）。
+
+实现补充（`5489f05`）：`run_agent_sync` 在已有事件循环时改用独立线程开新循环，
+以支撑编排 Agent 的异步工具内同步调用专家模型。该路径与按档缓存的
+`OpenAIChatModel` 跨 loop 复用 client 的风险已记录，需在真实端点冒烟时重点验证。
 
 冒烟（不进 pytest）：
 

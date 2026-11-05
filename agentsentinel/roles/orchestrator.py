@@ -241,30 +241,44 @@ class OrchestrationSession:
         return self._summary(result)
 
     def _assign_tester(self, task: str) -> str:
+        """测试；失败时在会话内直接回传 Coder 并重测，直到通过或耗尽。
+
+        局部闭环期间的失败摘要只写状态流并作为 Coder 的 feedback，
+        不返回主编排模型；对外只给最终结论（重测通过 / 回退 / BLOCKED）。
+        """
         if self.state is not SessionState.CODED:
             raise RuntimeError(f"当前状态 {self.state.value} 不允许分派 Tester")
+        repairs = 0
         result = self._tester.handle(task, self.workspace, feedback=self.feedback)
         self.artifacts.extend(result.artifacts)
-        if result.status is TestStatus.PASS:
-            self._transition(SessionState.TEST_PASSED, "测试通过")
-            self.board.update(TaskState.PASSED, "测试通过")
-            return self._summary(result)
 
-        self.attempts += 1
-        self.feedback = result.summary
-        if self.attempts >= self._max_attempts:
-            try:
-                ref = self._revert()
-            except ValueError as exc:
-                # 没有真实基线 tag 时不得静默回退到 HEAD：终止并如实报告。
-                self._blocked_reason = str(exc)
-                self._transition(SessionState.BLOCKED, str(exc))
-                self.board.update(TaskState.FAILED, str(exc))
-                return f"{self._summary(result)}；回退失败：{exc}"
-            return f"{self._summary(result)}；连续失败 {self.attempts} 次，已回退到 {ref}"
-        self._transition(SessionState.TEST_FAILED, result.summary)
-        self.board.update(TaskState.FAILED, result.summary)
-        return f"{self._summary(result)}；第 {self.attempts} 次失败，回传 Coder 局部修复"
+        while result.status is not TestStatus.PASS:
+            self.attempts += 1
+            self.feedback = result.summary
+            if self.attempts >= self._max_attempts:
+                try:
+                    ref = self._revert()
+                except ValueError as exc:
+                    # 没有真实基线 tag 时不得静默回退到 HEAD：终止并如实报告。
+                    self._blocked_reason = str(exc)
+                    self._transition(SessionState.BLOCKED, str(exc))
+                    self.board.update(TaskState.FAILED, str(exc))
+                    return f"{self._summary(result)}；回退失败：{exc}"
+                return f"{self._summary(result)}；连续失败 {self.attempts} 次，已回退到 {ref}"
+
+            # 直通消息复用 AgentResult.summary：失败摘要不经过主编排模型。
+            self._transition(SessionState.TEST_FAILED, result.summary)
+            self.board.update(TaskState.FAILED, result.summary)
+            self._assign_coder(task, result.summary)
+            repairs += 1
+            result = self._tester.handle(task, self.workspace, feedback=self.feedback)
+            self.artifacts.extend(result.artifacts)
+
+        self._transition(SessionState.TEST_PASSED, "测试通过")
+        self.board.update(TaskState.PASSED, "测试通过")
+        if repairs:
+            return f"{self._summary(result)}；Coder 局部修复 {repairs} 次后重测通过"
+        return self._summary(result)
 
     def _assign_writer(self, task: str) -> str:
         if self.state is not SessionState.TEST_PASSED:

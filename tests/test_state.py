@@ -25,6 +25,23 @@ class _AlwaysFailingTester(Tester):
         return AgentResult(agent=self.name, summary="forced failure", status=TestStatus.FAIL)
 
 
+class _FailOnceTester(Tester):
+    """首测失败、局部修复后次测通过。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def handle(self, task: str, workspace: Workspace, *, feedback: str = "") -> AgentResult:
+        self.calls += 1
+        if self.calls == 1:
+            return AgentResult(
+                agent=self.name,
+                summary="stub check failed: main missing",
+                status=TestStatus.FAIL,
+            )
+        return super().handle(task, workspace, feedback=feedback)
+
+
 def _read_lines(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
@@ -103,6 +120,26 @@ def test_publish_path_records_four_transitions(tmp_path: Path) -> None:
     assert result.status is PipelineOutcome.PASSED
     assert _transitions(workspace.pipeline_state_path) == [
         ("coding", "coded"),
+        ("coded", "test_passed"),
+        ("test_passed", "doc_ready"),
+        ("doc_ready", "published"),
+    ]
+
+
+def test_local_repair_path_records_round_trip(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+
+    result = SentinelPipeline(
+        workspace,
+        git_ops=StubGitOps(),
+        tester=_FailOnceTester(),
+    ).run("实现登录接口")
+
+    assert result.status is PipelineOutcome.PASSED
+    assert _transitions(workspace.pipeline_state_path) == [
+        ("coding", "coded"),
+        ("coded", "test_failed"),
+        ("test_failed", "coded"),
         ("coded", "test_passed"),
         ("test_passed", "doc_ready"),
         ("doc_ready", "published"),

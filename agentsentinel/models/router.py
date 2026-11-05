@@ -54,9 +54,10 @@ class ModelRouter:
     def _build(self, tier: Tier, profile: ModelProfile) -> ChatModelBase:
         prefix = TIER_ENV_PREFIX[tier]
         missing: list[str] = []
-        if not profile.model:
+        if not profile.model.strip():
             missing.append(f"{prefix}_MODEL")
-        if profile.api_key is None:
+        api_key = profile.api_key
+        if api_key is None or not api_key.get_secret_value().strip():
             missing.append(f"{prefix}_API_KEY")
         if missing:
             raise RuntimeError(

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # legacy：旧版单 Key 配置仅保留兼容，不参与模型路由；模型只读下面两档。
     openai_api_key: SecretStr | None = None
     webhook_secret: SecretStr | None = None
     git_user_name: str = ""

@@ -141,3 +141,34 @@ def test_missing_config_fails_before_building(
 
     assert "SENTINEL_ECONOMY_API_KEY" in str(exc_info.value)
     assert built == []
+
+
+@pytest.mark.parametrize("api_key", ["", "   "], ids=["empty", "whitespace"])
+def test_blank_api_key_is_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch, built: list[_FakeModel], api_key: str
+) -> None:
+    """`.env.example` 的空值会解析成 SecretStr('')，必须按缺失处理。"""
+    monkeypatch.setenv("SENTINEL_PREMIUM_MODEL", "premium-id")
+    monkeypatch.setenv("SENTINEL_PREMIUM_API_KEY", api_key)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ModelRouter(settings).for_role("coder")
+
+    assert "SENTINEL_PREMIUM_API_KEY" in str(exc_info.value)
+    assert built == []
+
+
+@pytest.mark.parametrize("model_id", ["", "   "], ids=["empty", "whitespace"])
+def test_blank_model_is_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch, built: list[_FakeModel], model_id: str
+) -> None:
+    monkeypatch.setenv("SENTINEL_PREMIUM_MODEL", model_id)
+    monkeypatch.setenv("SENTINEL_PREMIUM_API_KEY", "premium-key")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ModelRouter(settings).for_role("coder")
+
+    assert "SENTINEL_PREMIUM_MODEL" in str(exc_info.value)
+    assert built == []

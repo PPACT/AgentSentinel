@@ -1,5 +1,7 @@
 """P2-3 模型配置：两档模板、扁平/嵌套覆盖、缺配置报错与密钥保密。"""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -121,3 +123,12 @@ def test_api_keys_never_appear_in_repr_or_dump(monkeypatch: pytest.MonkeyPatch) 
 
     assert "premium-super-secret" not in rendered
     assert "economy-super-secret" not in rendered
+
+
+def test_env_example_only_templates_two_tiers() -> None:
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+
+    assert "SENTINEL_OPENAI_API_KEY" not in text
+    assert "SENTINEL_PREMIUM_MODEL=" in text
+    assert "SENTINEL_ECONOMY_MODEL=" in text
+    assert "SENTINEL_MODEL_BACKEND=stub" in text

@@ -210,6 +210,21 @@ def test_identity_injected_without_exchange_files(tmp_path: Path) -> None:
     assert "对端为 dev" in text
 
 
+def test_missing_role_note_when_content_exists(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        """### [待裁] open question · 2026-10-31 · doc
+
+- 议题：未决
+""",
+    )
+
+    text = str(hook_output(_run(tmp_path))["additionalContext"])
+
+    assert "未设置角色，自动唤醒静默降级" in text
+    assert "open question" in text
+
+
 def test_no_identity_without_role(tmp_path: Path) -> None:
     _write_files(
         tmp_path,

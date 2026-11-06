@@ -58,19 +58,23 @@ def _unclosed_entries(exchange_text: str) -> tuple[list[str], int]:
     return titles, recognized
 
 
-def _identity_line(project_dir: Path) -> str:
-    """角色已设置时注入一行身份与自注册指令；无角色静默。"""
+def _role_for_context(project_dir: Path) -> str:
     role = os.environ.get("SENTINEL_ROLE", "").strip().casefold()
-    if not role:
-        try:
-            role = (
-                (project_dir / ".claude" / "session-role")
-                .read_text(encoding="utf-8")
-                .strip()
-                .casefold()
-            )
-        except OSError:
-            role = ""
+    if role:
+        return role
+    try:
+        return (
+            (project_dir / ".claude" / "session-role")
+            .read_text(encoding="utf-8")
+            .strip()
+            .casefold()
+        )
+    except OSError:
+        return ""
+
+
+def _identity_line(role: str) -> str:
+    """角色已设置时返回一行身份与自注册指令。"""
     if not role:
         return ""
     peer = _PEER_BY_ROLE.get(role, "未定位")
@@ -84,7 +88,9 @@ def _identity_line(project_dir: Path) -> str:
 def build_context(project_dir: Path) -> str:
     status_path = project_dir / _EXCHANGE_DIR / "STATUS.md"
     exchange_path = project_dir / _EXCHANGE_DIR / "交流区.md"
-    identity = _identity_line(project_dir)
+    role = _role_for_context(project_dir)
+    identity = _identity_line(role)
+    missing_note = "" if role else "未设置角色，自动唤醒静默降级。"
     if not status_path.is_file() or not exchange_path.is_file():
         if not identity:
             return ""
@@ -115,6 +121,8 @@ def build_context(project_dir: Path) -> str:
     parts = ["## 会话交接（SessionStart 自动注入）"]
     if identity:
         parts.append(f"- {identity}")
+    elif missing_note:
+        parts.append(f"- {missing_note}")
     for key in _STATUS_KEYS:
         if key in fields:
             parts.append(f"- {key}：{fields[key]}")

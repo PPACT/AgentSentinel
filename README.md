@@ -122,6 +122,13 @@ SENTINEL_ECONOMY_BASE_URL=
 SENTINEL_ECONOMY_MODEL=
 SENTINEL_ECONOMY_API_KEY=
 
+# 用量与预算（可选）：单价按每百万 Token 填写，货币单位自定
+SENTINEL_BUDGET_LIMIT=0
+SENTINEL_PREMIUM_INPUT_PRICE_PER_MTOK=0
+SENTINEL_PREMIUM_OUTPUT_PRICE_PER_MTOK=0
+SENTINEL_ECONOMY_INPUT_PRICE_PER_MTOK=0
+SENTINEL_ECONOMY_OUTPUT_PRICE_PER_MTOK=0
+
 SENTINEL_WEBHOOK_SECRET=<Webhook HMAC 密钥>
 SENTINEL_GIT_USER_NAME="AgentSentinel Bot"
 SENTINEL_GIT_USER_EMAIL="bot@example.com"
@@ -129,6 +136,8 @@ SENTINEL_GIT_REMOTE_URL="https://github.com/your-org/target-repo.git"
 ```
 
 模型调用统一走 OpenAI Chat Completions 兼容协议，不绑定具体供应商：`base_url` + `model` 可指向 DeepSeek、Qwen、本地 vLLM / Ollama 或 OpenAI 等任意兼容端点。默认 `stub` 模式完全离线；设为 `real` 时，`premium` 档供 Coder / Tester、`economy` 档供 Orchestrator / Writer，缺少 `model` 或 `api_key` 会在启动时明确报错。
+
+真实模式下每次模型调用都会按角色把 Token 用量与估算成本写入 `workspace/reports/usage.jsonl`；`SENTINEL_BUDGET_LIMIT` 大于 0 时启用预算熔断，累计成本达到上限后在下一次模型调用前停止，流水线返回 `FAILED` 且不推送。
 
 Webhook 入口通过 `create_app_from_settings()` 构造；`SENTINEL_WEBHOOK_SECRET` 缺失或为空时拒绝启动。
 

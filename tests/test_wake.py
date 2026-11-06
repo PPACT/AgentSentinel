@@ -59,7 +59,12 @@ def _write_entries(project_dir: Path, entries: list[dict[str, Any]]) -> None:
     )
 
 
-def _post(project_dir: Path, **overrides: str) -> dict[str, Any]:
+def _post(
+    project_dir: Path,
+    *,
+    env: dict[str, str] | None = None,
+    **overrides: str,
+) -> dict[str, Any]:
     args = {
         "from": "doc",
         "to": "dev",
@@ -71,7 +76,7 @@ def _post(project_dir: Path, **overrides: str) -> dict[str, Any]:
     command = ["post"]
     for key, value in args.items():
         command.extend([f"--{key}", value])
-    result = _run(project_dir, *command)
+    result = _run(project_dir, *command, env=env)
     assert result.returncode == 0, result.stderr
     parsed = json.loads(result.stdout)
     assert isinstance(parsed, dict)
@@ -357,10 +362,7 @@ def test_stale_registration_allows_reregister(tmp_path: Path) -> None:
 
 
 def test_whoami_reports_role_and_registration(tmp_path: Path) -> None:
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
-
-    before = _run(tmp_path, "whoami")
+    before = _run(tmp_path, "whoami", env={"SENTINEL_ROLE": "dev"})
     assert before.returncode == 0, before.stderr
     before_out = json.loads(before.stdout)
     assert before_out["role"] == "dev"
@@ -369,20 +371,22 @@ def test_whoami_reports_role_and_registration(tmp_path: Path) -> None:
 
     _register(tmp_path)
 
-    after = json.loads(_run(tmp_path, "whoami").stdout)
+    after = json.loads(_run(tmp_path, "whoami", env={"SENTINEL_ROLE": "dev"}).stdout)
     assert after["status"] == "active"
     assert after["stale"] is False
     assert after["registration"]["session"] == "session-dev"
 
 
-def test_whoami_env_role_overrides_file(tmp_path: Path) -> None:
+def test_session_role_file_is_ignored(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
+    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
 
-    result = _run(tmp_path, "whoami", env={"SENTINEL_ROLE": "dev"})
+    without_env = _run(tmp_path, "whoami")
+    with_env = _run(tmp_path, "whoami", env={"SENTINEL_ROLE": "doc"})
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["role"] == "dev"
+    assert without_env.returncode == 0, without_env.stderr
+    assert json.loads(without_env.stdout)["role"] is None
+    assert json.loads(with_env.stdout)["role"] == "doc"
 
 
 def test_whoami_without_role_is_inactive(tmp_path: Path) -> None:
@@ -476,10 +480,8 @@ def test_heartbeat_without_registration_is_noop(tmp_path: Path) -> None:
 def test_whoami_refreshes_heartbeat(tmp_path: Path) -> None:
     _register(tmp_path)
     _make_stale(tmp_path)
-    (tmp_path / ".claude").mkdir(exist_ok=True)
-    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
 
-    result = _run(tmp_path, "whoami")
+    result = _run(tmp_path, "whoami", env={"SENTINEL_ROLE": "dev"})
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
@@ -489,12 +491,10 @@ def test_whoami_refreshes_heartbeat(tmp_path: Path) -> None:
 
 
 def test_post_refreshes_heartbeat(tmp_path: Path) -> None:
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
     _register(tmp_path, role="doc", session="doc-session")
     _make_stale(tmp_path, "doc")
 
-    _post(tmp_path)
+    _post(tmp_path, env={"SENTINEL_ROLE": "doc"})
 
     assert _heartbeat_age_seconds(tmp_path, "doc") < 60
 

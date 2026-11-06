@@ -58,19 +58,9 @@ def _unclosed_entries(exchange_text: str) -> tuple[list[str], int]:
     return titles, recognized
 
 
-def _role_for_context(project_dir: Path) -> str:
-    role = os.environ.get("SENTINEL_ROLE", "").strip().casefold()
-    if role:
-        return role
-    try:
-        return (
-            (project_dir / ".claude" / "session-role")
-            .read_text(encoding="utf-8")
-            .strip()
-            .casefold()
-        )
-    except OSError:
-        return ""
+def _role_for_context(_project_dir: Path) -> str:
+    """角色来源仅进程级 SENTINEL_ROLE；共享 session-role 文件已废弃。"""
+    return os.environ.get("SENTINEL_ROLE", "").strip().casefold()
 
 
 def _identity_line(role: str) -> str:
@@ -90,7 +80,11 @@ def build_context(project_dir: Path) -> str:
     exchange_path = project_dir / _EXCHANGE_DIR / "交流区.md"
     role = _role_for_context(project_dir)
     identity = _identity_line(role)
-    missing_note = "" if role else "未设置角色，自动唤醒静默降级。"
+    missing_note = (
+        ""
+        if role
+        else "未设置 SENTINEL_ROLE，自动唤醒静默降级；请用 `SENTINEL_ROLE=doc` / `dev` 启动本窗口"
+    )
     if not status_path.is_file() or not exchange_path.is_file():
         if not identity:
             return ""

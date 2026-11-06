@@ -22,15 +22,9 @@ _PEER_BY_ROLE = {
 }
 
 
-def current_role(root: Path) -> str:
-    env_role = os.environ.get("SENTINEL_ROLE", "").strip()
-    if env_role:
-        return env_role.casefold()
-    try:
-        marker = (root / ".claude" / "session-role").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    return marker.casefold()
+def current_role(_root: Path) -> str:
+    """角色来源仅进程级 SENTINEL_ROLE；共享 session-role 文件已废弃。"""
+    return os.environ.get("SENTINEL_ROLE", "").strip().casefold()
 
 
 def _describe(entries: list[dict[str, Any]]) -> str:

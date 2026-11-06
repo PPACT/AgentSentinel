@@ -174,16 +174,9 @@ def role_lock_file(root: Path, role: str) -> Path:
     return roles_dir(root) / f"{role}.lock"
 
 
-def current_role(root: Path) -> str:
-    """角色来源：SENTINEL_ROLE > .claude/session-role；都没有时返回空串。"""
-    env_role = os.environ.get("SENTINEL_ROLE", "").strip()
-    if env_role:
-        return env_role.casefold()
-    try:
-        marker = (root / ".claude" / "session-role").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    return marker.casefold()
+def current_role(_root: Path) -> str:
+    """角色来源仅进程级 ``SENTINEL_ROLE``；共享 session-role 文件已废弃。"""
+    return os.environ.get("SENTINEL_ROLE", "").strip().casefold()
 
 
 def _read_json(path: Path) -> Entry | None:

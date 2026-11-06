@@ -10,15 +10,13 @@ from typing import Any
 from tests.hooks.hook_utils import run_hook
 
 
-def _seed(project_dir: Path, entries: list[dict[str, Any]], *, role: str | None = "dev") -> None:
+def _seed(project_dir: Path, entries: list[dict[str, Any]]) -> None:
     mailbox = project_dir / ".claude" / "mailbox"
     mailbox.mkdir(parents=True, exist_ok=True)
     (mailbox / "inbox.jsonl").write_text(
         "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries),
         encoding="utf-8",
     )
-    if role is not None:
-        (project_dir / ".claude" / "session-role").write_text(role, encoding="utf-8")
 
 
 def _entry(entry_id: str = "abc12345", **overrides: Any) -> dict[str, Any]:
@@ -37,7 +35,12 @@ def _entry(entry_id: str = "abc12345", **overrides: Any) -> dict[str, Any]:
     return entry
 
 
-def _run(project_dir: Path, *, stop_hook_active: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    project_dir: Path,
+    *,
+    stop_hook_active: bool = False,
+    role: str = "dev",
+) -> subprocess.CompletedProcess[str]:
     payload = {
         "hook_event_name": "Stop",
         "stop_hook_active": stop_hook_active,
@@ -47,7 +50,7 @@ def _run(project_dir: Path, *, stop_hook_active: bool = False) -> subprocess.Com
         "handoff_notify.py",
         payload,
         project_dir=project_dir,
-        env={"SENTINEL_ROLE": ""},
+        env={"SENTINEL_ROLE": role},
     )
 
 
@@ -107,9 +110,9 @@ def test_no_unnotified_entries_is_silent(tmp_path: Path) -> None:
 
 
 def test_missing_role_is_silent(tmp_path: Path) -> None:
-    _seed(tmp_path, [_entry()], role=None)
+    _seed(tmp_path, [_entry()])
 
-    result = _run(tmp_path)
+    result = _run(tmp_path, role="")
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""

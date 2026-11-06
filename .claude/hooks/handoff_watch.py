@@ -26,16 +26,9 @@ _PEER_BY_ROLE = {
 _PEER_UNKNOWN = "unspecified"
 
 
-def current_role(root: Path) -> str:
-    """角色优先级：环境变量 SENTINEL_ROLE > .claude/session-role > unknown。"""
-    env_role = os.environ.get("SENTINEL_ROLE", "").strip()
-    if env_role:
-        return env_role.casefold()
-    try:
-        marker = (root / ".claude" / "session-role").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "unknown"
-    return marker.casefold() if marker else "unknown"
+def current_role(_root: Path) -> str:
+    """角色来源仅进程级 SENTINEL_ROLE；共享 session-role 文件已废弃。"""
+    return os.environ.get("SENTINEL_ROLE", "").strip().casefold()
 
 
 def _changed_event(rel_path: str) -> tuple[str, str]:
@@ -62,6 +55,8 @@ def main() -> None:
     from scripts import wake
 
     role = current_role(root)
+    if not role:
+        return
     try:
         wake.refresh_heartbeat(root, role)
     except Exception:  # noqa: BLE001, S110 - 心跳刷新失败不阻断记录

@@ -26,12 +26,16 @@ def _write_files(project_dir: Path, exchange: str) -> None:
     (exchange_dir / "交流区.md").write_text(exchange, encoding="utf-8")
 
 
-def _run(project_dir: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    project_dir: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return run_hook(
         "session_context.py",
         {},
         project_dir=project_dir,
-        env={"SENTINEL_ROLE": ""},
+        env=env if env is not None else {"SENTINEL_ROLE": ""},
     )
 
 
@@ -189,9 +193,8 @@ def test_identity_and_register_hint_injected_when_role_set(tmp_path: Path) -> No
 """,
     )
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
 
-    text = str(hook_output(_run(tmp_path))["additionalContext"])
+    text = str(hook_output(_run(tmp_path, env={"SENTINEL_ROLE": "dev"}))["additionalContext"])
 
     assert "身份 role=dev" in text
     assert "register --role dev" in text
@@ -201,9 +204,8 @@ def test_identity_and_register_hint_injected_when_role_set(tmp_path: Path) -> No
 
 def test_identity_injected_without_exchange_files(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
 
-    text = str(hook_output(_run(tmp_path))["additionalContext"])
+    text = str(hook_output(_run(tmp_path, env={"SENTINEL_ROLE": "doc"}))["additionalContext"])
 
     assert "role=doc" in text
     assert "register --role doc" in text
@@ -221,7 +223,7 @@ def test_missing_role_note_when_content_exists(tmp_path: Path) -> None:
 
     text = str(hook_output(_run(tmp_path))["additionalContext"])
 
-    assert "未设置角色，自动唤醒静默降级" in text
+    assert "未设置 SENTINEL_ROLE，自动唤醒静默降级" in text
     assert "open question" in text
 
 

@@ -10,15 +10,11 @@ from typing import Any
 from tests.hooks.hook_utils import run_hook
 
 
-def _setup(tmp_path: Path, *, role: str | None = "doc") -> Path:
+def _setup(tmp_path: Path) -> Path:
     exchange = tmp_path / "docs" / "local" / "交流区"
     exchange.mkdir(parents=True)
     status = exchange / "STATUS.md"
     status.write_text("# STATUS\n\n| 项 | 值 |\n", encoding="utf-8")
-    if role is not None:
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir(exist_ok=True)
-        (claude_dir / "session-role").write_text(role, encoding="utf-8")
     return status
 
 
@@ -38,12 +34,17 @@ def _entries(project_dir: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def _run(target: Path, project_dir: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    target: Path,
+    project_dir: Path,
+    *,
+    role: str = "doc",
+) -> subprocess.CompletedProcess[str]:
     return run_hook(
         "handoff_watch.py",
         _payload(target, project_dir),
         project_dir=project_dir,
-        env={"SENTINEL_ROLE": ""},
+        env={"SENTINEL_ROLE": role},
     )
 
 
@@ -87,16 +88,14 @@ def test_non_target_file_is_silent(tmp_path: Path) -> None:
     assert _entries(tmp_path) == []
 
 
-def test_missing_role_records_unknown(tmp_path: Path) -> None:
-    status = _setup(tmp_path, role=None)
+def test_missing_role_is_silent(tmp_path: Path) -> None:
+    status = _setup(tmp_path)
 
-    result = _run(status, tmp_path)
+    result = _run(status, tmp_path, role="")
 
     assert result.returncode == 0, result.stderr
-    entries = _entries(tmp_path)
-    assert len(entries) == 1
-    assert entries[0]["from"] == "unknown"
-    assert entries[0]["to"] == "unspecified"
+    assert result.stdout.strip() == ""
+    assert _entries(tmp_path) == []
 
 
 def test_exchange_file_is_recorded(tmp_path: Path) -> None:

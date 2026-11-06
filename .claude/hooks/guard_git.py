@@ -60,7 +60,12 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
 def _segments(command: str) -> list[list[str]] | None:
     """把 shell 命令切成按 ``;``/``&&``/``||``/``|`` 分隔的 token 段。"""
     try:
-        tokens = shlex.split(command, posix=True)
+        # punctuation_chars 让紧贴前一个 token 的 ``;``/``|`` 也单独成 token；
+        # 不能把 ``&`` 加进来，否则 ``2>&1`` 会被拆成 ``2>``/``&``/``1``。
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return None
     segments: list[list[str]] = [[]]

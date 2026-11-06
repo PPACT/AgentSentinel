@@ -11,7 +11,15 @@ P2-3 只提供两档模型配置（优异 / 平价），供应商由 ``base_url`
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, SecretStr
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    SecretStr,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -111,6 +119,21 @@ class Settings(BaseSettings):
     premium_output_price_per_mtok: float = Field(default=0.0, ge=0)
     economy_input_price_per_mtok: float = Field(default=0.0, ge=0)
     economy_output_price_per_mtok: float = Field(default=0.0, ge=0)
+
+    # 运行时上下文治理：软阈值摘要、硬阈值 checkpoint + reset。
+    # 硬阈值上限 0.9 与 AgentScope ContextConfig.trigger_ratio 的约束一致。
+    context_monitor_enabled: bool = True
+    context_soft_ratio: float = Field(default=0.55, gt=0, lt=1)
+    context_hard_ratio: float = Field(default=0.90, gt=0, le=0.9)
+
+    @model_validator(mode="after")
+    def _validate_context_ratios(self) -> "Settings":
+        if not self.context_soft_ratio < self.context_hard_ratio <= 0.9:
+            raise ValueError(
+                "context_soft_ratio 必须小于 context_hard_ratio，且硬阈值不超过 0.9；"
+                f"当前为 {self.context_soft_ratio} / {self.context_hard_ratio}"
+            )
+        return self
 
     @property
     def premium_model(self) -> ModelProfile:

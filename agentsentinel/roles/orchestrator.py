@@ -9,7 +9,6 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,14 @@ from agentscope.agent import Agent
 from agentscope.message import UserMsg
 from agentscope.model import ChatModelBase
 
-from agentsentinel.contracts import StateRecord, TaskState, TaskStatus, TestStatus
+from agentsentinel.contracts import (
+    TERMINAL_STATES,
+    SessionState,
+    StateRecord,
+    TaskState,
+    TaskStatus,
+    TestStatus,
+)
 from agentsentinel.governance.permissions import (
     ACTION_PUSH,
     ACTION_REVERT,
@@ -41,6 +47,17 @@ from agentsentinel.workspace import Workspace
 
 TASK_STATUS_FILE = "reports/task-status.json"
 _TASK_SPLIT = re.compile(r"[\n;；]+")
+
+# 兼容既有调用点：SessionState 已迁至 contracts，但本模块继续导出。
+__all__ = [
+    "TERMINAL_STATES",
+    "OrchestrationSession",
+    "Orchestrator",
+    "SessionState",
+    "SubTask",
+    "TaskBoard",
+    "decompose_task",
+]
 
 
 @dataclass(frozen=True)
@@ -90,30 +107,6 @@ class TaskBoard:
             TASK_STATUS_FILE,
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
-
-
-class SessionState(StrEnum):
-    """八步流水线在会话内的状态。"""
-
-    CODING = "coding"
-    CODED = "coded"
-    TEST_FAILED = "test_failed"
-    TEST_PASSED = "test_passed"
-    DOC_READY = "doc_ready"
-    PUBLISHED = "published"
-    DENIED = "denied"
-    REVERTED = "reverted"
-    BLOCKED = "blocked"
-
-
-TERMINAL_STATES = frozenset(
-    {
-        SessionState.PUBLISHED,
-        SessionState.DENIED,
-        SessionState.REVERTED,
-        SessionState.BLOCKED,
-    }
-)
 
 
 class OrchestrationSession:

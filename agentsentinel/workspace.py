@@ -3,6 +3,7 @@
 目录与报告路径依据：架构规范 §2.2、§2.3、§2.4、§3.3。
 """
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,17 @@ DEFAULT_ROOT = Path("workspace")
 ARTIFACT_DIRS = ("code", "docs", "reports", "audit")
 # 文件名里的时间戳需兼容 Windows，不能用冒号。
 REPORT_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+CHECKPOINT_DIRNAME = "checkpoints"
+CONTEXT_SUMMARY_DIRNAME = "context-summary"
+_ROLE_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def _role_slug(role: str) -> str:
+    """角色名转文件名：大小写归一，拒绝空值与路径分隔符。"""
+    slug = role.strip().casefold()
+    if not _ROLE_SLUG.fullmatch(slug):
+        raise ValueError(f"非法角色名: {role!r}")
+    return slug
 
 
 class Workspace:
@@ -49,6 +61,22 @@ class Workspace:
     def usage_path(self) -> Path:
         """模型用量与成本日志；与审计、状态流相互独立。"""
         return self.reports_dir / "usage.jsonl"
+
+    @property
+    def checkpoint_dir(self) -> Path:
+        """每个角色仅保留最新一份恢复点。"""
+        return self.reports_dir / CHECKPOINT_DIRNAME
+
+    @property
+    def context_summary_dir(self) -> Path:
+        """按角色分文件存放上下文摘要，避免并发覆盖。"""
+        return self.reports_dir / CONTEXT_SUMMARY_DIRNAME
+
+    def checkpoint_path(self, role: str) -> Path:
+        return self.checkpoint_dir / f"{_role_slug(role)}.json"
+
+    def context_summary_path(self, role: str) -> Path:
+        return self.context_summary_dir / f"{_role_slug(role)}.json"
 
     def ensure(self) -> None:
         """创建四类产物目录；重复调用不破坏已有内容。"""

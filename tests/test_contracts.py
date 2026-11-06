@@ -8,7 +8,9 @@ from pydantic import ValidationError
 from agentsentinel.contracts import (
     ActionType,
     AuditRecord,
+    Checkpoint,
     ScanVerdict,
+    SessionState,
     TaskState,
     TaskStatus,
     TestReport,
@@ -97,3 +99,24 @@ def test_task_status_starts_pending() -> None:
 
     assert status.state is TaskState.PENDING
     assert status.detail == ""
+
+
+def test_session_state_is_re_exported_from_orchestrator_and_roles() -> None:
+    from agentsentinel.roles import SessionState as RolesSessionState
+    from agentsentinel.roles.orchestrator import SessionState as OrchestratorSessionState
+
+    assert OrchestratorSessionState is SessionState
+    assert RolesSessionState is SessionState
+
+
+def test_checkpoint_serializes_status_as_session_state_value() -> None:
+    checkpoint = Checkpoint(
+        role="Coder",
+        status=SessionState.DOC_READY,
+        created_at=NOW,
+    )
+
+    payload = checkpoint.model_dump(mode="json")
+
+    assert payload["status"] == "doc_ready"
+    assert Checkpoint.model_validate_json(checkpoint.model_dump_json()) == checkpoint

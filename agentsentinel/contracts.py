@@ -1,10 +1,12 @@
-"""领域契约：测试报告、审计记录与任务状态。
+"""领域契约：测试报告、审计记录、任务状态与运行时上下文治理。
 
-字段依据：架构规范 §2.3、§3.3。
+字段依据：架构规范 §2.3、§3.3；运行时上下文治理见
+``docs/local/runtime-context-design.md`` §2。
 """
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -44,6 +46,34 @@ class TaskState(StrEnum):
     IN_PROGRESS = "in_progress"
     PASSED = "passed"
     FAILED = "failed"
+
+
+class SessionState(StrEnum):
+    """八步流水线在会话内的状态。
+
+    定义在契约层而非 ``roles.orchestrator``：``Checkpoint`` 需要引用它，
+    而 ``orchestrator`` 已经导入 ``contracts``，反向导入会形成循环。
+    """
+
+    CODING = "coding"
+    CODED = "coded"
+    TEST_FAILED = "test_failed"
+    TEST_PASSED = "test_passed"
+    DOC_READY = "doc_ready"
+    PUBLISHED = "published"
+    DENIED = "denied"
+    REVERTED = "reverted"
+    BLOCKED = "blocked"
+
+
+TERMINAL_STATES = frozenset(
+    {
+        SessionState.PUBLISHED,
+        SessionState.DENIED,
+        SessionState.REVERTED,
+        SessionState.BLOCKED,
+    }
+)
 
 
 class TestReport(BaseModel):
@@ -122,3 +152,38 @@ class TaskStatus(BaseModel):
     updated_at: datetime
     state: TaskState = TaskState.PENDING
     detail: str = ""
+
+
+class Checkpoint(BaseModel):
+    """硬阈值时落盘的恢复点；console 与重启后的 Agent 共用。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = 1
+    role: str
+    status: SessionState
+    # 工作区相对路径，不存正文。
+    artifacts: tuple[str, ...] = ()
+    # 待办指针（下一步动作，不含长文本）。
+    pending_action: str = ""
+    # 审计读取游标：<ISO-8601>#<sha256[:12]>，runtime 只透传。
+    audit_cursor: str = ""
+    # 工作区相对路径，指向 ContextSummaryStore 的产物。
+    context_summary_path: str = ""
+    created_at: datetime
+
+
+class ContextSummary(BaseModel):
+    """软阈值摘要；按角色写入 context-summary/<role>.json。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    role: str
+    generated_at: datetime
+    used_tokens: int
+    context_window: int
+    ratio: float
+    # AgentScope 压缩后的摘要正文。
+    summary: str
+    pending_action: str = ""
+    strategy: Literal["native", "deterministic"]

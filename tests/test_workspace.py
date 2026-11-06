@@ -72,3 +72,24 @@ def test_write_report_persists_strict_json(tmp_path: Path) -> None:
     assert payload["status"] == "FAIL"
     assert payload["summary"] == "1 failed"
     assert path.name.startswith("test-")
+
+
+def test_context_artifact_paths_are_role_scoped(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+
+    assert workspace.checkpoint_path("Coder") == (
+        workspace.reports_dir / "checkpoints" / "coder.json"
+    )
+    assert workspace.context_summary_path("Tester") == (
+        workspace.reports_dir / "context-summary" / "tester.json"
+    )
+    assert workspace.checkpoint_dir == workspace.reports_dir / "checkpoints"
+    assert workspace.context_summary_dir == workspace.reports_dir / "context-summary"
+
+
+def test_context_artifact_paths_reject_unsafe_role_names(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+
+    for role in ("", "../escape", "a/b", "a\\b"):
+        with pytest.raises(ValueError):
+            workspace.checkpoint_path(role)

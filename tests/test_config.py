@@ -80,6 +80,35 @@ def test_budget_defaults_to_disabled_and_rejects_negative() -> None:
         Settings(_env_file=None, budget_limit=-0.1)  # type: ignore[call-arg]
 
 
+def test_context_monitor_defaults_match_ruling() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.context_monitor_enabled is True
+    assert settings.context_soft_ratio == 0.55
+    assert settings.context_hard_ratio == 0.90
+
+
+def test_context_ratios_reject_inverted_or_above_agentscope_limit() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, context_soft_ratio=0.9, context_hard_ratio=0.55)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, context_hard_ratio=0.95)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, context_soft_ratio=0.55, context_hard_ratio=0.55)  # type: ignore[call-arg]
+
+
+def test_context_ratios_can_be_overridden_by_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SENTINEL_CONTEXT_SOFT_RATIO", "0.4")
+    monkeypatch.setenv("SENTINEL_CONTEXT_HARD_RATIO", "0.8")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.context_soft_ratio == 0.4
+    assert settings.context_hard_ratio == 0.8
+
+
 def test_invalid_email_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SENTINEL_GIT_USER_EMAIL", "not-an-email")
 

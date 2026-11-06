@@ -18,6 +18,7 @@ secrets*.json
 .claude/settings.local.json
 .claude/agents/
 .claude/skills/
+.claude/mailbox/
 docs/local/
 
 # ===== Python 虚拟环境 =====

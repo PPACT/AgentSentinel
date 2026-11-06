@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from agentscope.agent import Agent
-from agentscope.message import DataBlock, TextBlock
+from agentscope.message import DataBlock, Msg, TextBlock
 from agentscope.middleware import MiddlewareBase
 
 from agentsentinel.contracts import Checkpoint, ContextSummary, SessionState
@@ -83,7 +83,12 @@ class HardThresholdHandler(Protocol):
 
 
 class AgentScopeTokenCounter:
-    """直接复用 AgentScope 的 ``count_tokens``；子类覆盖时自动更准。"""
+    """按 AgentScope 实际送模型的输入计数：system + summary + context + tools。
+
+    只数 ``state.context`` 会在压缩后严重低估水位（摘要承载大部分上下文），
+    因此复用 ``_prepare_model_input()`` 的 messages / tools；调用方显式传入
+    tools 时以传入值为准。
+    """
 
     async def count(
         self,
@@ -91,10 +96,14 @@ class AgentScopeTokenCounter:
         *,
         tools: Sequence[dict[str, Any]] | None = None,
     ) -> int:
-        return await agent.model.count_tokens(
-            agent.state.context,
-            list(tools) if tools is not None else None,
+        prepared = await agent._prepare_model_input()
+        messages = cast(list[Msg], prepared["messages"])
+        tool_schemas = (
+            list(tools)
+            if tools is not None
+            else cast(list[dict[str, Any]] | None, prepared.get("tools"))
         )
+        return await agent.model.count_tokens(messages, tool_schemas)
 
 
 def _serialize_context_summary(value: str | list[TextBlock | DataBlock]) -> str:

@@ -105,6 +105,41 @@ def test_below_soft_threshold_writes_nothing(tmp_path: Path) -> None:
     assert not workspace.context_summary_dir.exists()
 
 
+def test_measure_counts_summary_when_context_is_empty(tmp_path: Path) -> None:
+    """压缩后 context 可能为空，摘要仍会送模型，必须计入水位。"""
+    agent = _agent(context_size=1000)
+    agent.state.context = []
+    agent.state.summary = "s" * 4000
+    monitor = ContextMonitor(workspace=Workspace(tmp_path / "workspace"))
+
+    usage = asyncio.run(monitor.measure(agent))
+
+    assert usage.used_tokens >= 1000
+    assert usage.ratio >= 1.0
+
+
+def test_measure_includes_explicit_tool_schemas(tmp_path: Path) -> None:
+    agent = _agent(context_size=1000)
+    agent.state.context = []
+    agent.state.summary = ""
+    monitor = ContextMonitor(workspace=Workspace(tmp_path / "workspace"))
+    baseline = asyncio.run(monitor.measure(agent))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "demo_tool",
+                "description": "d" * 4000,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    with_tools = asyncio.run(monitor.measure(agent, tools=tools))
+
+    assert with_tools.used_tokens > baseline.used_tokens + 500
+
+
 def test_soft_threshold_writes_role_scoped_summary(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path / "workspace")
     monitor = ContextMonitor(

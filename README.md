@@ -147,7 +147,7 @@ result = pipeline.run(task_prompt)
 print(result.status.value, result.audit_log)
 ```
 
-需要真实模型时，按 `.env.example` 填写 `premium` / `economy` 两档，并将 `SENTINEL_MODEL_BACKEND` 设为 `real`；路由细节见 `docs/p2-3-model-routing.md`。
+需要真实模型时，按 `.env.example` 填写 `premium` / `economy` 两档，并将 `SENTINEL_MODEL_BACKEND` 设为 `real`。
 
 离线演示可直接运行：
 

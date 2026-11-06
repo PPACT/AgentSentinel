@@ -28,6 +28,7 @@ def _entry(entry_id: str = "abc12345", **overrides: Any) -> dict[str, Any]:
         "to": "doc",
         "topic": "P2-3c",
         "event": "delivered",
+        "actionable": True,
         "status": "unread",
         "notified": False,
         "notify_attempts": 0,
@@ -112,6 +113,16 @@ def test_missing_role_is_silent(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""
+
+
+def test_passive_entries_do_not_trigger(tmp_path: Path) -> None:
+    _seed(tmp_path, [_entry(actionable=False, event="changed:STATUS.md")])
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+    assert _entries(tmp_path)[0]["notify_attempts"] == 0
 
 
 def test_entries_from_other_role_do_not_trigger(tmp_path: Path) -> None:

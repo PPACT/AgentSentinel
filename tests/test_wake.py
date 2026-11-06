@@ -84,6 +84,7 @@ def test_post_writes_pointer_and_degrades_without_slots(tmp_path: Path) -> None:
     assert entry["commit"] == "b3c6857"
     assert entry["status"] == "unread"
     assert entry["notified"] is False
+    assert entry["actionable"] is True
     assert len(entry["id"]) == 8
     assert len(_entries(tmp_path)) == 1
 
@@ -102,14 +103,66 @@ def test_post_dedupes_unread_key(tmp_path: Path) -> None:
     assert len(_entries(tmp_path)) == 1
 
 
-def test_post_merges_same_slot_within_debounce_window(tmp_path: Path) -> None:
+def test_actionable_posts_do_not_merge_within_debounce_window(tmp_path: Path) -> None:
     _post(tmp_path, topic="first")
     second = _post(tmp_path, topic="second")
+
+    assert second["merged"] is False
+    entries = _entries(tmp_path)
+    assert len(entries) == 2
+    assert entries[0]["topic"] == "first"
+    assert entries[1]["topic"] == "second"
+
+
+def _passive_post(tmp_path: Path, topic: str) -> dict[str, Any]:
+    result = _run(
+        tmp_path,
+        "post",
+        "--from",
+        "doc",
+        "--to",
+        "dev",
+        "--topic",
+        topic,
+        "--event",
+        "changed:STATUS.md",
+        "--passive",
+    )
+    assert result.returncode == 0, result.stderr
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, dict)
+    return dict(parsed)
+
+
+def test_passive_post_is_not_actionable(tmp_path: Path) -> None:
+    out = _passive_post(tmp_path, "changed")
+
+    entry = out["entry"]
+    assert isinstance(entry, dict)
+    assert entry["actionable"] is False
+
+
+def test_actionable_entry_is_not_overwritten_by_passive_merge(tmp_path: Path) -> None:
+    _post(tmp_path, topic="delivered")
+    _passive_post(tmp_path, "changed")
+
+    entries = _entries(tmp_path)
+    assert len(entries) == 2
+    assert entries[0]["topic"] == "delivered"
+    assert entries[0]["actionable"] is True
+    assert entries[1]["topic"] == "changed"
+    assert entries[1]["actionable"] is False
+
+
+def test_passive_posts_merge_within_debounce_window(tmp_path: Path) -> None:
+    _passive_post(tmp_path, "first-change")
+    second = _passive_post(tmp_path, "second-change")
 
     assert second["merged"] is True
     entries = _entries(tmp_path)
     assert len(entries) == 1
-    assert entries[0]["topic"] == "second"
+    assert entries[0]["topic"] == "second-change"
+    assert entries[0]["actionable"] is False
 
 
 def test_tail_limits_recent_entries(tmp_path: Path) -> None:
@@ -170,7 +223,7 @@ def test_prune_moves_read_and_notified_entries(tmp_path: Path) -> None:
     assert [entry["id"] for entry in _entries(tmp_path)] == ["unread-1"]
 
 
-def test_prune_keeps_inbox_at_or_below_limit(tmp_path: Path) -> None:
+def test_prune_does_not_archive_unread_entries(tmp_path: Path) -> None:
     _write_entries(
         tmp_path,
         [{"id": f"id-{index}", "status": "unread", "notified": False} for index in range(55)],
@@ -179,7 +232,12 @@ def test_prune_keeps_inbox_at_or_below_limit(tmp_path: Path) -> None:
     result = _run(tmp_path, "prune")
 
     assert result.returncode == 0, result.stderr
-    assert len(_entries(tmp_path)) <= 50
+    summary = json.loads(result.stdout)
+    assert summary["archived"] == 0
+    assert summary["remaining"] == 55
+    assert "warning" in summary
+    assert len(_entries(tmp_path)) == 55
+    assert not (tmp_path / ".claude" / "mailbox" / "archive.jsonl").exists()
 
 
 def test_slots_resolve_peer_name(tmp_path: Path) -> None:

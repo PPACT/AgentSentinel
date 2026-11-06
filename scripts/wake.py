@@ -208,8 +208,9 @@ def post_event(
     commit: str = "",
     rel_path: str = "",
     file_hash: str = "",
+    actionable: bool = True,
 ) -> Entry:
-    """写入一条指针事件；同 slot 5 秒内合并，重复未读键丢弃。"""
+    """写入一条指针事件；同 slot 5 秒内仅合并被动记录，重复未读键丢弃。"""
     sender = sender.strip().casefold() or "unknown"
     recipient = recipient.strip().casefold() or "unknown"
     topic = topic.strip()
@@ -232,7 +233,14 @@ def post_event(
             recent = (
                 previous_ts is not None and (now - previous_ts).total_seconds() <= DEBOUNCE_SECONDS
             )
-            if recent and previous.get("status") == "unread" and not previous.get("notified"):
+            # 只有双方都是被动记录时才合并；actionable 事件不被覆盖。
+            if (
+                recent
+                and not actionable
+                and not previous.get("actionable", True)
+                and previous.get("status") == "unread"
+                and not previous.get("notified")
+            ):
                 entry = previous
                 entry.update(
                     {
@@ -243,6 +251,7 @@ def post_event(
                         "path": rel_path,
                         "file_hash": file_hash,
                         "dedupe_key": key,
+                        "actionable": False,
                     }
                 )
                 merged = True
@@ -271,6 +280,7 @@ def post_event(
                     "file_hash": file_hash,
                     "dedupe_key": key,
                     "hop": 1,
+                    "actionable": actionable,
                     "status": "unread",
                     "notified": False,
                     "notify_attempts": 0,
@@ -326,11 +336,11 @@ def mark_read(root: Path, entry_id: str) -> Entry:
 
 
 def unnotified_from(root: Path, role: str) -> list[Entry]:
-    """返回本会话（from=role）尚未通知的条目。"""
+    """返回本会话（from=role）尚未通知的可执行条目；被动记录不触发唤醒。"""
     return [
         entry
         for entry in _read_entries(inbox_path(root))
-        if entry.get("from") == role and not entry.get("notified")
+        if entry.get("from") == role and not entry.get("notified") and entry.get("actionable", True)
     ]
 
 
@@ -355,7 +365,7 @@ def tail_entries(root: Path, limit: int = 10) -> list[Entry]:
 
 
 def prune_entries(root: Path) -> Entry:
-    """把已读且已通知条目移入 archive；剩余仍超限时继续归档最旧条目。"""
+    """只归档已读且已通知条目；未读/未通知条目即使超限也保留并给出 warning。"""
     with _locked(root):
         path = inbox_path(root)
         entries = _read_entries(path)
@@ -366,17 +376,15 @@ def prune_entries(root: Path) -> Entry:
         }
         archived = [entry for index, entry in enumerate(entries) if index in archived_indexes]
         remaining = [entry for index, entry in enumerate(entries) if index not in archived_indexes]
-        overflow = max(len(remaining) - MAX_INBOX_LINES, 0)
-        if overflow:
-            archived.extend(remaining[:overflow])
-            remaining = remaining[overflow:]
         _append_entries(archive_path(root), archived)
         _write_entries(path, remaining)
-    return {
-        "archived": len(archived),
-        "remaining": len(remaining),
-        "overflow_archived": overflow,
-    }
+    result: Entry = {"archived": len(archived), "remaining": len(remaining)}
+    if len(remaining) > MAX_INBOX_LINES:
+        result["warning"] = (
+            f"inbox 仍有 {len(remaining)} 行，超过 {MAX_INBOX_LINES}；"
+            "未读/未通知条目已保留，未做归档"
+        )
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -390,6 +398,11 @@ def _parser() -> argparse.ArgumentParser:
     post.add_argument("--event", required=True)
     post.add_argument("--commit", default="")
     post.add_argument("--path", default="")
+    post.add_argument(
+        "--passive",
+        action="store_true",
+        help="被动记录（actionable=false），不触发 Stop Hook 唤醒",
+    )
 
     notified = subparsers.add_parser("mark-notified", help="标记已通知")
     notified.add_argument("--id", required=True)
@@ -428,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 commit=args.commit,
                 rel_path=args.path,
                 file_hash=file_hash,
+                actionable=not args.passive,
             )
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         elif args.command == "mark-notified":

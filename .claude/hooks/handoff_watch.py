@@ -74,6 +74,7 @@ def main() -> None:
         event=event,
         rel_path=rel_path,
         file_hash=file_hash,
+        actionable=False,
     )
 
 

@@ -61,6 +61,7 @@ def test_target_file_records_one_changed_event(tmp_path: Path) -> None:
     assert entries[0]["event"].startswith("changed:")
     assert entries[0]["path"] == "docs/local/交流区/STATUS.md"
     assert entries[0]["file_hash"]
+    assert entries[0]["actionable"] is False
 
 
 def test_same_content_is_not_recorded_twice(tmp_path: Path) -> None:

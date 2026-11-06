@@ -18,6 +18,7 @@ from agentsentinel.contracts import TaskStatus
 from agentsentinel.governance.permissions import MatrixPermissionPolicy, PermissionPolicy
 from agentsentinel.governance.sanitizer import RegexSanitizer, Sanitizer
 from agentsentinel.models import ModelRouter
+from agentsentinel.models.router import ROLE_TIERS
 from agentsentinel.roles import (
     AgentRole,
     Coder,
@@ -31,6 +32,7 @@ from agentsentinel.roles.orchestrator import OrchestrationSession, SessionState
 from agentsentinel.roles.runtime import StubChatModel, text_reply, tool_call
 from agentsentinel.state import StateLogger
 from agentsentinel.tools.git_ops import GitOps, StubGitOps
+from agentsentinel.usage import BudgetExceededError, MeteredChatModel, UsageLedger
 from agentsentinel.workspace import Workspace
 
 MAX_SUPERVISOR_CALLS = 12
@@ -115,9 +117,14 @@ class SentinelPipeline:
         if model_backend not in {"stub", "real"}:
             raise ValueError(f"未知 model_backend: {model_backend}")
         self._model_backend = model_backend
-        if model_backend == "real" and model_router is None:
-            model_router = ModelRouter(settings if settings is not None else Settings())
+        self._settings: Settings | None = settings if model_backend == "real" else None
+        if model_backend == "real":
+            if self._settings is None:
+                self._settings = Settings()
+            if model_router is None:
+                model_router = ModelRouter(self._settings)
         self._model_router = model_router
+        self._usage_ledger: UsageLedger | None = None
         self._workspace = workspace if workspace is not None else Workspace()
         self._workspace.ensure()
         self._manager = Manager(
@@ -137,7 +144,7 @@ class SentinelPipeline:
             target_branch=target_branch,
             state_logger=StateLogger(self._workspace.pipeline_state_path),
             role_model_for=(
-                model_router.for_role
+                self._role_model_for
                 if model_backend == "real" and model_router is not None
                 else None
             ),
@@ -153,9 +160,24 @@ class SentinelPipeline:
         return self._manager
 
     def run(self, task: str) -> PipelineResult:
-        outcome = self._orchestrator.run_with_model(
-            task, self._workspace, self._resolve_model_factory()
+        self._usage_ledger = (
+            UsageLedger(self._settings, self._workspace.usage_path)
+            if self._model_backend == "real" and self._settings is not None
+            else None
         )
+        try:
+            outcome = self._orchestrator.run_with_model(
+                task, self._workspace, self._resolve_model_factory()
+            )
+        except BudgetExceededError as exc:
+            return PipelineResult(
+                status=PipelineOutcome.FAILED,
+                summary=f"预算熔断：{exc}",
+                artifacts=(),
+                audit_log=self._manager.audit_log_path,
+            )
+        finally:
+            self._usage_ledger = None
         return PipelineResult(
             status=outcome.status,
             summary=outcome.summary,
@@ -164,6 +186,24 @@ class SentinelPipeline:
             task_statuses=outcome.task_statuses,
             attempts=outcome.attempts,
         )
+
+    def _role_model_for(self, role: str) -> ChatModelBase | None:
+        """真实模式下按角色取模型并套上计量层；未开启运行时不计量。"""
+        if self._model_router is None:
+            return None
+        model = self._model_router.for_role(role)
+        if model is None:
+            return None
+        return self._metered_model(model, role)
+
+    def _metered_model(self, model: ChatModelBase, role: str) -> ChatModelBase:
+        ledger = self._usage_ledger
+        if ledger is None:
+            return model
+        tier = ROLE_TIERS.get(role.casefold())
+        if tier is None:
+            return model
+        return MeteredChatModel(model, role=role.casefold(), tier=tier, ledger=ledger)
 
     def _resolve_model_factory(self) -> Callable[[OrchestrationSession], ChatModelBase]:
         """显式 model_factory > real 模式的 router > 默认脚本模型。"""
@@ -176,7 +216,7 @@ class SentinelPipeline:
                 model = router.for_role("orchestrator")
                 if model is None:
                     raise RuntimeError("real 模式缺少 orchestrator 模型")
-                return model
+                return self._metered_model(model, "orchestrator")
 
             return orchestrator_factory
         return scripted_model

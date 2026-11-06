@@ -89,6 +89,30 @@ class StateRecord(BaseModel):
     detail: str = ""
 
 
+class UsageRecord(BaseModel):
+    """一次模型调用的用量记录；写入 workspace/reports/usage.jsonl。
+
+    与审计、状态流解耦：成本只进用量日志，不混入 push-log 或 pipeline-state。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    timestamp: datetime
+    run_id: str
+    role: str
+    tier: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    estimated_cost: float
+    cumulative_cost: float
+    budget_limit: float
+    exceeded: bool = False
+    usage_available: bool = True
+
+
 class TaskStatus(BaseModel):
     """主编排维护的任务状态快照。"""
 

@@ -68,6 +68,18 @@ def test_unprefixed_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.webhook_secret is None
 
 
+def test_budget_defaults_to_disabled_and_rejects_negative() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.budget_limit == 0.0
+    assert settings.premium_input_price_per_mtok == 0.0
+    assert settings.premium_output_price_per_mtok == 0.0
+    assert settings.economy_input_price_per_mtok == 0.0
+    assert settings.economy_output_price_per_mtok == 0.0
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, budget_limit=-0.1)  # type: ignore[call-arg]
+
+
 def test_invalid_email_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SENTINEL_GIT_USER_EMAIL", "not-an-email")
 

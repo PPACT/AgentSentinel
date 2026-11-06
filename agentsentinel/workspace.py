@@ -45,6 +45,11 @@ class Workspace:
         """会话状态流转日志；与测试报告同目录，独立于审计日志。"""
         return self.reports_dir / "pipeline-state.jsonl"
 
+    @property
+    def usage_path(self) -> Path:
+        """模型用量与成本日志；与审计、状态流相互独立。"""
+        return self.reports_dir / "usage.jsonl"
+
     def ensure(self) -> None:
         """创建四类产物目录；重复调用不破坏已有内容。"""
         for name in ARTIFACT_DIRS:

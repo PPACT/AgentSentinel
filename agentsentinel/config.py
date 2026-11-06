@@ -105,6 +105,13 @@ class Settings(BaseSettings):
         ),
     )
 
+    # P2-3c 用量与预算；0 表示不启用预算或不计价。
+    budget_limit: float = Field(default=0.0, ge=0)
+    premium_input_price_per_mtok: float = Field(default=0.0, ge=0)
+    premium_output_price_per_mtok: float = Field(default=0.0, ge=0)
+    economy_input_price_per_mtok: float = Field(default=0.0, ge=0)
+    economy_output_price_per_mtok: float = Field(default=0.0, ge=0)
+
     @property
     def premium_model(self) -> ModelProfile:
         """优异档（Coder / Tester）。"""

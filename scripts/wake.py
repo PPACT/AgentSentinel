@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -32,7 +33,9 @@ DEBOUNCE_SECONDS = 5.0
 MAX_INBOX_LINES = 50
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_STALE_SECONDS = 30.0
+ROLE_STALE_SECONDS = 600.0
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
+_ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
 Entry = dict[str, Any]
 
@@ -159,8 +162,153 @@ def _locked(root: Path) -> Iterator[None]:
             pass
 
 
-def resolve_peer(root: Path, role: str) -> str | None:
-    """从 slots.json 解析角色对应的会话名；缺失或无效时返回 None。"""
+def roles_dir(root: Path) -> Path:
+    return mailbox_dir(root) / "roles"
+
+
+def role_registration_path(root: Path, role: str) -> Path:
+    return roles_dir(root) / f"{role}.json"
+
+
+def role_lock_file(root: Path, role: str) -> Path:
+    return roles_dir(root) / f"{role}.lock"
+
+
+def current_role(root: Path) -> str:
+    """角色来源：SENTINEL_ROLE > .claude/session-role；都没有时返回空串。"""
+    env_role = os.environ.get("SENTINEL_ROLE", "").strip()
+    if env_role:
+        return env_role.casefold()
+    try:
+        marker = (root / ".claude" / "session-role").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return marker.casefold()
+
+
+def _read_json(path: Path) -> Entry | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(data) if isinstance(data, dict) else None
+
+
+def _write_json(path: Path, data: Entry) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    with temp.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, path)
+
+
+def _role_is_stale(registration: Entry, now: datetime) -> bool:
+    heartbeat = _parse_ts(registration.get("heartbeat_at"))
+    if heartbeat is None:
+        return True
+    return (now - heartbeat).total_seconds() > ROLE_STALE_SECONDS
+
+
+class RegistrationConflict(RuntimeError):
+    """同角色已有活跃注册；调用方据此提示现有窗口并要求接管确认。"""
+
+    def __init__(self, message: str, active: Entry) -> None:
+        super().__init__(message)
+        self.active = active
+
+
+def _claim_role_lock(path: Path, info: Entry, *, force: bool) -> None:
+    if force:
+        _write_json(path, info)
+        return
+    payload = json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        active = _read_json(path) or {}
+        raise RegistrationConflict(
+            f"角色锁已被 {active.get('session', '<unknown>')} 占用",
+            active,
+        ) from None
+    try:
+        os.write(descriptor, payload)
+    finally:
+        os.close(descriptor)
+
+
+def register_role(
+    root: Path,
+    *,
+    role: str,
+    session: str,
+    ref: str = "",
+    force: bool = False,
+) -> Entry:
+    """注册窗口身份；同角色活跃注册未加 --force 时拒绝。"""
+    role = role.strip().casefold()
+    session = session.strip()
+    ref = ref.strip()
+    if not role or not session:
+        raise ValueError("role 与 session 不能为空")
+    if _ROLE_PATTERN.fullmatch(role) is None:
+        raise ValueError(f"非法角色名：{role}")
+    now = _now()
+    with _locked(root):
+        roles_dir(root).mkdir(parents=True, exist_ok=True)
+        registration_path = role_registration_path(root, role)
+        existing = _read_json(registration_path)
+        active = existing is not None and not _role_is_stale(existing, now)
+        if active and not force and existing is not None:
+            raise RegistrationConflict(
+                f"角色 {role} 已被 {existing.get('session', '<unknown>')} 占用"
+                f"（启动于 {existing.get('started_at', '<unknown>')}）",
+                existing,
+            )
+        same_window = (
+            existing is not None
+            and existing.get("session") == session
+            and existing.get("ref", "") == ref
+        )
+        started_at = existing.get("started_at") if same_window and existing else None
+        info: Entry = {
+            "role": role,
+            "session": session,
+            "ref": ref,
+            "pid": os.getpid(),
+            "started_at": started_at if isinstance(started_at, str) else _format_ts(now),
+            "heartbeat_at": _format_ts(now),
+        }
+        lock_path = role_lock_file(root, role)
+        if lock_path.exists() and (force or not active):
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+        _claim_role_lock(lock_path, info, force=force)
+        _write_json(registration_path, info)
+    return info
+
+
+def whoami_info(root: Path) -> Entry:
+    """返回当前角色与注册状态；无角色或无注册时 status=inactive。"""
+    role = current_role(root)
+    if not role:
+        return {"role": None, "registration": None, "stale": True, "status": "inactive"}
+    registration = _read_json(role_registration_path(root, role))
+    if registration is None:
+        return {"role": role, "registration": None, "stale": True, "status": "inactive"}
+    stale = _role_is_stale(registration, _now())
+    return {
+        "role": role,
+        "registration": registration,
+        "stale": stale,
+        "status": "inactive" if stale else "active",
+    }
+
+
+def _slots_target(root: Path, role: str) -> tuple[str, str] | None:
     slots_path = mailbox_dir(root) / "slots.json"
     try:
         raw = json.loads(slots_path.read_text(encoding="utf-8"))
@@ -170,13 +318,43 @@ def resolve_peer(root: Path, role: str) -> str | None:
         return None
     value = raw.get(role)
     if isinstance(value, str) and value.strip():
-        return value.strip()
+        return value.strip(), ""
     if isinstance(value, dict):
+        ref = value.get("ref")
         for key in ("session", "name"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+                return candidate.strip(), ref.strip() if isinstance(ref, str) else ""
     return None
+
+
+def resolve_role(root: Path, role: str) -> Entry | None:
+    """解析角色对应的窗口：注册表（未过期）优先，其次 slots.json。"""
+    role = role.strip().casefold()
+    registration = _read_json(role_registration_path(root, role))
+    if registration is not None and not _role_is_stale(registration, _now()):
+        session = registration.get("session")
+        ref = registration.get("ref", "")
+        if isinstance(session, str) and session:
+            return {
+                "role": role,
+                "session": session,
+                "ref": ref if isinstance(ref, str) else "",
+                "source": "roles",
+            }
+    slots = _slots_target(root, role)
+    if slots is not None:
+        return {"role": role, "session": slots[0], "ref": slots[1], "source": "slots"}
+    return None
+
+
+def resolve_peer(root: Path, role: str) -> str | None:
+    """解析角色对应的会话名；注册表与 slots.json 都没有时返回 None。"""
+    target = resolve_role(root, role)
+    if target is None:
+        return None
+    session = target.get("session")
+    return session if isinstance(session, str) else None
 
 
 def _slot_entries(entries: list[Entry], sender: str, recipient: str) -> list[int]:
@@ -413,6 +591,17 @@ def _parser() -> argparse.ArgumentParser:
     tail = subparsers.add_parser("tail", help="输出最近条目（JSONL）")
     tail.add_argument("--limit", type=int, default=10)
 
+    register = subparsers.add_parser("register", help="注册当前窗口的角色身份")
+    register.add_argument("--role", required=True)
+    register.add_argument("--session", required=True)
+    register.add_argument("--ref", default="")
+    register.add_argument("--force", action="store_true", help="接管同角色已有活跃注册")
+
+    subparsers.add_parser("whoami", help="输出当前角色与注册状态")
+
+    resolve = subparsers.add_parser("resolve", help="解析角色对应的窗口")
+    resolve.add_argument("--role", required=True)
+
     subparsers.add_parser("prune", help="归档已读并控制行数")
     return parser
 
@@ -455,6 +644,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _emit_entry(entry)
         elif args.command == "prune":
             print(json.dumps(prune_entries(root), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "register":
+            try:
+                registration = register_role(
+                    root,
+                    role=args.role,
+                    session=args.session,
+                    ref=args.ref,
+                    force=args.force,
+                )
+            except RegistrationConflict as exc:
+                print(
+                    json.dumps(
+                        {"registered": False, "reason": str(exc), "active": exc.active},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                return 1
+            print(
+                json.dumps(
+                    {"registered": True, "registration": registration},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        elif args.command == "whoami":
+            print(json.dumps(whoami_info(root), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "resolve":
+            target = resolve_role(root, args.role)
+            if target is None:
+                print("{}")
+                return 1
+            print(json.dumps(target, ensure_ascii=False, separators=(",", ":")))
     except (KeyError, ValueError, OSError, TimeoutError) as exc:
         print(f"wake: {exc}", file=sys.stderr)
         return 1

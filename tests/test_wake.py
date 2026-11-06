@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,14 +15,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WAKE_SCRIPT = REPO_ROOT / "scripts" / "wake.py"
 
 
-def _run(project_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    env["CLAUDE_PROJECT_DIR"] = str(project_dir)
-    env["PYTHONUTF8"] = "1"
+def _run(
+    project_dir: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    process_env["PYTHONUTF8"] = "1"
+    process_env.pop("SENTINEL_ROLE", None)
+    if env is not None:
+        process_env.update(env)
     return subprocess.run(
         [sys.executable, str(WAKE_SCRIPT), *args],
         cwd=str(project_dir),
-        env=env,
+        env=process_env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -270,3 +278,160 @@ def test_post_hashes_path_argument(tmp_path: Path) -> None:
     entry = out["entry"]
     assert isinstance(entry, dict)
     assert entry["file_hash"] == hashlib.sha256(b"hello").hexdigest()
+
+
+def _role_path(project_dir: Path, role: str) -> Path:
+    return project_dir / ".claude" / "mailbox" / "roles" / f"{role}.json"
+
+
+def _register(
+    project_dir: Path,
+    *,
+    role: str = "dev",
+    session: str = "session-dev",
+    ref: str = "abcd12",
+    force: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    args = ["register", "--role", role, "--session", session, "--ref", ref]
+    if force:
+        args.append("--force")
+    return _run(project_dir, *args)
+
+
+def test_register_writes_registration_and_lock(tmp_path: Path) -> None:
+    result = _register(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["registered"] is True
+    info = out["registration"]
+    assert info["role"] == "dev"
+    assert info["session"] == "session-dev"
+    assert info["ref"] == "abcd12"
+    assert isinstance(info["pid"], int)
+    assert info["started_at"]
+    assert info["heartbeat_at"]
+    assert _role_path(tmp_path, "dev").is_file()
+    assert (tmp_path / ".claude" / "mailbox" / "roles" / "dev.lock").is_file()
+    stored = json.loads(_role_path(tmp_path, "dev").read_text(encoding="utf-8"))
+    assert stored["session"] == "session-dev"
+
+
+def test_duplicate_active_registration_conflicts(tmp_path: Path) -> None:
+    _register(tmp_path, session="first-window")
+
+    result = _register(tmp_path, session="second-window")
+
+    assert result.returncode == 1
+    out = json.loads(result.stdout)
+    assert out["registered"] is False
+    assert "first-window" in out["reason"]
+    assert out["active"]["session"] == "first-window"
+
+
+def test_force_takes_over_active_registration(tmp_path: Path) -> None:
+    _register(tmp_path, session="first-window")
+
+    result = _register(tmp_path, session="second-window", force=True)
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["registered"] is True
+    assert out["registration"]["session"] == "second-window"
+    stored = json.loads(_role_path(tmp_path, "dev").read_text(encoding="utf-8"))
+    assert stored["session"] == "second-window"
+
+
+def test_stale_registration_allows_reregister(tmp_path: Path) -> None:
+    _register(tmp_path, session="old-window")
+    path = _role_path(tmp_path, "dev")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    old = datetime.now(UTC) - timedelta(seconds=1200)
+    data["heartbeat_at"] = old.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = _register(tmp_path, session="new-window")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["registration"]["session"] == "new-window"
+
+
+def test_whoami_reports_role_and_registration(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
+
+    before = _run(tmp_path, "whoami")
+    assert before.returncode == 0, before.stderr
+    before_out = json.loads(before.stdout)
+    assert before_out["role"] == "dev"
+    assert before_out["status"] == "inactive"
+    assert before_out["registration"] is None
+
+    _register(tmp_path)
+
+    after = json.loads(_run(tmp_path, "whoami").stdout)
+    assert after["status"] == "active"
+    assert after["stale"] is False
+    assert after["registration"]["session"] == "session-dev"
+
+
+def test_whoami_env_role_overrides_file(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
+
+    result = _run(tmp_path, "whoami", env={"SENTINEL_ROLE": "dev"})
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["role"] == "dev"
+
+
+def test_whoami_without_role_is_inactive(tmp_path: Path) -> None:
+    result = _run(tmp_path, "whoami")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["role"] is None
+    assert out["status"] == "inactive"
+
+
+def test_resolve_prefers_registration_over_slots(tmp_path: Path) -> None:
+    mailbox = tmp_path / ".claude" / "mailbox"
+    mailbox.mkdir(parents=True)
+    (mailbox / "slots.json").write_text(json.dumps({"dev": "slot-session"}), encoding="utf-8")
+    _register(tmp_path, session="registered-session")
+
+    result = _run(tmp_path, "resolve", "--role", "dev")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["session"] == "registered-session"
+    assert out["ref"] == "abcd12"
+    assert out["source"] == "roles"
+
+
+def test_resolve_falls_back_to_slots(tmp_path: Path) -> None:
+    mailbox = tmp_path / ".claude" / "mailbox"
+    mailbox.mkdir(parents=True)
+    (mailbox / "slots.json").write_text(json.dumps({"dev": "slot-session"}), encoding="utf-8")
+
+    result = _run(tmp_path, "resolve", "--role", "dev")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["session"] == "slot-session"
+    assert out["source"] == "slots"
+
+
+def test_resolve_missing_exits_one(tmp_path: Path) -> None:
+    result = _run(tmp_path, "resolve", "--role", "dev")
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == "{}"
+
+
+def test_post_uses_registered_session(tmp_path: Path) -> None:
+    _register(tmp_path, role="dev", session="registered-dev")
+
+    out = _post(tmp_path)
+
+    assert out["peer"] == "registered-dev"

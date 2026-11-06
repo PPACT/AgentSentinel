@@ -27,7 +27,12 @@ def _write_files(project_dir: Path, exchange: str) -> None:
 
 
 def _run(project_dir: Path) -> subprocess.CompletedProcess[str]:
-    return run_hook("session_context.py", {}, project_dir=project_dir)
+    return run_hook(
+        "session_context.py",
+        {},
+        project_dir=project_dir,
+        env={"SENTINEL_ROLE": ""},
+    )
 
 
 def test_injects_status_and_unclosed_entries(tmp_path: Path) -> None:
@@ -169,6 +174,51 @@ def test_no_noise_when_everything_is_closed(tmp_path: Path) -> None:
 
 
 def test_missing_files_degrade_silently(tmp_path: Path) -> None:
+    result = _run(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
+def test_identity_and_register_hint_injected_when_role_set(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        """### [已派] closed order · 2026-10-31 · doc
+
+- 回执：已执行 · abc123
+""",
+    )
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
+
+    text = str(hook_output(_run(tmp_path))["additionalContext"])
+
+    assert "身份 role=dev" in text
+    assert "register --role dev" in text
+    assert "对端为 doc" in text
+    assert "交接只发指针" in text
+
+
+def test_identity_injected_without_exchange_files(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
+
+    text = str(hook_output(_run(tmp_path))["additionalContext"])
+
+    assert "role=doc" in text
+    assert "register --role doc" in text
+    assert "对端为 dev" in text
+
+
+def test_no_identity_without_role(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        """### [已派] closed order · 2026-10-31 · doc
+
+- 回执：已执行 · abc123
+""",
+    )
+
     result = _run(tmp_path)
 
     assert result.returncode == 0

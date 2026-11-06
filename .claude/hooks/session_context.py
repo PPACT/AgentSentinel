@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import common
 
 _EXCHANGE_DIR = Path("docs/local/交流区")
 _STATUS_KEYS = ("当前阶段", "正在做", "等谁", "阻塞")
+_PEER_BY_ROLE = {"dev": "doc", "doc": "dev", "main": "dev"}
 _HEADING = re.compile(r"^### \[(待裁|已派|已交|已裁)\][^\n]*$", re.MULTILINE)
 # 只认独立成行的认单语句：行首（允许列表前缀）明确出现「已认单」/「文档侧认单」。
 # 正文引用该措辞的说明文字，以及「暂不认单」「待认单」「不认单」「未认单」一律不算结案。
@@ -56,11 +58,37 @@ def _unclosed_entries(exchange_text: str) -> tuple[list[str], int]:
     return titles, recognized
 
 
+def _identity_line(project_dir: Path) -> str:
+    """角色已设置时注入一行身份与自注册指令；无角色静默。"""
+    role = os.environ.get("SENTINEL_ROLE", "").strip().casefold()
+    if not role:
+        try:
+            role = (
+                (project_dir / ".claude" / "session-role")
+                .read_text(encoding="utf-8")
+                .strip()
+                .casefold()
+            )
+        except OSError:
+            role = ""
+    if not role:
+        return ""
+    peer = _PEER_BY_ROLE.get(role, "未定位")
+    return (
+        f"身份 role={role}；开工先 ListAgents 找到本会话名与 ref，执行 "
+        f'`uv run python scripts/wake.py register --role {role} --session "<name>" --ref <ref>`；'
+        f"对端为 {peer}；交接只发指针。"
+    )
+
+
 def build_context(project_dir: Path) -> str:
     status_path = project_dir / _EXCHANGE_DIR / "STATUS.md"
     exchange_path = project_dir / _EXCHANGE_DIR / "交流区.md"
+    identity = _identity_line(project_dir)
     if not status_path.is_file() or not exchange_path.is_file():
-        return ""
+        if not identity:
+            return ""
+        return "\n".join(["## 会话交接（SessionStart 自动注入）", f"- {identity}"])
     try:
         status_text = status_path.read_text(encoding="utf-8", errors="replace")
         exchange_text = exchange_path.read_text(encoding="utf-8", errors="replace")
@@ -80,9 +108,13 @@ def build_context(project_dir: Path) -> str:
         )
 
     if not titles and not thresholds:
-        return ""
+        if not identity:
+            return ""
+        return "\n".join(["## 会话交接（SessionStart 自动注入）", f"- {identity}"])
 
     parts = ["## 会话交接（SessionStart 自动注入）"]
+    if identity:
+        parts.append(f"- {identity}")
     for key in _STATUS_KEYS:
         if key in fields:
             parts.append(f"- {key}：{fields[key]}")

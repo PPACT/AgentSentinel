@@ -291,6 +291,35 @@ def register_role(
     return info
 
 
+def refresh_heartbeat(root: Path, role: str) -> Entry | None:
+    """刷新指定角色注册的心跳；无注册时返回 None。"""
+    role = role.strip().casefold()
+    if not role:
+        return None
+    with _locked(root):
+        path = role_registration_path(root, role)
+        registration = _read_json(path)
+        if registration is None:
+            return None
+        registration["heartbeat_at"] = _format_ts(_now())
+        _write_json(path, registration)
+        lock_path = role_lock_file(root, role)
+        if lock_path.exists():
+            _write_json(lock_path, registration)
+    return registration
+
+
+def _refresh_current(root: Path) -> None:
+    """当前角色有注册时顺带刷新心跳；辅助动作失败不打断主命令。"""
+    role = current_role(root)
+    if not role:
+        return
+    try:
+        refresh_heartbeat(root, role)
+    except (OSError, TimeoutError):
+        return
+
+
 def whoami_info(root: Path) -> Entry:
     """返回当前角色与注册状态；无角色或无注册时 status=inactive。"""
     role = current_role(root)
@@ -329,18 +358,20 @@ def _slots_target(root: Path, role: str) -> tuple[str, str] | None:
 
 
 def resolve_role(root: Path, role: str) -> Entry | None:
-    """解析角色对应的窗口：注册表（未过期）优先，其次 slots.json。"""
+    """解析角色对应的窗口：过期注册仍可寻址；无记录才回退 slots.json。"""
     role = role.strip().casefold()
     registration = _read_json(role_registration_path(root, role))
-    if registration is not None and not _role_is_stale(registration, _now()):
+    if registration is not None:
         session = registration.get("session")
         ref = registration.get("ref", "")
         if isinstance(session, str) and session:
+            stale = _role_is_stale(registration, _now())
             return {
                 "role": role,
                 "session": session,
                 "ref": ref if isinstance(ref, str) else "",
-                "source": "roles",
+                "stale": stale,
+                "source": "roles-stale" if stale else "roles",
             }
     slots = _slots_target(root, role)
     if slots is not None:
@@ -599,6 +630,9 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("whoami", help="输出当前角色与注册状态")
 
+    heartbeat = subparsers.add_parser("heartbeat", help="刷新当前角色心跳")
+    heartbeat.add_argument("--role", default="")
+
     resolve = subparsers.add_parser("resolve", help="解析角色对应的窗口")
     resolve.add_argument("--role", required=True)
 
@@ -615,6 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = project_root()
     try:
         if args.command == "post":
+            _refresh_current(root)
             file_hash = ""
             if args.path:
                 candidate = Path(args.path)
@@ -640,6 +675,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "mark-read":
             print(json.dumps(mark_read(root, args.id), ensure_ascii=False, separators=(",", ":")))
         elif args.command == "tail":
+            _refresh_current(root)
             for entry in tail_entries(root, args.limit):
                 _emit_entry(entry)
         elif args.command == "prune":
@@ -670,7 +706,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         elif args.command == "whoami":
+            _refresh_current(root)
             print(json.dumps(whoami_info(root), ensure_ascii=False, separators=(",", ":")))
+        elif args.command == "heartbeat":
+            role = (args.role or current_role(root)).strip().casefold()
+            refreshed = refresh_heartbeat(root, role) if role else None
+            print(
+                json.dumps(
+                    {
+                        "refreshed": refreshed is not None,
+                        "role": role or None,
+                        "registration": refreshed,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
         elif args.command == "resolve":
             target = resolve_role(root, args.role)
             if target is None:

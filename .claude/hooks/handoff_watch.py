@@ -62,6 +62,10 @@ def main() -> None:
     from scripts import wake
 
     role = current_role(root)
+    try:
+        wake.refresh_heartbeat(root, role)
+    except Exception:  # noqa: BLE001, S110 - 心跳刷新失败不阻断记录
+        pass
     peer = _PEER_BY_ROLE.get(role, _PEER_UNKNOWN)
     if wake.last_hash(root, sender=role, recipient=peer, rel_path=rel_path) == file_hash:
         return

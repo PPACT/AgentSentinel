@@ -435,3 +435,80 @@ def test_post_uses_registered_session(tmp_path: Path) -> None:
     out = _post(tmp_path)
 
     assert out["peer"] == "registered-dev"
+
+
+def _make_stale(project_dir: Path, role: str = "dev") -> None:
+    path = _role_path(project_dir, role)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    old = datetime.now(UTC) - timedelta(seconds=1200)
+    data["heartbeat_at"] = old.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _heartbeat_age_seconds(project_dir: Path, role: str = "dev") -> float:
+    data = json.loads(_role_path(project_dir, role).read_text(encoding="utf-8"))
+    heartbeat = datetime.strptime(data["heartbeat_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
+    return (datetime.now(UTC) - heartbeat).total_seconds()
+
+
+def test_heartbeat_refreshes_stale_registration(tmp_path: Path) -> None:
+    _register(tmp_path)
+    _make_stale(tmp_path)
+
+    result = _run(tmp_path, "heartbeat", "--role", "dev")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["refreshed"] is True
+    assert out["role"] == "dev"
+    assert _heartbeat_age_seconds(tmp_path) < 60
+
+
+def test_heartbeat_without_registration_is_noop(tmp_path: Path) -> None:
+    result = _run(tmp_path, "heartbeat", "--role", "dev")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["refreshed"] is False
+    assert out["registration"] is None
+
+
+def test_whoami_refreshes_heartbeat(tmp_path: Path) -> None:
+    _register(tmp_path)
+    _make_stale(tmp_path)
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    (tmp_path / ".claude" / "session-role").write_text("dev", encoding="utf-8")
+
+    result = _run(tmp_path, "whoami")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["status"] == "active"
+    assert out["stale"] is False
+    assert _heartbeat_age_seconds(tmp_path) < 60
+
+
+def test_post_refreshes_heartbeat(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "session-role").write_text("doc", encoding="utf-8")
+    _register(tmp_path, role="doc", session="doc-session")
+    _make_stale(tmp_path, "doc")
+
+    _post(tmp_path)
+
+    assert _heartbeat_age_seconds(tmp_path, "doc") < 60
+
+
+def test_stale_registration_is_resolvable(tmp_path: Path) -> None:
+    _register(tmp_path, session="stale-session")
+    _make_stale(tmp_path)
+    mailbox = tmp_path / ".claude" / "mailbox"
+    (mailbox / "slots.json").write_text(json.dumps({"dev": "slot-session"}), encoding="utf-8")
+
+    result = _run(tmp_path, "resolve", "--role", "dev")
+
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["session"] == "stale-session"
+    assert out["source"] == "roles-stale"
+    assert out["stale"] is True

@@ -59,6 +59,11 @@ def main() -> None:
 
     from scripts import wake
 
+    try:
+        wake.refresh_heartbeat(root, role)
+    except Exception:  # noqa: BLE001, S110 - 心跳刷新失败不阻断收尾
+        pass
+
     entries = wake.unnotified_from(root, role)
     if not entries:
         return

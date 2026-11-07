@@ -22,26 +22,6 @@
             "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_fixtures.py\""
           }
         ]
-      },
-      {
-        "matcher": "Task|Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_subagents.py\""
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session_bootstrap.py\""
-          }
-        ]
       }
     ]
   }

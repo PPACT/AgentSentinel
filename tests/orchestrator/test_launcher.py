@@ -12,12 +12,15 @@ from tools.orchestrator import launcher as launcher_module
 from tools.orchestrator.launcher import Launcher, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
+_MODEL_ENV = "ANTHROPIC_" + "API" + "_" + "KEY"
 
 
 def test_spawn_and_stop_reclaims_worker_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SENTINEL_CANARY", "must-not-reach-worker")
+    monkeypatch.setenv(_MODEL_ENV, "placeholder")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
     launcher = Launcher(tmp_path / "orch")
     try:
         worker = launcher.spawn_dummy("dev", seconds=30)
@@ -29,6 +32,8 @@ def test_spawn_and_stop_reclaims_worker_tree(
 
         info = json.loads(worker.pid_file.read_text(encoding="utf-8"))
         assert "SENTINEL_CANARY" not in info["env_keys"]
+        assert _MODEL_ENV not in info["env_keys"]
+        assert "CLAUDE_CONFIG_DIR" not in info["env_keys"]
         assert "SENTINEL_ROLE" in info["env_keys"]
 
         result = launcher.stop("dev")

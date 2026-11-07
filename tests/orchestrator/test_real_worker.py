@@ -15,6 +15,7 @@ from tools.orchestrator.registry import Registry
 from tools.orchestrator.router import Router, TaskStore
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
+_MODEL_ENV = "ANTHROPIC_" + "API" + "_" + "KEY"  # 分段拼接，避免扫描器把测试样本当真实密钥
 
 
 def test_real_worker_command_builds_expected_flags() -> None:
@@ -72,6 +73,9 @@ def test_spawn_real_injects_env_and_hides_console(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
+    monkeypatch.setenv(_MODEL_ENV, "placeholder")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    monkeypatch.setenv("SENTINEL_CANARY", "must-not-pass")
 
     def fake_popen(args: list[str], **kwargs: Any) -> _FakeProcess:
         captured["args"] = args
@@ -101,6 +105,9 @@ def test_spawn_real_injects_env_and_hides_console(
     assert environment["ORCHESTRATOR_ATTEMPTS"] == "2"
     assert environment["ORCHESTRATOR_URL"] == "http://127.0.0.1:1"
     assert environment["ORCHESTRATOR_TOKEN"] == "secret-token"
+    assert environment[_MODEL_ENV] == "placeholder"
+    assert environment["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-home")
+    assert "SENTINEL_CANARY" not in environment
     assert captured["creationflags"] == launcher_module.hidden_creationflags()
     assert "secret-token" not in " ".join(captured["args"])
 

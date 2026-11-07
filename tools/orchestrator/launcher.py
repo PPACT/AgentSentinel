@@ -42,7 +42,7 @@ def hidden_creationflags() -> int:
 
 
 # worker 只继承运行所需的系统变量；业务/密钥类变量一律不传。
-ALLOWED_ENV_VARS = (
+BASE_ENV_VARS = (
     "PATH",
     "SYSTEMROOT",
     "SYSTEMDRIVE",
@@ -66,7 +66,10 @@ ALLOWED_ENV_VARS = (
     "OS",
     "PYTHONIOENCODING",
     "PYTHONUTF8",
-    # 真实 worker 的模型认证与 Git Bash 路径；只进入子进程 env，不落日志。
+)
+
+# 仅真实 worker 需要：模型认证与 Git Bash 路径；dummy 不继承任何凭证。
+REAL_ONLY_ENV_VARS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -242,9 +245,15 @@ def close_job(job_handle: int) -> None:
     _kernel32.CloseHandle(job_handle)
 
 
-def worker_environment(role: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-    """最小 allowlist；明确加入 ``SENTINEL_ROLE`` 与允许的任务上下文。"""
-    environment = {name: os.environ[name] for name in ALLOWED_ENV_VARS if name in os.environ}
+def worker_environment(
+    role: str,
+    extra_env: dict[str, str] | None = None,
+    *,
+    real: bool = False,
+) -> dict[str, str]:
+    """最小 allowlist；dummy 只拿系统变量，真实 worker 才拿模型认证。"""
+    names = BASE_ENV_VARS + (REAL_ONLY_ENV_VARS if real else ())
+    environment = {name: os.environ[name] for name in names if name in os.environ}
     environment["SENTINEL_ROLE"] = role
     if extra_env:
         environment.update(
@@ -488,7 +497,7 @@ class Launcher:
                 process = subprocess.Popen(
                     command,
                     cwd=PROJECT_ROOT,
-                    env=worker_environment(role, extra_env),
+                    env=worker_environment(role, extra_env, real=True),
                     stdin=subprocess.DEVNULL,
                     stdout=stream,
                     stderr=subprocess.STDOUT,

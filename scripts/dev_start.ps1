@@ -1,9 +1,10 @@
-# Dev one-click start: launch the doc and dev Claude Code windows together.
-# Role is injected as a process-level SENTINEL_ROLE; the SessionStart hook then
-# injects the register instruction, so each window registers itself on turn one.
+# Dev one-click start: launch the doc and dev Claude Code windows (or one role).
+# The cold-start script writes .claude/mailbox/registry.json through
+# `scripts/wake.py register`; agents never run register or send messages.
 #
 # Usage:
 #   .\dev_start.ps1
+#   .\dev_start.ps1 -Role dev
 #   .\dev_start.ps1 -DocRole doc -DevRole dev
 #   .\dev_start.ps1 -Prompt "custom first message"
 #
@@ -11,9 +12,10 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\dev_start.ps1
 
 param(
+    [string]$Role = '',
     [string]$DocRole = 'doc',
     [string]$DevRole = 'dev',
-    [string]$Prompt = 'Register this window with scripts/wake.py (follow the SessionStart instruction), then read STATUS.md and wait for handoff.'
+    [string]$Prompt = 'Read STATUS.md and docs/local/交流区/交流区.md, then wait for handoff.'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,9 +30,11 @@ if (-not (Test-Path (Join-Path $Root 'scripts\wake.py'))) {
     throw "scripts/wake.py not found. Put this script in the repository root or scripts\."
 }
 
-foreach ($role in @($DocRole, $DevRole)) {
-    if ($role -notmatch '^[a-z0-9_-]+$') {
-        throw "Invalid role '$role': use lowercase letters, digits, '-' or '_' (wake.py role format)."
+$roles = if ($Role) { @($Role) } else { @($DocRole, $DevRole) }
+
+foreach ($roleName in $roles) {
+    if ($roleName -notmatch '^[a-z0-9_-]+$') {
+        throw "Invalid role '$roleName': use lowercase letters, digits, '-' or '_'."
     }
 }
 
@@ -48,8 +52,16 @@ if (-not $claude) {
     $claude = 'claude'
 }
 
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Warning "uv not found on PATH; the SessionStart hook may fail to run."
+$hasUv = $null -ne (Get-Command uv -ErrorAction SilentlyContinue)
+if (-not $hasUv) {
+    Write-Warning "uv not found on PATH; registry will not be written by this script."
+}
+
+$configDir = if ($env:CLAUDE_CONFIG_DIR) {
+    $env:CLAUDE_CONFIG_DIR
+}
+else {
+    Join-Path $env:USERPROFILE '.claude'
 }
 
 function ConvertTo-QuotedArgument {
@@ -62,20 +74,64 @@ function ConvertTo-QuotedArgument {
     return '"' + $escaped + '"'
 }
 
+function Invoke-WakeRegister {
+    param(
+        [Parameter(Mandatory)][string]$RoleName,
+        [string]$SessionName = '',
+        [string]$Ref = '',
+        [Parameter(Mandatory)][int]$ProcessId
+    )
+
+    if (-not $hasUv) {
+        return
+    }
+    $wakeScript = Join-Path $Root 'scripts\wake.py'
+    & uv run --project $Root python $wakeScript register `
+        --role $RoleName --session $SessionName --ref $Ref --pid $ProcessId | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "wake.py register failed for role $RoleName (exit $LASTEXITCODE)."
+    }
+}
+
+function Wait-SessionRecord {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][string]$ConfigDir
+    )
+
+    $sessions = Join-Path $ConfigDir 'sessions'
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline) {
+        $path = Join-Path $sessions ("{0}.json" -f $ProcessId)
+        if (Test-Path -LiteralPath $path) {
+            try {
+                return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            }
+            catch {
+                # The registry record may still be mid-write; retry.
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $null
+}
+
 function Start-ClaudeWindow {
     param(
-        [string]$Role,
+        [Parameter(Mandatory)][string]$RoleName,
         [string]$InitialPrompt
     )
 
-    # The child inherits the environment variable at spawn time.
+    # The child inherits the environment variable at spawn time; the new
+    # PostToolUse hook can also fall back to it when mapping session -> role.
     $previousRole = $env:SENTINEL_ROLE
-    $env:SENTINEL_ROLE = $Role
+    $env:SENTINEL_ROLE = $RoleName
     try {
         # Pass the prompt as one quoted argument; Start-Process joins array
         # elements with spaces without adding quotes in Windows PowerShell 5.1.
         $argline = ConvertTo-QuotedArgument -Value $InitialPrompt
-        Start-Process -FilePath $claude -WorkingDirectory $Root -ArgumentList $argline | Out-Null
+        $process = Start-Process -FilePath $claude -WorkingDirectory $Root `
+            -ArgumentList $argline -PassThru
     }
     finally {
         if ($null -eq $previousRole) {
@@ -85,13 +141,38 @@ function Start-ClaudeWindow {
             $env:SENTINEL_ROLE = $previousRole
         }
     }
+
+    $record = Wait-SessionRecord -ProcessId $process.Id -ConfigDir $configDir
+    $sessionName = ''
+    $ref = ''
+    if ($null -ne $record) {
+        if ($null -ne $record.name) {
+            $sessionName = [string]$record.name
+        }
+        if ($null -ne $record.sessionId) {
+            $ref = [string]$record.sessionId
+        }
+    }
+
+    Invoke-WakeRegister -RoleName $RoleName -SessionName $sessionName -Ref $ref `
+        -ProcessId $process.Id
+
+    # Machine-readable line consumed by `wake.py notify` when it degrades.
+    $info = @{
+        role    = $RoleName
+        session = $sessionName
+        ref     = $ref
+        pid     = $process.Id
+    } | ConvertTo-Json -Compress
+    Write-Output "SENTINEL_REGISTER:$info"
 }
 
 Write-Host "Project root: $Root"
-Write-Host "Launching windows: $DocRole / $DevRole"
+Write-Host ("Launching window(s): " + ($roles -join ' / '))
 
-Start-ClaudeWindow -Role $DocRole -InitialPrompt $Prompt
-Start-Sleep -Milliseconds 500
-Start-ClaudeWindow -Role $DevRole -InitialPrompt $Prompt
+foreach ($roleName in $roles) {
+    Start-ClaudeWindow -RoleName $roleName -InitialPrompt $Prompt
+    Start-Sleep -Milliseconds 500
+}
 
-Write-Host "Two windows launched. Each agent registers itself from the SessionStart hint."
+Write-Host "Window(s) launched. Registry written by the cold-start script."

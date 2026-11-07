@@ -1,15 +1,5 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session_context.py\""
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -36,21 +26,11 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/handoff_watch.py\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/handoff_notify.py\""
+            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/wake_on_exchange.py\""
           }
         ]
       }

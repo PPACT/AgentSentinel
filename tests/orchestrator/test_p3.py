@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tools.orchestrator.launcher import process_alive
+from tools.orchestrator.launcher import Launcher, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
-from tools.orchestrator.router import TaskStore
+from tools.orchestrator.router import InvalidTransition, Router, TaskStore
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
 
@@ -334,6 +334,93 @@ def test_claim_timeout_respects_ack(tmp_path: Path) -> None:
     assert claimed is not None
     assert claimed.status == "timeout_pending"
 
-    acked = store.mark_running(delivered.task_id, "doc")
-    assert acked.status == "running"
+    with pytest.raises(InvalidTransition):
+        store.mark_running(delivered.task_id, "doc")
+    current = store.get(delivered.task_id)
+    assert current is not None
+    assert current.status == "timeout_pending"
     assert store.claim_timeout(delivered.task_id, FUTURE) is None
+
+
+def test_late_ack_during_claim_returns_409_and_no_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "db.sqlite3"
+    registry = Registry(db)
+    store = TaskStore(db)
+    launcher = Launcher(tmp_path / "orch")
+    router = Router(
+        store=store,
+        registry=registry,
+        launcher=launcher,
+        token="token",
+        orchestrator_url="http://127.0.0.1:1",
+    )
+    try:
+        code, body = router.need(
+            {
+                "from_role": "doc",
+                "to_role": "dev",
+                "intent": "implement",
+                "pointer": "p",
+                "idempotency_key": "late-ack",
+            }
+        )
+        assert code == 200
+        task_id = body["task"]["task_id"]
+        first = registry.get("dev")
+        assert first is not None
+        first_pid = first.pid
+
+        original = store.claim_timeout
+
+        def claim_then_late_ack(task: str, cutoff: str) -> Any:
+            claimed = original(task, cutoff)
+            if claimed is not None:
+                with pytest.raises(InvalidTransition):
+                    router.ack({"task_id": task, "role": "dev", "attempts": 1})
+            return claimed
+
+        monkeypatch.setattr(store, "claim_timeout", claim_then_late_ack)
+
+        actions = router.check_timeouts(0.0)
+
+        assert any(item["action"] == "redeliver" for item in actions)
+        current = store.get(task_id)
+        assert current is not None
+        assert current.status == "delivered"
+        assert current.attempts == 2
+        assert [message["type"] for message in store.messages(task_id)] == [
+            "need",
+            "need_retry",
+        ]
+        assert process_alive(first_pid) is False
+        second = registry.get("dev")
+        assert second is not None
+        assert second.pid != first_pid
+        assert process_alive(second.pid) is True
+    finally:
+        launcher.stop_all()
+
+
+def test_ack_with_stale_attempts_returns_409(daemon_factory: Any) -> None:
+    home = daemon_factory()
+    _, body = _need(home)
+    task_id = body["task"]["task_id"]
+
+    stale = _api(
+        home,
+        "POST",
+        "/ack",
+        {"task_id": task_id, "role": "dev", "attempts": 99},
+    )
+    assert stale[0] == 409
+
+    accepted = _api(
+        home,
+        "POST",
+        "/ack",
+        {"task_id": task_id, "role": "dev", "attempts": 1},
+    )
+    assert accepted[0] == 200
+    assert accepted[1]["task"]["status"] == "running"

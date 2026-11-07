@@ -534,7 +534,7 @@ class TaskStore:
             raise TaskNotFound(task_id)
         return updated
 
-    def mark_running(self, task_id: str, role: str) -> Task:
+    def mark_running(self, task_id: str, role: str, attempts: int | None = None) -> Task:
         connection = self._connect()
         now = _now()
         try:
@@ -548,10 +548,15 @@ class TaskStore:
             task = _row_to_task(row)
             if role != task.to_role:
                 raise RoleMismatch(f"role {role} cannot ack task for {task.to_role}")
+            if attempts is not None and attempts != task.attempts:
+                raise InvalidTransition(f"stale attempt: {attempts} != {task.attempts}")
             if task.status in {"running", "done"}:
                 connection.execute("ROLLBACK")
                 return task
-            if task.status not in {"delivered", STATUS_TIMEOUT_PENDING}:
+            if task.status == STATUS_TIMEOUT_PENDING:
+                # 超时租约期间拒绝 ACK，避免旧进程 ACK 新投递 / 误杀正在重投的任务。
+                raise InvalidTransition("task is being timed out")
+            if task.status != "delivered":
                 raise InvalidTransition(f"cannot ack from {task.status}")
             connection.execute(
                 "UPDATE tasks SET status='running', ack_at=?, updated_at=? WHERE task_id=?",
@@ -961,7 +966,11 @@ class Router:
     def ack(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         task_id = _required_text(payload, "task_id")
         role = _required_text(payload, "role").casefold()
-        task = self.store.mark_running(task_id, role)
+        raw_attempts = payload.get("attempts")
+        attempts = raw_attempts if isinstance(raw_attempts, int) else None
+        if isinstance(raw_attempts, bool):
+            attempts = None
+        task = self.store.mark_running(task_id, role, attempts)
         return 200, {"task": task.to_dict()}
 
     def completed(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -1004,6 +1013,11 @@ class Router:
                 try:
                     worker = self._spawn_worker(current.to_role, current.task_id)
                     updated = self.store.complete_redelivery(current.task_id)
+                except InvalidTransition:
+                    # 状态已变化：停掉刚起的进程后跳过，不得把任务判 failed。
+                    self._stop_worker(current.to_role)
+                    actions.append({"task_id": current.task_id, "action": "skipped"})
+                    continue
                 except Exception:  # noqa: BLE001 - 重投失败转 failed，不吞异常退出监控
                     self._stop_worker(current.to_role)
                     self.store.mark_failed(current.task_id, "redelivery_failed")
@@ -1018,7 +1032,12 @@ class Router:
                     }
                 )
             else:
-                updated = self.store.mark_timeout(current.task_id)
+                try:
+                    updated = self.store.mark_timeout(current.task_id)
+                except InvalidTransition:
+                    self._stop_worker(current.to_role)
+                    actions.append({"task_id": current.task_id, "action": "skipped"})
+                    continue
                 actions.append(
                     {
                         "task_id": current.task_id,

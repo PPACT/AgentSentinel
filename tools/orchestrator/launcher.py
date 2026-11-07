@@ -33,6 +33,14 @@ STILL_ACTIVE = 259
 KILL_TIMEOUT_SECONDS = 10.0
 SPAWN_TIMEOUT_SECONDS = 10.0
 
+
+def hidden_creationflags() -> int:
+    """worker / taskkill 不弹控制台窗口；非 Windows 返回 0。"""
+    if sys.platform != "win32":
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
 # worker 只继承运行所需的系统变量；业务/密钥类变量一律不传。
 ALLOWED_ENV_VARS = (
     "PATH",
@@ -297,6 +305,7 @@ class Launcher:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    creationflags=hidden_creationflags(),
                 )
             payload = _wait_for_pid_file(pid_file, "pid", SPAWN_TIMEOUT_SECONDS)
             pid = int(payload["pid"])
@@ -357,6 +366,7 @@ class Launcher:
                         encoding="utf-8",
                         errors="replace",
                         check=False,
+                        creationflags=hidden_creationflags(),
                     )
                     taskkill_output += (completed.stdout or "") + (completed.stderr or "")
             worker_state = _wait_dead(worker.pid, KILL_TIMEOUT_SECONDS)

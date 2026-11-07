@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,6 +52,10 @@ def test_stop_all_handles_empty_launcher(tmp_path: Path) -> None:
     launcher = Launcher(tmp_path / "orch")
 
     assert launcher.stop_all() == []
+
+
+def test_hidden_creationflags_hide_console() -> None:
+    assert launcher_module.hidden_creationflags() == subprocess.CREATE_NO_WINDOW
 
 
 def test_stop_falls_back_to_taskkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

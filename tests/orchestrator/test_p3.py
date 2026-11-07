@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tools.orchestrator.launcher import Launcher, process_alive
+from tools.orchestrator.launcher import Launcher, hidden_creationflags, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import InvalidTransition, Router, TaskStore
 
@@ -124,6 +124,7 @@ def daemon_factory(tmp_path: Path) -> Iterator[Any]:
                 env=environment,
                 stdout=stream,
                 stderr=subprocess.STDOUT,
+                creationflags=hidden_creationflags(),
             )
         created.append(DaemonProcess(target, process))
         _wait_healthy(target)

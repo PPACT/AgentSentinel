@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,9 +25,11 @@ BUSY_TIMEOUT_MS = 5000
 ACK_TIMEOUT_ENV = "SENTINEL_ORCH_ACK_TIMEOUT_SECONDS"
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 LOST_SECONDS_ENV = "SENTINEL_ORCH_LOST_SECONDS"
+WATCHDOG_SECONDS_ENV = "SENTINEL_ORCH_WATCHDOG_SECONDS"
 DEFAULT_ACK_TIMEOUT_SECONDS = 120.0
 DEFAULT_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOST_SECONDS = 120.0
+DEFAULT_WATCHDOG_SECONDS = 30.0
 STATUS_TIMEOUT_PENDING = "timeout_pending"
 ACTIVE_STATUSES = ("queued", "delivered", "running", STATUS_TIMEOUT_PENDING)
 WRITABLE_STATUSES = (
@@ -90,6 +93,10 @@ def lost_timeout_seconds() -> float:
 
 def heartbeat_seconds() -> float:
     return _positive_env(HEARTBEAT_SECONDS_ENV, DEFAULT_HEARTBEAT_SECONDS)
+
+
+def watchdog_seconds() -> float:
+    return _positive_env(WATCHDOG_SECONDS_ENV, DEFAULT_WATCHDOG_SECONDS)
 
 
 def _positive_env(name: str, default: float) -> float:
@@ -879,7 +886,7 @@ class Router:
         self.token = token
         self.orchestrator_url = orchestrator_url
 
-    def _remember_agent(self, role: str, pid: int, pgid: int, job_id: str) -> None:
+    def _remember_agent(self, role: str, pid: int, pgid: int, job_id: str, command: str) -> None:
         now = utc_now()
         self.registry.upsert(
             AgentRecord(
@@ -890,7 +897,7 @@ class Router:
                 status="running",
                 started_at=now,
                 last_heartbeat=now,
-                command=f"dummy_worker --role {role}",
+                command=command,
                 updated_at=now,
             )
         )
@@ -907,18 +914,33 @@ class Router:
             self.registry.set_status(role, "stopped")
         return result
 
-    def _spawn_worker(self, role: str, task_id: str) -> Worker:
-        """任务即进程：为本次投递启动一个全新 dummy worker。"""
-        worker = self.launcher.spawn_dummy(
-            role,
-            extra_env={
-                "TASK_ID": task_id,
-                "ORCHESTRATOR_URL": self.orchestrator_url,
-                "ORCHESTRATOR_TOKEN": self.token,
-                "SENTINEL_ORCH_HEARTBEAT_SECONDS": str(heartbeat_seconds()),
-            },
-        )
-        self._remember_agent(role, worker.pid, worker.pgid, worker.job_id)
+    def _spawn_worker(self, role: str, task: Task, attempts: int) -> Worker:
+        """任务即进程：按 ``SENTINEL_ORCH_WORKER_MODE`` 启动 dummy 或真实 worker。"""
+        mode = os.environ.get("SENTINEL_ORCH_WORKER_MODE", "dummy").strip().lower()
+        if mode == "real":
+            worker = self.launcher.spawn_real(
+                role,
+                task_id=task.task_id,
+                pointer=task.pointer,
+                acceptance=task.acceptance,
+                attempts=attempts,
+                orchestrator_url=self.orchestrator_url,
+                token=self.token,
+            )
+            command = f"claude -p --permission-mode manual (real worker {role})"
+        else:
+            worker = self.launcher.spawn_dummy(
+                role,
+                extra_env={
+                    "TASK_ID": task.task_id,
+                    "ORCHESTRATOR_ATTEMPTS": str(attempts),
+                    "ORCHESTRATOR_URL": self.orchestrator_url,
+                    "ORCHESTRATOR_TOKEN": self.token,
+                    "SENTINEL_ORCH_HEARTBEAT_SECONDS": str(heartbeat_seconds()),
+                },
+            )
+            command = f"dummy_worker --role {role}"
+        self._remember_agent(role, worker.pid, worker.pgid, worker.job_id, command)
         return worker
 
     def need(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -955,7 +977,7 @@ class Router:
 
         try:
             self._stop_worker(to_role)
-            self._spawn_worker(to_role, task.task_id)
+            self._spawn_worker(to_role, task, 1)
             delivered = self.store.mark_delivered(task.task_id)
         except Exception as exc:
             self._stop_worker(to_role)
@@ -1011,7 +1033,7 @@ class Router:
             self._stop_worker(current.to_role)
             if current.attempts < MAX_DELIVERY_ATTEMPTS:
                 try:
-                    worker = self._spawn_worker(current.to_role, current.task_id)
+                    worker = self._spawn_worker(current.to_role, current, current.attempts + 1)
                     updated = self.store.complete_redelivery(current.task_id)
                 except InvalidTransition:
                     # 状态已变化：停掉刚起的进程后跳过，不得把任务判 failed。
@@ -1071,6 +1093,40 @@ class Router:
                     "role": record.role,
                     "action": "heartbeat_lost",
                     "task_id": active.task_id if active is not None else "",
+                }
+            )
+        return actions
+
+    def watch_workers(self) -> list[dict[str, Any]]:
+        """看护：存活的 worker 刷新 heartbeat；退出/超时未完成 → 活动任务 failed。"""
+        actions: list[dict[str, Any]] = []
+        for worker in self.launcher.workers():
+            if process_alive(worker.pid):
+                if worker.deadline and time.monotonic() > worker.deadline:
+                    self._stop_worker(worker.role)
+                    self.registry.set_status(worker.role, "failed")
+                    active = self.store.active_task_for(worker.role)
+                    if active is not None:
+                        self.store.mark_failed(active.task_id, "worker_timeout")
+                    actions.append({"role": worker.role, "action": "worker_timeout"})
+                else:
+                    self.registry.heartbeat(worker.role)
+                    actions.append({"role": worker.role, "action": "heartbeat_refreshed"})
+                continue
+            exit_code = worker.process.poll()
+            try:
+                self.launcher.stop(worker.role)
+            except (KeyError, OSError):
+                pass
+            self.registry.set_status(worker.role, "failed")
+            active = self.store.active_task_for(worker.role)
+            if active is not None:
+                self.store.mark_failed(active.task_id, f"worker_exit:{exit_code}")
+            actions.append(
+                {
+                    "role": worker.role,
+                    "action": "worker_exit",
+                    "exit_code": exit_code,
                 }
             )
         return actions

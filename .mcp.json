@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sentinel": {
+      "command": "uv",
+      "args": ["run", "python", "tools/orchestrator/mcp_server.py"]
+    }
+  }
+}

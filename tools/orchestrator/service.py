@@ -14,6 +14,7 @@ import re
 import secrets
 import signal
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
@@ -31,6 +32,7 @@ from tools.orchestrator.router import (
     TaskStore,
     ack_timeout_seconds,
     lost_timeout_seconds,
+    watchdog_seconds,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -108,6 +110,8 @@ class Daemon:
         )
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
+        self.watchdog_seconds = watchdog_seconds()
+        self._last_watchdog = 0.0
         self.server: ThreadingHTTPServer | None = None
         self.started_at = utc_now()
         self._stopping = threading.Event()
@@ -243,6 +247,10 @@ class Daemon:
             try:
                 self.router.check_timeouts(self.ack_timeout)
                 self.router.check_heartbeats(self.lost_seconds)
+                now = time.monotonic()
+                if now - self._last_watchdog >= self.watchdog_seconds:
+                    self._last_watchdog = now
+                    self.router.watch_workers()
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出
                 continue
 

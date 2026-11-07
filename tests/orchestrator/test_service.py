@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tools.orchestrator.launcher import process_alive
+from tools.orchestrator.launcher import hidden_creationflags, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
 
@@ -101,6 +101,7 @@ def daemon(tmp_path: Path) -> Iterator[Path]:
             env=environment,
             stdout=stream,
             stderr=subprocess.STDOUT,
+            creationflags=hidden_creationflags(),
         )
     try:
         _wait_healthy(home)

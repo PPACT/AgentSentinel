@@ -66,15 +66,49 @@ ALLOWED_ENV_VARS = (
     "OS",
     "PYTHONIOENCODING",
     "PYTHONUTF8",
+    # 真实 worker 的模型认证与 Git Bash 路径；只进入子进程 env，不落日志。
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_GIT_BASH_PATH",
+    "CLAUDE_CONFIG_DIR",
 )
 
-# P2/P3 只允许这些任务上下文进入 worker；token 不写入 registry.command 或日志。
+# P2/P3/P4 只允许这些任务上下文进入 worker；token 不写入 registry.command 或日志。
 ALLOWED_EXTRA_ENV_VARS = (
+    "ROLE",
     "TASK_ID",
+    "ORCHESTRATOR_ATTEMPTS",
     "ORCHESTRATOR_URL",
     "ORCHESTRATOR_TOKEN",
     "SENTINEL_ORCH_HEARTBEAT_SECONDS",
+    "SENTINEL_ORCH_HOME",
 )
+
+MCP_SERVER_NAME = "sentinel"
+REAL_ALLOWED_TOOLS = (
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write",
+    "Bash",
+    "mcp__sentinel__orchestrator_status",
+    "mcp__sentinel__orchestrator_resolve",
+    "mcp__sentinel__orchestrator_need",
+    "mcp__sentinel__orchestrator_ack",
+    "mcp__sentinel__orchestrator_completed",
+    "mcp__sentinel__orchestrator_heartbeat",
+    "mcp__sentinel__orchestrator_task",
+    "mcp__sentinel__orchestrator_tasks",
+)
+DEFAULT_WORKER_BUDGET_USD = "0.50"
+DEFAULT_WORKER_TIMEOUT_SECONDS = 600.0
 
 _kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True) if sys.platform == "win32" else None
 
@@ -219,6 +253,80 @@ def worker_environment(role: str, extra_env: dict[str, str] | None = None) -> di
     return environment
 
 
+def read_role_prompt(role: str) -> str:
+    path = PROJECT_ROOT / ".claude" / "agents" / f"{role}-agent.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return f"You are the {role} role."
+
+
+def worker_budget_usd() -> str:
+    return (
+        os.environ.get("SENTINEL_ORCH_WORKER_BUDGET_USD", "").strip() or DEFAULT_WORKER_BUDGET_USD
+    )
+
+
+def worker_timeout_seconds() -> float:
+    raw = os.environ.get("SENTINEL_ORCH_WORKER_TIMEOUT_SECONDS", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_WORKER_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_WORKER_TIMEOUT_SECONDS
+
+
+def real_worker_command(
+    role: str,
+    *,
+    task_id: str,
+    pointer: str,
+    acceptance: list[str],
+    attempts: int,
+) -> list[str]:
+    """构造真实 ``claude -p`` worker 命令（纯函数，供测试与 spawn_real 共用）。"""
+    acceptance_text = json.dumps(acceptance, ensure_ascii=False)
+    system_prompt = "\n\n".join(
+        [
+            read_role_prompt(role),
+            f"Active orchestration task: {task_id}",
+            f"Pointer: {pointer}",
+            f"Acceptance: {acceptance_text}",
+            (
+                f"FIRST call mcp__{MCP_SERVER_NAME}__orchestrator_ack with "
+                f"task_id={task_id!r}, role={role!r}, attempts={attempts}."
+            ),
+            (
+                f"When done call mcp__{MCP_SERVER_NAME}__orchestrator_completed with "
+                "task_id, role and artifacts."
+            ),
+            "Do not start background subagents or use Task/Agent tools.",
+        ]
+    )
+    prompt = (
+        f"Work on orchestration task {task_id}. Read the pointer, satisfy acceptance, "
+        "ACK first, then COMPLETED."
+    )
+    return [
+        "claude",
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--permission-mode",
+        "manual",
+        "--permission-prompts",
+        "none",
+        "--allowedTools",
+        ",".join(REAL_ALLOWED_TOOLS),
+        "--max-budget-usd",
+        worker_budget_usd(),
+        "--append-system-prompt",
+        system_prompt,
+    ]
+
+
 def _wait_for_pid_file(path: Path, key: str, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_error = ""
@@ -254,6 +362,8 @@ class Worker:
     process: subprocess.Popen[str]
     pid_file: Path
     log_path: Path
+    task_id: str = ""
+    deadline: float = 0.0
 
 
 class Launcher:
@@ -267,6 +377,9 @@ class Launcher:
 
     def get(self, role: str) -> Worker | None:
         return self._workers.get(role)
+
+    def workers(self) -> list[Worker]:
+        return list(self._workers.values())
 
     def spawn_dummy(
         self,
@@ -334,6 +447,85 @@ class Launcher:
             process=process,
             pid_file=pid_file,
             log_path=log_path,
+        )
+        self._workers[role] = worker
+        return worker
+
+    def spawn_real(
+        self,
+        role: str,
+        *,
+        task_id: str,
+        pointer: str,
+        acceptance: list[str],
+        attempts: int,
+        orchestrator_url: str,
+        token: str,
+    ) -> Worker:
+        """启动真实 ``claude -p`` worker（开发期冒烟用；不接入产品）。"""
+        _require_windows()
+        job_handle = create_job()
+        job_id = uuid.uuid4().hex
+        log_path = self.logs_dir / f"{role}-real.log"
+        command = real_worker_command(
+            role,
+            task_id=task_id,
+            pointer=pointer,
+            acceptance=acceptance,
+            attempts=attempts,
+        )
+        extra_env = {
+            "ROLE": role,
+            "TASK_ID": task_id,
+            "ORCHESTRATOR_ATTEMPTS": str(attempts),
+            "ORCHESTRATOR_URL": orchestrator_url,
+            "ORCHESTRATOR_TOKEN": token,
+        }
+        deadline = time.monotonic() + worker_timeout_seconds()
+        process: subprocess.Popen[str] | None = None
+        try:
+            with log_path.open("a", encoding="utf-8") as stream:
+                process = subprocess.Popen(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    env=worker_environment(role, extra_env),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=hidden_creationflags(),
+                )
+            if not assign_process(job_handle, process.pid):
+                raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+        except Exception:
+            close_job(job_handle)
+            if process is not None:
+                process.kill()
+            raise
+        if process is None:  # pragma: no cover - 防御
+            raise RuntimeError("worker process missing")
+        pid_file = self.run_dir / f"{role}.json"
+        pid_file.write_text(
+            json.dumps(
+                {"pid": process.pid, "role": role, "task_id": task_id, "mode": "real"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        worker = Worker(
+            role=role,
+            pid=process.pid,
+            pgid=process.pid,
+            job_id=job_id,
+            child_pid=0,
+            job_handle=job_handle,
+            process=process,
+            pid_file=pid_file,
+            log_path=log_path,
+            task_id=task_id,
+            deadline=deadline,
         )
         self._workers[role] = worker
         return worker

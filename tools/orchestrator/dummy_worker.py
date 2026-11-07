@@ -16,6 +16,12 @@ import urllib.request
 from pathlib import Path
 
 
+def _hidden_flags() -> int:
+    if sys.platform != "win32":
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
 def _heartbeat_interval() -> float:
     raw = os.environ.get("SENTINEL_ORCH_HEARTBEAT_SECONDS", "").strip()
     try:
@@ -85,7 +91,8 @@ def main() -> int:
             "--seconds",
             str(args.seconds),
             "--child",
-        ]
+        ],
+        creationflags=_hidden_flags(),
     )
     payload["child_pid"] = child.pid
     _write(pid_file, payload)

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tools.orchestrator.launcher import process_alive
+from tools.orchestrator.launcher import hidden_creationflags, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
 
@@ -32,6 +32,7 @@ def _run(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         check=False,
         timeout=120,
+        creationflags=hidden_creationflags(),
     )
 
 

@@ -174,7 +174,8 @@ def test_need_ack_completed_full_chain(daemon_factory: Any) -> None:
     assert code == 200
     agents = {agent["role"]: agent for agent in status["agents"]}
     assert agents["dev"]["alive"] is True
-    assert process_alive(int(agents["dev"]["pid"]))
+    dev_pid = int(agents["dev"]["pid"])
+    assert process_alive(dev_pid)
 
     code, body = _api(home, "POST", "/ack", {"task_id": task["task_id"], "role": "dev"})
     assert code == 200, body
@@ -197,6 +198,11 @@ def test_need_ack_completed_full_chain(daemon_factory: Any) -> None:
     assert body["task"]["completed_at"]
     assert body["task"]["artifacts"] == ["workspace/out.txt"]
     assert body["task"]["cost_tokens"] == 42
+    assert body["reclaim"]["stopped"] is True
+    assert process_alive(dev_pid) is False
+    _, status = _api(home, "GET", "/status")
+    assert status["agents"][0]["status"] == "stopped"
+    assert status["agents"][0]["alive"] is False
 
     code, detail = _api(home, "POST", "/task", {"task_id": task["task_id"]})
     assert code == 200
@@ -209,6 +215,33 @@ def test_need_ack_completed_full_chain(daemon_factory: Any) -> None:
     code, listed = _api(home, "GET", "/tasks?role=dev")
     assert code == 200
     assert [item["task_id"] for item in listed["tasks"]] == [task["task_id"]]
+
+
+def test_each_task_starts_fresh_worker(daemon_factory: Any) -> None:
+    home = daemon_factory()
+    _, first = _need(home, key="first")
+    assert first["task"]["status"] == "delivered"
+    first_id = first["task"]["task_id"]
+    _, status = _api(home, "GET", "/status")
+    first_pid = int(status["agents"][0]["pid"])
+
+    _api(home, "POST", "/ack", {"task_id": first_id, "role": "dev"})
+    _api(
+        home,
+        "POST",
+        "/completed",
+        {"task_id": first_id, "role": "dev", "artifacts": [], "cost_tokens": 0},
+    )
+    assert process_alive(first_pid) is False
+
+    _, second = _need(home, key="second")
+    assert second["task"]["status"] == "delivered"
+    assert second["task"]["task_id"] != first_id
+    _, status = _api(home, "GET", "/status")
+    second_pid = int(status["agents"][0]["pid"])
+
+    assert second_pid != first_pid
+    assert process_alive(second_pid) is True
 
 
 def test_duplicate_need_is_idempotent(daemon_factory: Any) -> None:
@@ -240,11 +273,32 @@ def test_busy_role_returns_409(daemon_factory: Any) -> None:
     assert "role busy" in str(body.get("error"))
 
 
-def test_ack_timeout_redelivers_once_then_timeout(daemon_factory: Any) -> None:
+def test_ack_timeout_redelivers_with_new_process_then_timeout(
+    daemon_factory: Any,
+) -> None:
     home = daemon_factory(ack_timeout=0.5)
     code, body = _need(home, key="timeout")
     assert code == 200
     task_id = body["task"]["task_id"]
+    _, status = _api(home, "GET", "/status")
+    first_pid = int(status["agents"][0]["pid"])
+    assert process_alive(first_pid)
+
+    deadline = time.monotonic() + 8.0
+    second_pid = 0
+    while time.monotonic() < deadline:
+        _, detail = _api(home, "POST", "/task", {"task_id": task_id})
+        if "need_retry" in [message["type"] for message in detail["messages"]]:
+            _, status = _api(home, "GET", "/status")
+            second_pid = int(status["agents"][0]["pid"])
+            if second_pid != first_pid:
+                break
+        time.sleep(0.05)
+
+    assert second_pid > 0
+    assert second_pid != first_pid
+    assert process_alive(first_pid) is False
+    assert process_alive(second_pid) is True
 
     detail = _wait_status(home, task_id, "timeout", timeout=8.0)
 
@@ -254,6 +308,10 @@ def test_ack_timeout_redelivers_once_then_timeout(daemon_factory: Any) -> None:
         "need_retry",
         "timeout",
     ]
+    assert process_alive(second_pid) is False
+    _, status = _api(home, "GET", "/status")
+    assert status["agents"][0]["status"] == "stopped"
+    assert status["agents"][0]["alive"] is False
 
 
 def test_unknown_task_returns_404(daemon_factory: Any) -> None:

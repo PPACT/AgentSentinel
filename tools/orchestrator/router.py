@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from tools.orchestrator.launcher import Launcher, process_alive
+from tools.orchestrator.launcher import Launcher, Worker
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 
 BUSY_TIMEOUT_MS = 5000
@@ -686,15 +686,6 @@ class Router:
         self.token = token
         self.orchestrator_url = orchestrator_url
 
-    def _healthy_worker(self, role: str) -> int:
-        worker = self.launcher.get(role)
-        if worker is not None and process_alive(worker.pid):
-            return worker.pid
-        record = self.registry.get(role)
-        if record is not None and process_alive(record.pid):
-            return record.pid
-        return 0
-
     def _remember_agent(self, role: str, pid: int, pgid: int, job_id: str) -> None:
         now = utc_now()
         self.registry.upsert(
@@ -710,6 +701,31 @@ class Router:
                 updated_at=now,
             )
         )
+
+    def _stop_worker(self, role: str) -> dict[str, Any]:
+        """任务进入终态时回收该角色的 worker（关 Job，等 alive=false）。"""
+        result: dict[str, Any] = {"role": role, "stopped": False}
+        try:
+            result.update(self.launcher.stop(role))
+            result["stopped"] = True
+        except KeyError:
+            result["note"] = "no live worker in launcher"
+        if self.registry.get(role) is not None:
+            self.registry.set_status(role, "stopped")
+        return result
+
+    def _spawn_worker(self, role: str, task_id: str) -> Worker:
+        """任务即进程：为本次投递启动一个全新 dummy worker。"""
+        worker = self.launcher.spawn_dummy(
+            role,
+            extra_env={
+                "TASK_ID": task_id,
+                "ORCHESTRATOR_URL": self.orchestrator_url,
+                "ORCHESTRATOR_TOKEN": self.token,
+            },
+        )
+        self._remember_agent(role, worker.pid, worker.pgid, worker.job_id)
+        return worker
 
     def need(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         from_role = _role_value(payload, "from_role")
@@ -744,18 +760,11 @@ class Router:
             return 200, {"task": task.to_dict(), "idempotent": True}
 
         try:
-            if not self._healthy_worker(to_role):
-                worker = self.launcher.spawn_dummy(
-                    to_role,
-                    extra_env={
-                        "TASK_ID": task.task_id,
-                        "ORCHESTRATOR_URL": self.orchestrator_url,
-                        "ORCHESTRATOR_TOKEN": self.token,
-                    },
-                )
-                self._remember_agent(to_role, worker.pid, worker.pgid, worker.job_id)
+            self._stop_worker(to_role)
+            self._spawn_worker(to_role, task.task_id)
             delivered = self.store.mark_delivered(task.task_id)
         except Exception as exc:
+            self._stop_worker(to_role)
             self.store.mark_failed(task.task_id, type(exc).__name__)
             raise
         return 200, {"task": delivered.to_dict(), "idempotent": False}
@@ -774,7 +783,8 @@ class Router:
         task = self.store.mark_completed(
             task_id, role=role, artifacts=artifacts, cost_tokens=cost_tokens
         )
-        return 200, {"task": task.to_dict()}
+        reclaim = self._stop_worker(task.to_role)
+        return 200, {"task": task.to_dict(), "reclaim": reclaim}
 
     def tasks(self, *, role: str = "", status: str = "") -> dict[str, Any]:
         records = self.store.list_tasks(role=role.casefold(), status=status)
@@ -789,14 +799,34 @@ class Router:
     def check_timeouts(self, timeout_seconds: float) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         for task in self.store.due_for_ack(_iso_before(timeout_seconds)):
+            # 首次超时：停旧进程 → 起新进程 → 记 need_retry；第二次：停进程 → timeout。
+            self._stop_worker(task.to_role)
             if task.attempts < MAX_DELIVERY_ATTEMPTS:
-                updated = self.store.redeliver(task.task_id)
+                try:
+                    worker = self._spawn_worker(task.to_role, task.task_id)
+                    updated = self.store.redeliver(task.task_id)
+                except Exception:  # noqa: BLE001 - 重投失败转 failed，不吞异常退出监控
+                    self._stop_worker(task.to_role)
+                    self.store.mark_failed(task.task_id, "redelivery_failed")
+                    actions.append({"task_id": task.task_id, "action": "failed"})
+                    continue
                 actions.append(
-                    {"task_id": task.task_id, "action": "redeliver", "attempts": updated.attempts}
+                    {
+                        "task_id": task.task_id,
+                        "action": "redeliver",
+                        "attempts": updated.attempts,
+                        "pid": worker.pid,
+                    }
                 )
             else:
                 updated = self.store.mark_timeout(task.task_id)
-                actions.append({"task_id": task.task_id, "action": "timeout"})
+                actions.append(
+                    {
+                        "task_id": task.task_id,
+                        "action": "timeout",
+                        "attempts": updated.attempts,
+                    }
+                )
         return actions
 
 

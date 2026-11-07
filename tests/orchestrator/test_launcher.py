@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tools.orchestrator import launcher as launcher_module
 from tools.orchestrator.launcher import Launcher, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
@@ -50,3 +51,20 @@ def test_stop_all_handles_empty_launcher(tmp_path: Path) -> None:
     launcher = Launcher(tmp_path / "orch")
 
     assert launcher.stop_all() == []
+
+
+def test_stop_falls_back_to_taskkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    launcher = Launcher(tmp_path / "orch")
+    worker = launcher.spawn_dummy("dev", seconds=30)
+    try:
+        monkeypatch.setattr(launcher_module, "close_job", lambda handle: None)
+
+        result = launcher.stop("dev")
+
+        assert result["orphan_detected"] is True
+        assert result["worker"]["alive"] is False
+        assert result["child"]["alive"] is False
+        assert process_alive(worker.pid) is False
+        assert process_alive(worker.child_pid) is False
+    finally:
+        launcher.stop_all()

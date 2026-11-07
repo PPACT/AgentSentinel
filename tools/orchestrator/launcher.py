@@ -60,8 +60,13 @@ ALLOWED_ENV_VARS = (
     "PYTHONUTF8",
 )
 
-# P2 只允许这三项任务上下文进入 worker；token 不写入 registry.command 或日志。
-ALLOWED_EXTRA_ENV_VARS = ("TASK_ID", "ORCHESTRATOR_URL", "ORCHESTRATOR_TOKEN")
+# P2/P3 只允许这些任务上下文进入 worker；token 不写入 registry.command 或日志。
+ALLOWED_EXTRA_ENV_VARS = (
+    "TASK_ID",
+    "ORCHESTRATOR_URL",
+    "ORCHESTRATOR_TOKEN",
+    "SENTINEL_ORCH_HEARTBEAT_SECONDS",
+)
 
 _kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True) if sys.platform == "win32" else None
 
@@ -338,13 +343,33 @@ class Launcher:
             worker.process.wait(timeout=KILL_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             pass
+        worker_state = _wait_dead(worker.pid, KILL_TIMEOUT_SECONDS)
+        child_state = _wait_dead(worker.child_pid, KILL_TIMEOUT_SECONDS)
+        orphan = bool(worker_state.get("alive") or child_state.get("alive"))
+        taskkill_output = ""
+        if orphan:
+            for target in (worker.pid, worker.child_pid):
+                if process_alive(target):
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(target), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    taskkill_output += (completed.stdout or "") + (completed.stderr or "")
+            worker_state = _wait_dead(worker.pid, KILL_TIMEOUT_SECONDS)
+            child_state = _wait_dead(worker.child_pid, KILL_TIMEOUT_SECONDS)
         return {
             "role": role,
             "pid": worker.pid,
             "child_pid": worker.child_pid,
             "job_id": worker.job_id,
-            "worker": _wait_dead(worker.pid, KILL_TIMEOUT_SECONDS),
-            "child": _wait_dead(worker.child_pid, KILL_TIMEOUT_SECONDS),
+            "worker": worker_state,
+            "child": child_state,
+            "orphan_detected": orphan,
+            "taskkill": taskkill_output.strip(),
         }
 
     def stop_all(self) -> list[dict[str, Any]]:

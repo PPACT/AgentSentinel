@@ -17,13 +17,26 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from tools.orchestrator.launcher import Launcher, Worker
+from tools.orchestrator.launcher import Launcher, Worker, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 
 BUSY_TIMEOUT_MS = 5000
 ACK_TIMEOUT_ENV = "SENTINEL_ORCH_ACK_TIMEOUT_SECONDS"
+HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
+LOST_SECONDS_ENV = "SENTINEL_ORCH_LOST_SECONDS"
 DEFAULT_ACK_TIMEOUT_SECONDS = 120.0
-ACTIVE_STATUSES = ("queued", "delivered", "running")
+DEFAULT_HEARTBEAT_SECONDS = 30.0
+DEFAULT_LOST_SECONDS = 120.0
+STATUS_TIMEOUT_PENDING = "timeout_pending"
+ACTIVE_STATUSES = ("queued", "delivered", "running", STATUS_TIMEOUT_PENDING)
+WRITABLE_STATUSES = (
+    "queued",
+    "delivered",
+    "running",
+    STATUS_TIMEOUT_PENDING,
+    "done",
+)
+STEP_STATUSES = ("pending", "done", "failed")
 MAX_DELIVERY_ATTEMPTS = 2
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 _TASK_COLUMNS = (
@@ -68,12 +81,24 @@ class InvalidTransition(TaskError):
 
 
 def ack_timeout_seconds() -> float:
-    raw = os.environ.get(ACK_TIMEOUT_ENV, "").strip()
+    return _positive_env(ACK_TIMEOUT_ENV, DEFAULT_ACK_TIMEOUT_SECONDS)
+
+
+def lost_timeout_seconds() -> float:
+    return _positive_env(LOST_SECONDS_ENV, DEFAULT_LOST_SECONDS)
+
+
+def heartbeat_seconds() -> float:
+    return _positive_env(HEARTBEAT_SECONDS_ENV, DEFAULT_HEARTBEAT_SECONDS)
+
+
+def _positive_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
     try:
         value = float(raw)
     except ValueError:
-        return DEFAULT_ACK_TIMEOUT_SECONDS
-    return value if value > 0 else DEFAULT_ACK_TIMEOUT_SECONDS
+        return default
+    return value if value > 0 else default
 
 
 def _now() -> str:
@@ -345,8 +370,11 @@ class TaskStore:
             if same_id is not None:
                 connection.execute("ROLLBACK")
                 return _row_to_task(same_id), False
+            placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
             busy = connection.execute(
-                "SELECT task_id FROM tasks WHERE to_role=? AND status IN (?,?,?) LIMIT 1",
+                "SELECT task_id FROM tasks WHERE to_role=? AND status IN ("
+                + placeholders
+                + ") LIMIT 1",
                 (to_role, *ACTIVE_STATUSES),
             ).fetchone()
             if busy is not None:
@@ -434,7 +462,40 @@ class TaskStore:
             raise TaskNotFound(task_id)
         return updated
 
-    def redeliver(self, task_id: str) -> Task:
+    def claim_timeout(self, task_id: str, cutoff: str) -> Task | None:
+        """原子租约：仅 ``delivered`` 且已到期可 claim；ACK 先到则返回 ``None``。"""
+        connection = self._connect()
+        now = _now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT " + ", ".join(_TASK_COLUMNS) + " FROM tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute("ROLLBACK")
+                return None
+            task = _row_to_task(row)
+            if task.status != "delivered" or task.updated_at > cutoff:
+                connection.execute("ROLLBACK")
+                return None
+            cursor = connection.execute(
+                "UPDATE tasks SET status=?, updated_at=? WHERE task_id=? AND status='delivered'",
+                (STATUS_TIMEOUT_PENDING, now, task_id),
+            )
+            if cursor.rowcount != 1:
+                connection.execute("ROLLBACK")
+                return None
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return self.get(task_id)
+
+    def complete_redelivery(self, task_id: str) -> Task:
         connection = self._connect()
         now = _now()
         try:
@@ -446,10 +507,11 @@ class TaskStore:
             if row is None:
                 raise TaskNotFound(task_id)
             task = _row_to_task(row)
-            if task.status != "delivered":
+            if task.status != STATUS_TIMEOUT_PENDING:
                 raise InvalidTransition(f"cannot redeliver from {task.status}")
             connection.execute(
-                "UPDATE tasks SET attempts=attempts+1, updated_at=? WHERE task_id=?",
+                "UPDATE tasks SET status='delivered', attempts=attempts+1, updated_at=? "
+                "WHERE task_id=?",
                 (now, task_id),
             )
             self._insert_message(
@@ -489,7 +551,7 @@ class TaskStore:
             if task.status in {"running", "done"}:
                 connection.execute("ROLLBACK")
                 return task
-            if task.status != "delivered":
+            if task.status not in {"delivered", STATUS_TIMEOUT_PENDING}:
                 raise InvalidTransition(f"cannot ack from {task.status}")
             connection.execute(
                 "UPDATE tasks SET status='running', ack_at=?, updated_at=? WHERE task_id=?",
@@ -587,7 +649,7 @@ class TaskStore:
             if task.status == "timeout":
                 connection.execute("ROLLBACK")
                 return task
-            if task.status != "delivered":
+            if task.status not in {"delivered", STATUS_TIMEOUT_PENDING}:
                 raise InvalidTransition(f"cannot timeout from {task.status}")
             connection.execute(
                 "UPDATE tasks SET status='timeout', updated_at=? WHERE task_id=?",
@@ -665,6 +727,132 @@ class TaskStore:
             connection.close()
         return [_row_to_task(row) for row in rows]
 
+    def active_task_for(self, role: str) -> Task | None:
+        for task in self.list_tasks(role=role):
+            if task.status in ACTIVE_STATUSES:
+                return task
+        return None
+
+    def _ensure_writable(self, connection: sqlite3.Connection, task_id: str) -> Task:
+        row = connection.execute(
+            "SELECT " + ", ".join(_TASK_COLUMNS) + " FROM tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise TaskNotFound(task_id)
+        task = _row_to_task(row)
+        if task.status not in WRITABLE_STATUSES:
+            raise InvalidTransition(f"task {task_id} is {task.status}")
+        return task
+
+    def upsert_step(
+        self,
+        *,
+        task_id: str,
+        step_no: int,
+        status: str,
+        input_ref: str,
+        output_ref: str,
+    ) -> dict[str, Any]:
+        if status not in STEP_STATUSES:
+            raise ValueError(f"invalid step status: {status}")
+        connection = self._connect()
+        now = _now()
+        input_value = input_ref or None
+        output_value = output_ref or None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_writable(connection, task_id)
+            connection.execute(
+                "INSERT INTO steps(task_id, step_no, status, input_ref, output_ref, updated_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(task_id, step_no) DO UPDATE SET "
+                "status=excluded.status, input_ref=excluded.input_ref, "
+                "output_ref=excluded.output_ref, updated_at=excluded.updated_at",
+                (task_id, step_no, status, input_value, output_value, now),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return {
+            "task_id": task_id,
+            "step_no": step_no,
+            "status": status,
+            "input_ref": input_value,
+            "output_ref": output_value,
+            "updated_at": now,
+        }
+
+    def list_steps(self, task_id: str) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT task_id, step_no, status, input_ref, output_ref, updated_at "
+                "FROM steps WHERE task_id=? ORDER BY step_no",
+                (task_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [dict(row) for row in rows]
+
+    def add_effect(
+        self,
+        *,
+        task_id: str,
+        idem_key: str,
+        action: str,
+        target: str,
+        output_ref: str,
+    ) -> tuple[dict[str, Any], bool]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_writable(connection, task_id)
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO effects(idem_key, task_id, action, target, output_ref, created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (idem_key, task_id, action, target or None, output_ref or None, _now()),
+            )
+            created = cursor.rowcount > 0
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        effect = self.get_effect(idem_key)
+        if effect is None:  # pragma: no cover - 防御
+            raise TaskNotFound(idem_key)
+        return effect, created
+
+    def get_effect(self, idem_key: str) -> dict[str, Any] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT idem_key, task_id, action, target, output_ref, created_at "
+                "FROM effects WHERE idem_key=?",
+                (idem_key,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return dict(row) if row is not None else None
+
+    def list_effects(self, task_id: str) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT idem_key, task_id, action, target, output_ref, created_at "
+                "FROM effects WHERE task_id=? ORDER BY created_at, idem_key",
+                (task_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [dict(row) for row in rows]
+
 
 def new_task_id() -> str:
     return datetime.now(UTC).strftime("T-%Y%m%d%H%M%S-") + secrets.token_hex(3)
@@ -722,6 +910,7 @@ class Router:
                 "TASK_ID": task_id,
                 "ORCHESTRATOR_URL": self.orchestrator_url,
                 "ORCHESTRATOR_TOKEN": self.token,
+                "SENTINEL_ORCH_HEARTBEAT_SECONDS": str(heartbeat_seconds()),
             },
         )
         self._remember_agent(role, worker.pid, worker.pgid, worker.job_id)
@@ -798,36 +987,130 @@ class Router:
 
     def check_timeouts(self, timeout_seconds: float) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
-        for task in self.store.due_for_ack(_iso_before(timeout_seconds)):
-            # 首次超时：停旧进程 → 起新进程 → 记 need_retry；第二次：停进程 → timeout。
-            self._stop_worker(task.to_role)
-            if task.attempts < MAX_DELIVERY_ATTEMPTS:
+        cutoff = _iso_before(timeout_seconds)
+        for task in self.store.due_for_ack(cutoff):
+            # 租约：仅 delivered 可 claim；ACK 先到则放弃，不碰进程。
+            claimed = self.store.claim_timeout(task.task_id, cutoff)
+            if claimed is None:
+                actions.append({"task_id": task.task_id, "action": "skipped"})
+                continue
+            current = self.store.get(task.task_id)
+            if current is None or current.status != STATUS_TIMEOUT_PENDING:
+                actions.append({"task_id": task.task_id, "action": "skipped"})
+                continue
+            # claim 成功后才停旧进程；首次超时起新进程并记 need_retry，第二次转 timeout。
+            self._stop_worker(current.to_role)
+            if current.attempts < MAX_DELIVERY_ATTEMPTS:
                 try:
-                    worker = self._spawn_worker(task.to_role, task.task_id)
-                    updated = self.store.redeliver(task.task_id)
+                    worker = self._spawn_worker(current.to_role, current.task_id)
+                    updated = self.store.complete_redelivery(current.task_id)
                 except Exception:  # noqa: BLE001 - 重投失败转 failed，不吞异常退出监控
-                    self._stop_worker(task.to_role)
-                    self.store.mark_failed(task.task_id, "redelivery_failed")
-                    actions.append({"task_id": task.task_id, "action": "failed"})
+                    self._stop_worker(current.to_role)
+                    self.store.mark_failed(current.task_id, "redelivery_failed")
+                    actions.append({"task_id": current.task_id, "action": "failed"})
                     continue
                 actions.append(
                     {
-                        "task_id": task.task_id,
+                        "task_id": current.task_id,
                         "action": "redeliver",
                         "attempts": updated.attempts,
                         "pid": worker.pid,
                     }
                 )
             else:
-                updated = self.store.mark_timeout(task.task_id)
+                updated = self.store.mark_timeout(current.task_id)
                 actions.append(
                     {
-                        "task_id": task.task_id,
+                        "task_id": current.task_id,
                         "action": "timeout",
                         "attempts": updated.attempts,
                     }
                 )
         return actions
+
+    def heartbeat(self, role: str, task_id: str = "") -> dict[str, Any]:
+        if self.registry.get(role) is None:
+            raise TaskNotFound(f"unknown role: {role}")
+        self.registry.heartbeat(role)
+        return {"role": role, "task_id": task_id, "last_heartbeat": utc_now()}
+
+    def check_heartbeats(self, lost_seconds: float) -> list[dict[str, Any]]:
+        cutoff = _iso_before(lost_seconds)
+        actions: list[dict[str, Any]] = []
+        for record in self.registry.list():
+            if record.status != "running" or record.pid <= 0:
+                continue
+            if record.last_heartbeat > cutoff:
+                continue
+            self._stop_worker(record.role)
+            self.registry.set_status(record.role, "failed")
+            active = self.store.active_task_for(record.role)
+            if active is not None:
+                self.store.mark_failed(active.task_id, "heartbeat_lost")
+            actions.append(
+                {
+                    "role": record.role,
+                    "action": "heartbeat_lost",
+                    "task_id": active.task_id if active is not None else "",
+                }
+            )
+        return actions
+
+    def startup_recovery(self) -> list[dict[str, Any]]:
+        """daemon 启动：清理 pid 已死的 running agent，遗留活动任务置 failed。"""
+        actions: list[dict[str, Any]] = []
+        for record in self.registry.list():
+            if record.status == "running" and record.pid > 0 and not process_alive(record.pid):
+                self.registry.set_status(record.role, "lost")
+                actions.append({"role": record.role, "action": "agent_lost"})
+        for task in self.store.list_tasks():
+            if task.status in {"queued", "delivered", "running", STATUS_TIMEOUT_PENDING}:
+                self.store.mark_failed(task.task_id, "daemon_restart")
+                actions.append({"task_id": task.task_id, "action": "task_failed"})
+        return actions
+
+    def upsert_step(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id = _required_text(payload, "task_id")
+        step_no = _int_value(payload.get("step_no"))
+        status = _required_text(payload, "status")
+        return {
+            "step": self.store.upsert_step(
+                task_id=task_id,
+                step_no=step_no,
+                status=status,
+                input_ref=_optional_text(payload.get("input_ref")),
+                output_ref=_optional_text(payload.get("output_ref")),
+            )
+        }
+
+    def add_effect(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id = _required_text(payload, "task_id")
+        idem_key = _required_text(payload, "idem_key")
+        action = _required_text(payload, "action")
+        effect, created = self.store.add_effect(
+            task_id=task_id,
+            idem_key=idem_key,
+            action=action,
+            target=_optional_text(payload.get("target")),
+            output_ref=_optional_text(payload.get("output_ref")),
+        )
+        return {"effect": effect, "created": created}
+
+    def steps(self, task_id: str) -> dict[str, Any]:
+        if self.store.get(task_id) is None:
+            raise TaskNotFound(task_id)
+        return {"steps": self.store.list_steps(task_id)}
+
+    def effects(self, task_id: str) -> dict[str, Any]:
+        if self.store.get(task_id) is None:
+            raise TaskNotFound(task_id)
+        return {"effects": self.store.list_effects(task_id)}
+
+    def effect(self, idem_key: str) -> dict[str, Any]:
+        effect = self.store.get_effect(idem_key)
+        if effect is None:
+            raise TaskNotFound(idem_key)
+        return {"effect": effect}
 
 
 def _role_value(payload: dict[str, Any], key: str) -> str:
@@ -842,6 +1125,10 @@ def _required_text(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} is required")
     return value.strip()
+
+
+def _optional_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _string_list(value: object) -> list[str]:

@@ -30,6 +30,7 @@ from tools.orchestrator.router import (
     TaskNotFound,
     TaskStore,
     ack_timeout_seconds,
+    lost_timeout_seconds,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -106,10 +107,12 @@ class Daemon:
             token=self.token,
         )
         self.ack_timeout = ack_timeout_seconds()
+        self.lost_seconds = lost_timeout_seconds()
         self.server: ThreadingHTTPServer | None = None
         self.started_at = utc_now()
         self._stopping = threading.Event()
         self._stop_monitor = threading.Event()
+        self.router.startup_recovery()
 
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
@@ -204,6 +207,27 @@ class Daemon:
     def task_detail(self, task_id: str) -> dict[str, Any]:
         return self.router.task_detail(task_id)
 
+    def heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        role = _role(payload)
+        raw_task_id = payload.get("task_id")
+        task_id = raw_task_id.strip() if isinstance(raw_task_id, str) else ""
+        return {"heartbeat": self.router.heartbeat(role, task_id)}
+
+    def step(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.router.upsert_step(payload)
+
+    def effect(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.router.add_effect(payload)
+
+    def steps(self, task_id: str) -> dict[str, Any]:
+        return self.router.steps(task_id)
+
+    def effects(self, task_id: str) -> dict[str, Any]:
+        return self.router.effects(task_id)
+
+    def effect_get(self, idem_key: str) -> dict[str, Any]:
+        return self.router.effect(idem_key)
+
     def request_shutdown(self) -> None:
         self._stopping.set()
         server = self.server
@@ -211,10 +235,14 @@ class Daemon:
             threading.Thread(target=server.shutdown, daemon=True).start()
 
     def _monitor_loop(self) -> None:
-        interval = max(0.05, min(self.ack_timeout / 5.0, 1.0))
+        interval = max(
+            0.05,
+            min(self.ack_timeout / 5.0, self.lost_seconds / 4.0, 1.0),
+        )
         while not self._stop_monitor.wait(interval):
             try:
                 self.router.check_timeouts(self.ack_timeout)
+                self.router.check_heartbeats(self.lost_seconds)
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出
                 continue
 
@@ -402,6 +430,57 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(200, self.daemon.task_detail(task_id.strip()))
                 except TaskNotFound as exc:
                     self._send(404, {"error": str(exc)})
+        elif method == "POST" and path == "/heartbeat":
+            try:
+                self._send(200, self.daemon.heartbeat(payload))
+            except TaskNotFound as exc:
+                self._send(404, {"error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+        elif method == "POST" and path == "/step":
+            try:
+                self._send(200, self.daemon.step(payload))
+            except TaskNotFound as exc:
+                self._send(404, {"error": str(exc)})
+            except InvalidTransition as exc:
+                self._send(409, {"error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+        elif method == "POST" and path == "/effect":
+            try:
+                self._send(200, self.daemon.effect(payload))
+            except TaskNotFound as exc:
+                self._send(404, {"error": str(exc)})
+            except InvalidTransition as exc:
+                self._send(409, {"error": str(exc)})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+        elif method == "GET" and path == "/steps":
+            query = parse_qs(urlparse(self.path).query)
+            task_id = query.get("task_id", [""])[0]
+            if not task_id:
+                self._send(400, {"error": "task_id is required"})
+            else:
+                try:
+                    self._send(200, self.daemon.steps(task_id))
+                except TaskNotFound as exc:
+                    self._send(404, {"error": str(exc)})
+        elif method == "GET" and path == "/effect":
+            query = parse_qs(urlparse(self.path).query)
+            idem_key = query.get("idem_key", [""])[0]
+            task_id = query.get("task_id", [""])[0]
+            if idem_key:
+                try:
+                    self._send(200, self.daemon.effect_get(idem_key))
+                except TaskNotFound as exc:
+                    self._send(404, {"error": str(exc)})
+            elif task_id:
+                try:
+                    self._send(200, self.daemon.effects(task_id))
+                except TaskNotFound as exc:
+                    self._send(404, {"error": str(exc)})
+            else:
+                self._send(400, {"error": "idem_key or task_id is required"})
         elif method == "POST" and path == "/shutdown":
             self._send(200, {"stopping": True, "pid": os.getpid()})
             self.daemon.request_shutdown()

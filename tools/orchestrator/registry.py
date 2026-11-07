@@ -27,7 +27,8 @@ _COLUMNS = (
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # 毫秒/微秒精度：心跳与 ACK 超时需要同格式字符串比较。
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 @dataclass(frozen=True)

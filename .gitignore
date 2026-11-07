@@ -20,6 +20,7 @@ secrets*.json
 .claude/agents/
 .claude/skills/
 .claude/mailbox/
+.claude/orchestrator/
 docs/local/
 
 # ===== Python 虚拟环境 =====

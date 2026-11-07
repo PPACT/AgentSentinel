@@ -1,4 +1,4 @@
-"""极简唤醒 v2：settings 只保留 PreToolUse + 新 PostToolUse，旧 Hook 已删除。"""
+"""极简唤醒 v3：settings 只保留 PreToolUse + SessionStart 兜底。"""
 
 from __future__ import annotations
 
@@ -14,33 +14,24 @@ SETTINGS_PATH = REPO_ROOT / ".claude" / "settings.json"
 WAKE_SCRIPT = REPO_ROOT / "scripts" / "wake.py"
 
 _REMOVED_FILES = (
+    REPO_ROOT / "scripts" / "dev_start.ps1",
+    REPO_ROOT / "scripts" / "dev_start.cmd",
+    REPO_ROOT / ".claude" / "hooks" / "wake_on_exchange.py",
+    REPO_ROOT / "tests" / "hooks" / "test_wake_on_exchange.py",
     REPO_ROOT / ".claude" / "hooks" / "handoff_watch.py",
     REPO_ROOT / ".claude" / "hooks" / "handoff_notify.py",
     REPO_ROOT / ".claude" / "hooks" / "session_context.py",
-    REPO_ROOT / "tests" / "hooks" / "test_handoff_watch.py",
-    REPO_ROOT / "tests" / "hooks" / "test_handoff_notify.py",
-    REPO_ROOT / "tests" / "hooks" / "test_session_context.py",
-)
-
-_REMOVED_COMMANDS = (
-    "heartbeat",
-    "whoami",
-    "prune",
-    "tail",
-    "mark-notified",
-    "mark-read",
-    "post",
 )
 
 
-def _settings() -> dict[str, Any]:
-    data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    return data
+def _settings_text() -> str:
+    return SETTINGS_PATH.read_text(encoding="utf-8")
 
 
 def _hooks() -> dict[str, Any]:
-    hooks = _settings().get("hooks")
+    data = json.loads(_settings_text())
+    assert isinstance(data, dict)
+    hooks = data.get("hooks")
     assert isinstance(hooks, dict)
     return hooks
 
@@ -57,32 +48,52 @@ def _commands(entries: object) -> list[str]:
     return commands
 
 
-def test_no_session_start_or_stop_hooks() -> None:
+def _matchers(entries: object) -> list[str]:
+    assert isinstance(entries, list)
+    matchers: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("matcher"), str):
+            matchers.append(entry["matcher"])
+    return matchers
+
+
+def test_hooks_are_only_pre_tool_use_and_session_start() -> None:
     hooks = _hooks()
 
-    assert "SessionStart" not in hooks
+    assert set(hooks) == {"PreToolUse", "SessionStart"}
+    assert "PostToolUse" not in hooks
     assert "Stop" not in hooks
-    assert set(hooks) == {"PreToolUse", "PostToolUse"}
 
 
-def test_post_tool_use_runs_wake_on_exchange_only() -> None:
-    entries = _hooks().get("PostToolUse")
-    assert isinstance(entries, list)
-    assert len(entries) == 1
-    entry = entries[0]
-    assert isinstance(entry, dict)
-    assert entry.get("matcher") == "Edit|Write|MultiEdit"
-    commands = _commands([entry])
+def test_session_start_runs_session_bootstrap() -> None:
+    entries = _hooks().get("SessionStart")
+    commands = _commands(entries)
     assert len(commands) == 1
-    assert commands[0].endswith('.claude/hooks/wake_on_exchange.py"')
+    assert commands[0].endswith('.claude/hooks/session_bootstrap.py"')
 
 
 def test_pre_tool_use_guards_stay_intact() -> None:
-    commands = _commands(_hooks().get("PreToolUse"))
+    entries = _hooks().get("PreToolUse")
+    commands = _commands(entries)
 
     assert any(command.endswith('guard_git.py"') for command in commands)
     assert any(command.endswith('guard_paths.py"') for command in commands)
     assert any(command.endswith('guard_fixtures.py"') for command in commands)
+
+
+def test_task_and_agent_are_denied_by_matcher() -> None:
+    entries = _hooks().get("PreToolUse")
+    assert isinstance(entries, list)
+    subagent_entries = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and "guard_subagents.py" in " ".join(_commands([entry]))
+    ]
+
+    assert len(subagent_entries) == 1
+    matcher = subagent_entries[0].get("matcher")
+    assert isinstance(matcher, str)
+    assert set(matcher.split("|")) == {"Task", "Agent"}
 
 
 def test_removed_hooks_and_tests_do_not_exist() -> None:
@@ -90,7 +101,16 @@ def test_removed_hooks_and_tests_do_not_exist() -> None:
         assert not path.exists(), f"{path} should be deleted"
 
 
-def test_wake_cli_only_exposes_three_commands() -> None:
+def test_settings_reference_no_removed_scripts() -> None:
+    text = _settings_text()
+
+    assert "wake_on_exchange" not in text
+    assert "dev_start" not in text
+    assert "PostToolUse" not in text
+    assert '"Stop"' not in text
+
+
+def test_wake_cli_only_exposes_register_and_resolve() -> None:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     result = subprocess.run(
@@ -105,7 +125,7 @@ def test_wake_cli_only_exposes_three_commands() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    for command in ("notify", "register", "resolve"):
+    for command in ("register", "resolve"):
         assert command in result.stdout
-    for command in _REMOVED_COMMANDS:
-        assert command not in result.stdout
+    for removed in ("notify", "spawn", "heartbeat", "whoami", "prune"):
+        assert removed not in result.stdout

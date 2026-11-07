@@ -22,15 +22,24 @@
             "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_fixtures.py\""
           }
         ]
-      }
-    ],
-    "PostToolUse": [
+      },
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "Task|Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/wake_on_exchange.py\""
+            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_subagents.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session_bootstrap.py\""
           }
         ]
       }

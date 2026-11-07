@@ -1,4 +1,4 @@
-"""scripts/wake.py：registry 查表、会话映射、存活投递与降级新建。"""
+"""scripts/wake.py（v3）：register / resolve、registry 原子写、不越项目边界。"""
 
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     process_env = os.environ.copy()
     process_env["CLAUDE_PROJECT_DIR"] = str(project_dir)
-    process_env["CLAUDE_CONFIG_DIR"] = str(project_dir / ".claude-home")
+    process_env["HOME"] = str(project_dir / "home-outside")
+    process_env["USERPROFILE"] = str(project_dir / "home-outside")
     process_env["PYTHONUTF8"] = "1"
     process_env.pop("SENTINEL_ROLE", None)
-    process_env.pop("SENTINEL_SESSION_ID", None)
     if env is not None:
         process_env.update(env)
     return subprocess.run(
@@ -54,77 +54,10 @@ def _read_registry(project_dir: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_registry(
-    project_dir: Path,
-    *,
-    roles: dict[str, Any] | None = None,
-    sessions: dict[str, Any] | None = None,
-) -> None:
+def _write_registry(project_dir: Path, payload: dict[str, Any]) -> None:
     path = _registry_file(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "updated_at": "2026-11-07T00:00:00Z",
-                "roles": roles or {},
-                "sessions": sessions or {},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-def _write_session(
-    config_dir: Path,
-    *,
-    pid: int,
-    session_id: str,
-    socket_path: str,
-    name: str,
-) -> None:
-    sessions = config_dir / "sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    record = {
-        "pid": pid,
-        "sessionId": session_id,
-        "messagingSocketPath": socket_path,
-        "name": name,
-        "cwd": str(config_dir),
-    }
-    (sessions / f"{pid}.json").write_text(json.dumps(record), encoding="utf-8")
-    (sessions / f"{pid}.{'0' * 64}.key").write_text(
-        json.dumps({"peerToken": "a" * 32}),
-        encoding="utf-8",
-    )
-
-
-def _isolate(
-    monkeypatch: pytest.MonkeyPatch,
-    project_dir: Path,
-    *,
-    env_role: str | None = None,
-) -> Path:
-    config_dir = project_dir / ".claude-home"
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    monkeypatch.delenv("SENTINEL_ROLE", raising=False)
-    monkeypatch.delenv("SENTINEL_SESSION_ID", raising=False)
-    if env_role is not None:
-        monkeypatch.setenv("SENTINEL_ROLE", env_role)
-    return config_dir
-
-
-def _fake_deliver(
-    calls: list[tuple[dict[str, Any], str]],
-    result: tuple[bool, str] = (True, ""),
-) -> Any:
-    def deliver(record: dict[str, Any], text: str) -> tuple[bool, str]:
-        calls.append((record, text))
-        return result
-
-    return deliver
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def test_register_writes_single_registry_file(tmp_path: Path) -> None:
@@ -137,43 +70,51 @@ def test_register_writes_single_registry_file(tmp_path: Path) -> None:
         "agentsentinel-doc",
         "--ref",
         "abcd12",
-        "--pid",
-        "1234",
     )
 
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out["registered"] is True
+    assert out["registration"]["role"] == "doc"
     data = _read_registry(tmp_path)
     assert data["version"] == 1
     assert data["roles"]["doc"]["session"] == "agentsentinel-doc"
     assert data["roles"]["doc"]["ref"] == "abcd12"
-    assert data["roles"]["doc"]["pid"] == 1234
     assert data["roles"]["doc"]["updated_at"]
-    assert data["sessions"] == {}
+    assert "pid" not in data["roles"]["doc"]
+    assert "sessions" not in data
     assert not (tmp_path / ".claude" / "mailbox" / "roles").exists()
 
 
 def test_register_upserts_without_conflict(tmp_path: Path) -> None:
-    first = _run(tmp_path, "register", "--role", "dev", "--pid", "111")
-    second = _run(tmp_path, "register", "--role", "dev", "--pid", "222")
+    first = _run(tmp_path, "register", "--role", "dev", "--session", "old", "--ref", "a1")
+    second = _run(tmp_path, "register", "--role", "dev", "--session", "new", "--ref", "b2")
 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     data = _read_registry(tmp_path)
-    assert data["roles"]["dev"]["pid"] == 222
+    assert data["roles"]["dev"]["session"] == "new"
+    assert data["roles"]["dev"]["ref"] == "b2"
 
 
-def test_resolve_reports_alive_and_missing(tmp_path: Path) -> None:
+def test_register_normalizes_role_case(tmp_path: Path) -> None:
+    result = _run(tmp_path, "register", "--role", "DEV", "--session", "d")
+
+    assert result.returncode == 0, result.stderr
+    assert "dev" in _read_registry(tmp_path)["roles"]
+
+
+def test_register_rejects_invalid_role(tmp_path: Path) -> None:
+    result = _run(tmp_path, "register", "--role", "bad role!", "--session", "d")
+
+    assert result.returncode == 1
+    assert "非法角色名" in result.stderr
+    assert not _registry_file(tmp_path).exists()
+
+
+def test_resolve_returns_entry_and_missing(tmp_path: Path) -> None:
     registered = _run(
-        tmp_path,
-        "register",
-        "--role",
-        "doc",
-        "--session",
-        "doc-window",
-        "--pid",
-        str(os.getpid()),
+        tmp_path, "register", "--role", "doc", "--session", "doc-window", "--ref", "r1"
     )
     assert registered.returncode == 0, registered.stderr
 
@@ -183,35 +124,19 @@ def test_resolve_reports_alive_and_missing(tmp_path: Path) -> None:
     out = json.loads(result.stdout)
     assert out["role"] == "doc"
     assert out["session"] == "doc-window"
-    assert out["alive"] is True
+    assert out["ref"] == "r1"
+    assert "alive" not in out
+    assert "pid" not in out
 
     missing = _run(tmp_path, "resolve", "--role", "dev")
     assert missing.returncode == 1
     assert missing.stdout.strip() == "{}"
 
 
-def test_pid_alive_current_and_invalid() -> None:
-    assert wake.pid_alive(os.getpid()) is True
-    assert wake.pid_alive(0) is False
-    assert wake.pid_alive(-1) is False
-    assert wake.pid_alive("not-a-pid") is False
-
-
-def test_build_pipe_payload_has_auth_then_user_frame() -> None:
-    payload = wake._build_pipe_payload("a" * 32, "hello")
-
-    lines = payload.decode("utf-8").splitlines()
-    assert len(lines) == 2
-    assert json.loads(lines[0]) == {"type": "auth", "token": "a" * 32}
-    frame = json.loads(lines[1])
-    assert frame["type"] == "user"
-    assert frame["message"] == {"role": "user", "content": "hello"}
-
-
 def test_corrupt_registry_degrades_to_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     path = _registry_file(tmp_path)
     path.parent.mkdir(parents=True)
     path.write_text("{not json", encoding="utf-8")
@@ -219,194 +144,70 @@ def test_corrupt_registry_degrades_to_empty(
     data = wake.load_registry(tmp_path)
 
     assert data["roles"] == {}
-    assert data["sessions"] == {}
+    assert "sessions" not in data
 
 
-def test_notify_non_target_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    spawned: list[str] = []
-    monkeypatch.setattr(wake, "spawn_role_window", lambda root, role: spawned.append(role))
-
-    result = wake.notify(tmp_path, file="docs/local/交流区/STATUS.md", session_id="sid-doc")
-
-    assert result["action"] == "noop"
-    assert result["reason"] == "non-target"
-    assert spawned == []
-
-
-def test_notify_unknown_sender_is_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    spawned: list[str] = []
-    monkeypatch.setattr(wake, "spawn_role_window", lambda root, role: spawned.append(role))
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="")
-
-    assert result["action"] == "noop"
-    assert result["reason"] == "unknown-sender"
-    assert spawned == []
-
-
-def test_notify_delivers_when_peer_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config_dir = _isolate(monkeypatch, tmp_path)
+def test_legacy_sessions_key_is_dropped(tmp_path: Path) -> None:
     _write_registry(
         tmp_path,
-        roles={"dev": {"session": "dev", "ref": "sid-dev", "pid": 1234, "updated_at": "x"}},
-        sessions={"sid-doc": "doc"},
+        {
+            "version": 1,
+            "updated_at": "2026-11-07T00:00:00Z",
+            "roles": {},
+            "sessions": {"sid": "doc"},
+        },
     )
-    _write_session(
-        config_dir,
-        pid=1234,
-        session_id="sid-dev",
-        socket_path=r"\\.\pipe\LOCAL\cc-msg-dev",
-        name="dev",
-    )
-    calls: list[tuple[dict[str, Any], str]] = []
-    monkeypatch.setattr(wake, "pid_alive", lambda pid: pid == 1234)
-    monkeypatch.setattr(wake, "deliver_peer_message", _fake_deliver(calls))
 
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "delivered"
-    assert result["role"] == "dev"
-    assert len(calls) == 1
-    assert "from=doc" in calls[0][1]
-    data = _read_registry(tmp_path)
-    assert data["sessions"]["sid-doc"] == "doc"
-
-
-def test_notify_env_role_fallback_writes_session_mapping(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config_dir = _isolate(monkeypatch, tmp_path, env_role="doc")
-    _write_registry(
-        tmp_path,
-        roles={"dev": {"session": "dev", "ref": "sid-dev", "pid": 1234, "updated_at": "x"}},
-    )
-    _write_session(
-        config_dir,
-        pid=1234,
-        session_id="sid-dev",
-        socket_path=r"\\.\pipe\LOCAL\cc-msg-dev",
-        name="dev",
-    )
-    calls: list[tuple[dict[str, Any], str]] = []
-    monkeypatch.setattr(wake, "pid_alive", lambda pid: pid == 1234)
-    monkeypatch.setattr(wake, "deliver_peer_message", _fake_deliver(calls))
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "delivered"
-    assert len(calls) == 1
-    data = _read_registry(tmp_path)
-    assert data["sessions"]["sid-doc"] == "doc"
-
-
-def test_notify_missing_peer_spawns_and_writes_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _isolate(monkeypatch, tmp_path)
-    _write_registry(tmp_path, sessions={"sid-doc": "doc"})
-    spawned: list[str] = []
-
-    def fake_spawn(root: Path, role: str) -> dict[str, Any] | None:
-        spawned.append(role)
-        return {"session": "new-dev", "ref": "sid-new-dev", "pid": 4321}
-
-    monkeypatch.setattr(wake, "spawn_role_window", fake_spawn)
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "spawned"
-    assert spawned == ["dev"]
-    data = _read_registry(tmp_path)
-    assert data["roles"]["dev"]["session"] == "new-dev"
-    assert data["roles"]["dev"]["ref"] == "sid-new-dev"
-    assert data["roles"]["dev"]["pid"] == 4321
-
-
-def test_notify_dead_peer_pid_spawns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    _write_registry(
-        tmp_path,
-        roles={"dev": {"session": "stale", "ref": "old", "pid": 999999, "updated_at": "x"}},
-        sessions={"sid-doc": "doc"},
-    )
-    spawned: list[str] = []
-
-    def fake_spawn(root: Path, role: str) -> dict[str, Any] | None:
-        spawned.append(role)
-        return {"session": "fresh-dev", "ref": "sid-fresh", "pid": 5678}
-
-    monkeypatch.setattr(wake, "pid_alive", lambda pid: False)
-    monkeypatch.setattr(wake, "spawn_role_window", fake_spawn)
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "spawned"
-    assert spawned == ["dev"]
-    assert _read_registry(tmp_path)["roles"]["dev"]["pid"] == 5678
-
-
-def test_notify_delivery_failure_does_not_spawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config_dir = _isolate(monkeypatch, tmp_path)
-    _write_registry(
-        tmp_path,
-        roles={"dev": {"session": "dev", "ref": "sid-dev", "pid": 1234, "updated_at": "x"}},
-        sessions={"sid-doc": "doc"},
-    )
-    _write_session(
-        config_dir,
-        pid=1234,
-        session_id="sid-dev",
-        socket_path=r"\\.\pipe\LOCAL\cc-msg-dev",
-        name="dev",
-    )
-    spawned: list[str] = []
-    monkeypatch.setattr(wake, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(wake, "deliver_peer_message", _fake_deliver([], (False, "busy")))
-    monkeypatch.setattr(wake, "spawn_role_window", lambda root, role: spawned.append(role))
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "delivery-failed"
-    assert result["reason"] == "busy"
-    assert spawned == []
-
-
-def test_notify_spawn_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    _write_registry(tmp_path, sessions={"sid-doc": "doc"})
-    monkeypatch.setattr(wake, "spawn_role_window", lambda root, role: None)
-
-    result = wake.notify(tmp_path, file=wake.TARGET_FILE, session_id="sid-doc")
-
-    assert result["action"] == "spawn-failed"
-
-
-def test_notify_cli_non_target_is_noop_and_leaves_no_registry(tmp_path: Path) -> None:
-    result = _run(tmp_path, "notify", "--file", "docs/local/交流区/STATUS.md")
+    result = _run(tmp_path, "register", "--role", "dev", "--session", "d")
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["action"] == "noop"
-    assert not _registry_file(tmp_path).exists()
+    assert "sessions" not in _read_registry(tmp_path)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="frozen down-start uses Windows PowerShell")
-def test_spawn_role_window_parses_register_marker(tmp_path: Path) -> None:
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "dev_start.ps1").write_text(
-        "Write-Output 'SENTINEL_REGISTER:"
-        '{"role":"dev","session":"agentsentinel-test","ref":"sid-dev","pid":1234}' + "'\n",
-        encoding="utf-8",
-    )
+def test_registry_write_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    wake.register_role(tmp_path, role="doc", session="doc-1")
 
-    entry = wake.spawn_role_window(tmp_path, "dev")
+    def fail_replace(source: object, target: object) -> None:
+        raise OSError("replace failed")
 
-    assert entry is not None
-    assert entry["role"] == "dev"
-    assert entry["session"] == "agentsentinel-test"
-    assert entry["ref"] == "sid-dev"
-    assert entry["pid"] == 1234
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    try:
+        wake.register_role(tmp_path, role="dev", session="dev-1")
+    except OSError:
+        pass
+    else:  # pragma: no cover - 测试守卫
+        raise AssertionError("replace 失败时 register 应抛出 OSError")
+
+    data = _read_registry(tmp_path)
+    assert list(data["roles"]) == ["doc"]
+    mailbox = tmp_path / ".claude" / "mailbox"
+    assert not list(mailbox.glob("*.tmp-*"))
+    assert not list(mailbox.glob("*.lock"))
+
+
+def test_register_never_touches_outside_paths(tmp_path: Path) -> None:
+    result = _run(tmp_path, "register", "--role", "dev", "--session", "d")
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "home-outside").exists()
+    for removed in (
+        "sessions_dir",
+        "claude_config_dir",
+        "pid_alive",
+        "notify",
+        "spawn_role_window",
+        "deliver_peer_message",
+    ):
+        assert not hasattr(wake, removed), f"{removed} 应已随 v3 删除"
+
+
+def test_cli_exposes_only_register_and_resolve() -> None:
+    result = _run(REPO_ROOT, "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "register" in result.stdout
+    assert "resolve" in result.stdout
+    for removed in ("notify", "spawn", "pid"):
+        assert removed not in result.stdout

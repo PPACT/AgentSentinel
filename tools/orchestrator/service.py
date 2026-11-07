@@ -18,10 +18,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from tools.orchestrator.launcher import Launcher, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
+from tools.orchestrator.router import (
+    InvalidTransition,
+    RoleBusy,
+    RoleMismatch,
+    Router,
+    TaskNotFound,
+    TaskStore,
+    ack_timeout_seconds,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -89,9 +98,18 @@ class Daemon:
         self.token = load_or_create_token(home)
         self.registry = Registry(home / "registry.sqlite3")
         self.launcher = Launcher(home)
+        self.store = TaskStore(home / "registry.sqlite3")
+        self.router = Router(
+            store=self.store,
+            registry=self.registry,
+            launcher=self.launcher,
+            token=self.token,
+        )
+        self.ack_timeout = ack_timeout_seconds()
         self.server: ThreadingHTTPServer | None = None
         self.started_at = utc_now()
         self._stopping = threading.Event()
+        self._stop_monitor = threading.Event()
 
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
@@ -171,17 +189,41 @@ class Daemon:
         self.registry.set_status(role, "stopped")
         return 200, {"stopped": True, "role": role, "reclaim": reclaim}
 
+    def need(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self.router.need(payload)
+
+    def ack(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self.router.ack(payload)
+
+    def completed(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self.router.completed(payload)
+
+    def tasks(self, *, role: str = "", status: str = "") -> dict[str, Any]:
+        return self.router.tasks(role=role, status=status)
+
+    def task_detail(self, task_id: str) -> dict[str, Any]:
+        return self.router.task_detail(task_id)
+
     def request_shutdown(self) -> None:
         self._stopping.set()
         server = self.server
         if server is not None:
             threading.Thread(target=server.shutdown, daemon=True).start()
 
+    def _monitor_loop(self) -> None:
+        interval = max(0.05, min(self.ack_timeout / 5.0, 1.0))
+        while not self._stop_monitor.wait(interval):
+            try:
+                self.router.check_timeouts(self.ack_timeout)
+            except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出
+                continue
+
     def serve(self) -> None:
         server = _Server((self.host, self.port), _Handler)
         server.daemon = self
         self.server = server
         port = int(server.server_address[1])
+        self.router.orchestrator_url = f"http://{self.host}:{port}"
         write_daemon_info(
             self.home,
             {
@@ -191,9 +233,14 @@ class Daemon:
                 "started_at": self.started_at,
             },
         )
+        self._stop_monitor.clear()
+        monitor = threading.Thread(target=self._monitor_loop, daemon=True)
+        monitor.start()
         try:
             server.serve_forever(poll_interval=0.2)
         finally:
+            self._stop_monitor.set()
+            monitor.join(timeout=5)
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -303,6 +350,58 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError) as exc:
                 status, body = 500, {"error": str(exc)}
             self._send(status, body)
+        elif method == "POST" and path == "/need":
+            try:
+                status, body = self.daemon.need(payload)
+            except RoleBusy as exc:
+                status, body = 409, {"error": str(exc)}
+            except ValueError as exc:
+                status, body = 400, {"error": str(exc)}
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                status, body = 500, {"error": str(exc)}
+            self._send(status, body)
+        elif method == "POST" and path == "/ack":
+            try:
+                status, body = self.daemon.ack(payload)
+            except TaskNotFound as exc:
+                status, body = 404, {"error": str(exc)}
+            except RoleMismatch as exc:
+                status, body = 400, {"error": str(exc)}
+            except InvalidTransition as exc:
+                status, body = 409, {"error": str(exc)}
+            except ValueError as exc:
+                status, body = 400, {"error": str(exc)}
+            self._send(status, body)
+        elif method == "POST" and path == "/completed":
+            try:
+                status, body = self.daemon.completed(payload)
+            except TaskNotFound as exc:
+                status, body = 404, {"error": str(exc)}
+            except RoleMismatch as exc:
+                status, body = 400, {"error": str(exc)}
+            except InvalidTransition as exc:
+                status, body = 409, {"error": str(exc)}
+            except ValueError as exc:
+                status, body = 400, {"error": str(exc)}
+            self._send(status, body)
+        elif method == "GET" and path == "/tasks":
+            query = parse_qs(urlparse(self.path).query)
+            self._send(
+                200,
+                self.daemon.tasks(
+                    role=query.get("role", [""])[0],
+                    status=query.get("status", [""])[0],
+                ),
+            )
+        elif method == "POST" and path == "/task":
+            task_id = payload.get("task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                self._send(400, {"error": "task_id is required"})
+            else:
+                try:
+                    self._send(200, self.daemon.task_detail(task_id.strip()))
+                except TaskNotFound as exc:
+                    self._send(404, {"error": str(exc)})
         elif method == "POST" and path == "/shutdown":
             self._send(200, {"stopping": True, "pid": os.getpid()})
             self.daemon.request_shutdown()

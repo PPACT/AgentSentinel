@@ -120,3 +120,63 @@ def test_daemon_exit_reclaims_workers(tmp_path: Path) -> None:
         assert process_alive(child_pid) is False
     finally:
         _cleanup(home)
+
+
+def test_cli_task_workflow(tmp_path: Path) -> None:
+    home = tmp_path / "orch"
+    try:
+        assert _run(home, "daemon", "start").returncode == 0
+
+        need = _run(
+            home,
+            "need",
+            "--from-role",
+            "doc",
+            "--to-role",
+            "dev",
+            "--intent",
+            "implement",
+            "--pointer",
+            "docs/local/交流区/交流区.md#p2",
+            "--acceptance",
+            "tests pass",
+            "--idempotency-key",
+            "cli-k",
+        )
+        assert need.returncode == 0, need.stderr
+        task = _body(need)["task"]
+        task_id = str(task["task_id"])
+        assert task["status"] == "delivered"
+
+        ack = _run(home, "ack", "--task-id", task_id, "--role", "dev")
+        assert ack.returncode == 0, ack.stderr
+        assert _body(ack)["task"]["status"] == "running"
+
+        completed = _run(
+            home,
+            "completed",
+            "--task-id",
+            task_id,
+            "--role",
+            "dev",
+            "--artifact",
+            "workspace/out.txt",
+            "--cost-tokens",
+            "7",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert _body(completed)["task"]["status"] == "done"
+
+        tasks = _run(home, "tasks", "--role", "dev")
+        assert tasks.returncode == 0, tasks.stderr
+        assert [item["task_id"] for item in _body(tasks)["tasks"]] == [task_id]
+
+        detail = _run(home, "task", "--task-id", task_id)
+        assert detail.returncode == 0, detail.stderr
+        assert [message["type"] for message in _body(detail)["messages"]] == [
+            "need",
+            "ack",
+            "completed",
+        ]
+    finally:
+        _cleanup(home)

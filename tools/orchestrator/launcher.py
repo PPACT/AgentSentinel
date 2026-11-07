@@ -60,6 +60,9 @@ ALLOWED_ENV_VARS = (
     "PYTHONUTF8",
 )
 
+# P2 只允许这三项任务上下文进入 worker；token 不写入 registry.command 或日志。
+ALLOWED_EXTRA_ENV_VARS = ("TASK_ID", "ORCHESTRATOR_URL", "ORCHESTRATOR_TOKEN")
+
 _kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True) if sys.platform == "win32" else None
 
 
@@ -192,10 +195,14 @@ def close_job(job_handle: int) -> None:
     _kernel32.CloseHandle(job_handle)
 
 
-def worker_environment(role: str) -> dict[str, str]:
-    """最小 allowlist；明确加入 ``SENTINEL_ROLE``，不复制父进程环境。"""
+def worker_environment(role: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """最小 allowlist；明确加入 ``SENTINEL_ROLE`` 与允许的任务上下文。"""
     environment = {name: os.environ[name] for name in ALLOWED_ENV_VARS if name in os.environ}
     environment["SENTINEL_ROLE"] = role
+    if extra_env:
+        environment.update(
+            {key: value for key, value in extra_env.items() if key in ALLOWED_EXTRA_ENV_VARS}
+        )
     return environment
 
 
@@ -248,7 +255,12 @@ class Launcher:
     def get(self, role: str) -> Worker | None:
         return self._workers.get(role)
 
-    def spawn_dummy(self, role: str, seconds: float = 120.0) -> Worker:
+    def spawn_dummy(
+        self,
+        role: str,
+        seconds: float = 120.0,
+        extra_env: dict[str, str] | None = None,
+    ) -> Worker:
         _require_windows()
         job_handle = create_job()
         job_id = uuid.uuid4().hex
@@ -273,7 +285,7 @@ class Launcher:
                 process = subprocess.Popen(
                     command,
                     cwd=PROJECT_ROOT,
-                    env=worker_environment(role),
+                    env=worker_environment(role, extra_env),
                     stdin=subprocess.PIPE,
                     stdout=log_stream,
                     stderr=subprocess.STDOUT,

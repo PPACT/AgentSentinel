@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlencode
 
 from tools.orchestrator.launcher import process_alive
 from tools.orchestrator.service import default_home
@@ -177,6 +178,34 @@ def _parser() -> argparse.ArgumentParser:
 
     stop = subparsers.add_parser("stop", help="stop a worker")
     stop.add_argument("--role", required=True)
+
+    need = subparsers.add_parser("need", help="create a task for a role")
+    need.add_argument("--from-role", dest="from_role", required=True)
+    need.add_argument("--to-role", dest="to_role", required=True)
+    need.add_argument("--intent", required=True)
+    need.add_argument("--pointer", required=True)
+    need.add_argument("--acceptance", action="append", default=[])
+    need.add_argument("--idempotency-key", dest="idempotency_key", default="")
+    need.add_argument("--task-id", dest="task_id", default="")
+    need.add_argument("--max-tokens", dest="max_tokens", type=int, default=0)
+    need.add_argument("--max-minutes", dest="max_minutes", type=int, default=0)
+
+    ack = subparsers.add_parser("ack", help="acknowledge a delivered task")
+    ack.add_argument("--task-id", dest="task_id", required=True)
+    ack.add_argument("--role", required=True)
+
+    completed = subparsers.add_parser("completed", help="mark a task completed")
+    completed.add_argument("--task-id", dest="task_id", required=True)
+    completed.add_argument("--role", required=True)
+    completed.add_argument("--artifact", dest="artifact", action="append", default=[])
+    completed.add_argument("--cost-tokens", dest="cost_tokens", type=int, default=0)
+
+    tasks = subparsers.add_parser("tasks", help="list tasks")
+    tasks.add_argument("--role", default="")
+    tasks.add_argument("--status", default="")
+
+    task = subparsers.add_parser("task", help="task detail with messages")
+    task.add_argument("--task-id", dest="task_id", required=True)
     return parser
 
 
@@ -219,6 +248,49 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "stop":
             status, body = _request(home, "POST", "/stop", {"role": args.role})
+        elif args.command == "need":
+            need_payload: dict[str, Any] = {
+                "from_role": args.from_role,
+                "to_role": args.to_role,
+                "intent": args.intent,
+                "pointer": args.pointer,
+                "acceptance": list(args.acceptance),
+                "idempotency_key": args.idempotency_key,
+                "task_id": args.task_id,
+            }
+            if args.max_tokens or args.max_minutes:
+                need_payload["budget"] = {
+                    "max_tokens": int(args.max_tokens),
+                    "max_minutes": int(args.max_minutes),
+                }
+            status, body = _request(home, "POST", "/need", need_payload)
+        elif args.command == "ack":
+            status, body = _request(
+                home, "POST", "/ack", {"task_id": args.task_id, "role": args.role}
+            )
+        elif args.command == "completed":
+            status, body = _request(
+                home,
+                "POST",
+                "/completed",
+                {
+                    "task_id": args.task_id,
+                    "role": args.role,
+                    "artifacts": list(args.artifact),
+                    "cost_tokens": int(args.cost_tokens),
+                },
+            )
+        elif args.command == "tasks":
+            query = urlencode(
+                {
+                    key: value
+                    for key, value in (("role", args.role), ("status", args.status))
+                    if value
+                }
+            )
+            status, body = _request(home, "GET", "/tasks" + (f"?{query}" if query else ""))
+        elif args.command == "task":
+            status, body = _request(home, "POST", "/task", {"task_id": args.task_id})
         else:
             raise ValueError(f"unknown command: {args.command}")
     except (OSError, RuntimeError, TimeoutError) as exc:

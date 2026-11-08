@@ -29,18 +29,16 @@ PowerShell：
 cmd.exe：
 
 ```bat
+rem 无参数：后台启动 daemon 并等待 /health 通过
+scripts\start_orchestrator.cmd
+
+rem 带参数：原样转发给 start_orchestrator.ps1
 scripts\start_orchestrator.cmd -Action foreground
 scripts\start_orchestrator.cmd -Action status
 scripts\start_orchestrator.cmd -Action stop
 ```
 
-双击启动（后台 daemon）：
-
-```bat
-scripts\start_orchestrator.bat
-```
-
-双击后 bat 调用 `start_orchestrator.ps1 -Action start`，由 CLI 在后台拉起 daemon 并轮询 `/health`，通过后脚本退出（不保留常驻窗口）；失败时打印可读错误并等待约 10 秒。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
+双击 `scripts\start_orchestrator.cmd`（无参数）等价于后台启动：调用 `start_orchestrator.ps1 -Action start`，由 CLI 轮询 `/health`，通过后打印并退出（不保留常驻窗口）；失败时打印可读错误并等待约 10 秒。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
 
 可选参数（默认值）：
 

@@ -136,6 +136,11 @@ class Daemon:
             last_heartbeat=now,
             command=_str(payload.get("command")),
             updated_at=now,
+            current_task_id=_str(payload.get("current_task_id")),
+            cost_tokens=_int(payload.get("cost_tokens")),
+            cost_budget=(
+                _int(payload.get("cost_budget")) if payload.get("cost_budget") is not None else None
+            ),
         )
         self.registry.upsert(record)
         return self._agent_dict(record)

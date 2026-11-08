@@ -886,7 +886,15 @@ class Router:
         self.token = token
         self.orchestrator_url = orchestrator_url
 
-    def _remember_agent(self, role: str, pid: int, pgid: int, job_id: str, command: str) -> None:
+    def _remember_agent(
+        self,
+        role: str,
+        pid: int,
+        pgid: int,
+        job_id: str,
+        command: str,
+        task_id: str = "",
+    ) -> None:
         now = utc_now()
         self.registry.upsert(
             AgentRecord(
@@ -899,6 +907,7 @@ class Router:
                 last_heartbeat=now,
                 command=command,
                 updated_at=now,
+                current_task_id=task_id,
             )
         )
 
@@ -912,6 +921,7 @@ class Router:
             result["note"] = "no live worker in launcher"
         if self.registry.get(role) is not None:
             self.registry.set_status(role, "stopped")
+            self.registry.set_current_task(role, "")
         return result
 
     def _spawn_worker(self, role: str, task: Task, attempts: int) -> Worker:
@@ -941,7 +951,7 @@ class Router:
                 },
             )
             command = f"dummy_worker --role {role}"
-        self._remember_agent(role, worker.pid, worker.pgid, worker.job_id, command)
+        self._remember_agent(role, worker.pid, worker.pgid, worker.job_id, command, task.task_id)
         return worker
 
     def need(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

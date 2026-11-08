@@ -23,6 +23,9 @@ _COLUMNS = (
     "last_heartbeat",
     "command",
     "updated_at",
+    "current_task_id",
+    "cost_tokens",
+    "cost_budget",
 )
 
 
@@ -42,12 +45,16 @@ class AgentRecord:
     last_heartbeat: str
     command: str
     updated_at: str
+    current_task_id: str = ""
+    cost_tokens: int = 0
+    cost_budget: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 def _row_to_record(row: sqlite3.Row) -> AgentRecord:
+    budget = row["cost_budget"]
     return AgentRecord(
         role=str(row["role"]),
         pid=int(row["pid"]),
@@ -58,6 +65,9 @@ def _row_to_record(row: sqlite3.Row) -> AgentRecord:
         last_heartbeat=str(row["last_heartbeat"]),
         command=str(row["command"]),
         updated_at=str(row["updated_at"]),
+        current_task_id=str(row["current_task_id"] or ""),
+        cost_tokens=int(row["cost_tokens"] or 0),
+        cost_budget=int(budget) if budget is not None else None,
     )
 
 
@@ -91,8 +101,22 @@ class Registry:
                 "started_at TEXT NOT NULL, "
                 "last_heartbeat TEXT NOT NULL, "
                 "command TEXT NOT NULL, "
-                "updated_at TEXT NOT NULL)"
+                "updated_at TEXT NOT NULL, "
+                "current_task_id TEXT NOT NULL DEFAULT '', "
+                "cost_tokens INTEGER NOT NULL DEFAULT 0, "
+                "cost_budget INTEGER)"
             )
+            existing = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(agents)").fetchall()
+            }
+            migrations = (
+                ("current_task_id", "TEXT NOT NULL DEFAULT ''"),
+                ("cost_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("cost_budget", "INTEGER"),
+            )
+            for column, definition in migrations:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE agents ADD COLUMN {column} {definition}")
         finally:
             connection.close()
 
@@ -152,6 +176,18 @@ class Registry:
             cursor = connection.execute(
                 "UPDATE agents SET last_heartbeat=?, updated_at=? WHERE role=?",
                 (now, now, role),
+            )
+            changed = cursor.rowcount > 0
+        finally:
+            connection.close()
+        return changed
+
+    def set_current_task(self, role: str, task_id: str) -> bool:
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                "UPDATE agents SET current_task_id=?, updated_at=? WHERE role=?",
+                (task_id, utc_now(), role),
             )
             changed = cursor.rowcount > 0
         finally:

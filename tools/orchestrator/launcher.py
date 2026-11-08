@@ -470,6 +470,7 @@ class Launcher:
         attempts: int,
         orchestrator_url: str,
         token: str,
+        orchestrator_home: str = "",
     ) -> Worker:
         """启动真实 ``claude -p`` worker（开发期冒烟用；不接入产品）。"""
         _require_windows()
@@ -490,6 +491,8 @@ class Launcher:
             "ORCHESTRATOR_URL": orchestrator_url,
             "ORCHESTRATOR_TOKEN": token,
         }
+        if orchestrator_home:
+            extra_env["SENTINEL_ORCH_HOME"] = orchestrator_home
         deadline = time.monotonic() + worker_timeout_seconds()
         process: subprocess.Popen[str] | None = None
         try:

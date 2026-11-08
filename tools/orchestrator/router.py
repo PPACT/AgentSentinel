@@ -926,6 +926,7 @@ class Router:
                 attempts=attempts,
                 orchestrator_url=self.orchestrator_url,
                 token=self.token,
+                orchestrator_home=str(self.store.db_path.parent),
             )
             command = f"claude -p --permission-mode manual (real worker {role})"
         else:

@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from tools.orchestrator.launcher import Launcher, Worker, process_alive
+from tools.orchestrator.launcher import Launcher, Worker, parse_claude_usage, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 
 BUSY_TIMEOUT_MS = 5000
@@ -26,10 +26,16 @@ ACK_TIMEOUT_ENV = "SENTINEL_ORCH_ACK_TIMEOUT_SECONDS"
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 LOST_SECONDS_ENV = "SENTINEL_ORCH_LOST_SECONDS"
 WATCHDOG_SECONDS_ENV = "SENTINEL_ORCH_WATCHDOG_SECONDS"
+ROLE_BUDGET_ENV = "SENTINEL_ORCH_ROLE_BUDGET_TOKENS"
+TASK_MAX_TOKENS_ENV = "SENTINEL_ORCH_TASK_MAX_TOKENS"
+TASK_MAX_MINUTES_ENV = "SENTINEL_ORCH_TASK_MAX_MINUTES"
 DEFAULT_ACK_TIMEOUT_SECONDS = 120.0
 DEFAULT_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOST_SECONDS = 120.0
 DEFAULT_WATCHDOG_SECONDS = 30.0
+DEFAULT_ROLE_BUDGET_TOKENS = 200000
+DEFAULT_TASK_MAX_TOKENS = 200000
+DEFAULT_TASK_MAX_MINUTES = 30
 STATUS_TIMEOUT_PENDING = "timeout_pending"
 ACTIVE_STATUSES = ("queued", "delivered", "running", STATUS_TIMEOUT_PENDING)
 WRITABLE_STATUSES = (
@@ -83,6 +89,10 @@ class InvalidTransition(TaskError):
     pass
 
 
+class RoleBudgetExceeded(TaskError):
+    pass
+
+
 def ack_timeout_seconds() -> float:
     return _positive_env(ACK_TIMEOUT_ENV, DEFAULT_ACK_TIMEOUT_SECONDS)
 
@@ -97,6 +107,29 @@ def heartbeat_seconds() -> float:
 
 def watchdog_seconds() -> float:
     return _positive_env(WATCHDOG_SECONDS_ENV, DEFAULT_WATCHDOG_SECONDS)
+
+
+def role_budget_tokens() -> int:
+    return int(_positive_env(ROLE_BUDGET_ENV, float(DEFAULT_ROLE_BUDGET_TOKENS)))
+
+
+def default_task_max_tokens() -> int:
+    return int(_positive_env(TASK_MAX_TOKENS_ENV, float(DEFAULT_TASK_MAX_TOKENS)))
+
+
+def default_task_max_minutes() -> int:
+    return int(_positive_env(TASK_MAX_MINUTES_ENV, float(DEFAULT_TASK_MAX_MINUTES)))
+
+
+def _today() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _positive_env(name: str, default: float) -> float:
@@ -256,6 +289,21 @@ class TaskStore:
                 "output_ref TEXT, "
                 "created_at TEXT NOT NULL)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS usage ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "task_id TEXT NOT NULL, "
+                "role TEXT NOT NULL, "
+                "model TEXT NOT NULL, "
+                "input_tokens INTEGER NOT NULL, "
+                "output_tokens INTEGER NOT NULL, "
+                "cache_creation_tokens INTEGER NOT NULL, "
+                "cache_read_tokens INTEGER NOT NULL, "
+                "cost_usd REAL NOT NULL, "
+                "duration_ms INTEGER NOT NULL, "
+                "status TEXT NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            )
         finally:
             connection.close()
 
@@ -265,6 +313,17 @@ class TaskStore:
             row = connection.execute(
                 "SELECT " + ", ".join(_TASK_COLUMNS) + " FROM tasks WHERE task_id=?",
                 (task_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return _row_to_task(row) if row is not None else None
+
+    def find_by_idempotency(self, idempotency_key: str) -> Task | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT " + ", ".join(_TASK_COLUMNS) + " FROM tasks WHERE idempotency_key=?",
+                (idempotency_key,),
             ).fetchone()
         finally:
             connection.close()
@@ -865,6 +924,270 @@ class TaskStore:
             connection.close()
         return [dict(row) for row in rows]
 
+    def record_usage(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_tokens: int,
+        cache_read_tokens: int,
+        cost_usd: float,
+        duration_ms: int,
+        status: str,
+    ) -> dict[str, Any]:
+        billed = input_tokens + output_tokens
+        connection = self._connect()
+        now = _now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO usage(task_id, role, model, input_tokens, output_tokens, "
+                "cache_creation_tokens, cache_read_tokens, cost_usd, duration_ms, status, "
+                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task_id,
+                    role,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_tokens,
+                    cache_read_tokens,
+                    cost_usd,
+                    duration_ms,
+                    status,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE tasks SET cost_tokens=cost_tokens+?, updated_at=? WHERE task_id=?",
+                (billed, now, task_id),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return {
+            "task_id": task_id,
+            "role": role,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cost_usd": cost_usd,
+            "duration_ms": duration_ms,
+            "status": status,
+            "created_at": now,
+        }
+
+    def list_usage(
+        self, *, task_id: str = "", role: str = "", day: str = ""
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if task_id:
+            clauses.append("task_id=?")
+            params.append(task_id)
+        if role:
+            clauses.append("role=?")
+            params.append(role)
+        if day:
+            clauses.append("substr(created_at, 1, 10)=?")
+            params.append(day)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT task_id, role, model, input_tokens, output_tokens, "
+                "cache_creation_tokens, cache_read_tokens, cost_usd, duration_ms, "
+                "status, created_at FROM usage" + where + " ORDER BY id DESC",
+                tuple(params),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [dict(row) for row in rows]
+
+    def usage_summary(self, *, role: str = "", day: str = "") -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if role:
+            clauses.append("role=?")
+            params.append(role)
+        if day:
+            clauses.append("substr(created_at, 1, 10)=?")
+            params.append(day)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT role, COUNT(*) AS runs, "
+                "COALESCE(SUM(input_tokens + output_tokens), 0) AS billed_tokens, "
+                "COALESCE(SUM(cost_usd), 0) AS cost_usd FROM usage"
+                + where
+                + " GROUP BY role ORDER BY role",
+                tuple(params),
+            ).fetchall()
+        finally:
+            connection.close()
+        roles = [dict(row) for row in rows]
+        return {
+            "roles": roles,
+            "totals": {
+                "runs": sum(int(item["runs"]) for item in roles),
+                "billed_tokens": sum(int(item["billed_tokens"]) for item in roles),
+                "cost_usd": sum(float(item["cost_usd"]) for item in roles),
+            },
+        }
+
+    def billed_for_role_day(self, role: str, day: str) -> int:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM usage "
+                "WHERE role=? AND substr(created_at, 1, 10)=?",
+                (role, day),
+            ).fetchone()
+        finally:
+            connection.close()
+        return int(row[0]) if row is not None else 0
+
+    def task_billed(self, task_id: str) -> int:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM usage WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        return int(row[0]) if row is not None else 0
+
+    def has_message(self, task_id: str, message_type: str) -> bool:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM messages WHERE task_id=? AND type=? LIMIT 1",
+                (task_id, message_type),
+            ).fetchone()
+        finally:
+            connection.close()
+        return row is not None
+
+    def recent_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT id, task_id, type, from_role, to_role, payload_json, created_at "
+                "FROM messages ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            payload: Any = {}
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                payload = {}
+            messages.append(
+                {
+                    "id": int(row["id"]),
+                    "task_id": str(row["task_id"]),
+                    "type": str(row["type"]),
+                    "from_role": str(row["from_role"]),
+                    "to_role": str(row["to_role"]),
+                    "payload": payload,
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return messages
+
+    def add_message(
+        self,
+        *,
+        task_id: str,
+        message_type: str,
+        from_role: str,
+        to_role: str,
+        payload: dict[str, Any],
+    ) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_message(
+                connection,
+                task_id=task_id,
+                message_type=message_type,
+                from_role=from_role,
+                to_role=to_role,
+                payload=payload,
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def mark_budget_exceeded(self, task_id: str, reason: str) -> Task:
+        connection = self._connect()
+        now = _now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT " + ", ".join(_TASK_COLUMNS) + " FROM tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskNotFound(task_id)
+            task = _row_to_task(row)
+            if task.status == "budget_exceeded":
+                connection.execute("ROLLBACK")
+                return task
+            connection.execute(
+                "UPDATE tasks SET status='budget_exceeded', updated_at=? WHERE task_id=?",
+                (now, task_id),
+            )
+            self._insert_message(
+                connection,
+                task_id=task_id,
+                message_type="budget_exceeded",
+                from_role="orchestrator",
+                to_role=task.from_role,
+                payload={"reason": reason},
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        updated = self.get(task_id)
+        if updated is None:  # pragma: no cover - 防御
+            raise TaskNotFound(task_id)
+        return updated
+
+    def add_budget_warning(self, task_id: str, payload: dict[str, Any]) -> None:
+        task = self.get(task_id)
+        if task is None:
+            raise TaskNotFound(task_id)
+        self.add_message(
+            task_id=task_id,
+            message_type="budget_warning",
+            from_role="orchestrator",
+            to_role=task.from_role,
+            payload=payload,
+        )
+
 
 def new_task_id() -> str:
     return datetime.now(UTC).strftime("T-%Y%m%d%H%M%S-") + secrets.token_hex(3)
@@ -963,6 +1286,10 @@ class Router:
         budget = payload.get("budget")
         max_tokens = _opt_int_value(budget, "max_tokens")
         max_minutes = _opt_int_value(budget, "max_minutes")
+        if max_tokens is None:
+            max_tokens = default_task_max_tokens()
+        if max_minutes is None:
+            max_minutes = default_task_max_minutes()
         raw_key = payload.get("idempotency_key")
         idempotency_key = raw_key.strip() if isinstance(raw_key, str) else ""
         raw_task_id = payload.get("task_id")
@@ -971,6 +1298,12 @@ class Router:
             task_id = new_task_id()
         if not idempotency_key:
             idempotency_key = f"{task_id}:need"
+
+        if self.store.find_by_idempotency(idempotency_key) is None:
+            budget_limit = role_budget_tokens()
+            spent = self.store.billed_for_role_day(to_role, _today())
+            if budget_limit > 0 and spent >= budget_limit:
+                raise RoleBudgetExceeded(f"role budget exceeded: {to_role} {spent}/{budget_limit}")
 
         task, created = self.store.create_or_get(
             task_id=task_id,
@@ -1014,7 +1347,15 @@ class Router:
         task = self.store.mark_completed(
             task_id, role=role, artifacts=artifacts, cost_tokens=cost_tokens
         )
-        reclaim = self._stop_worker(task.to_role)
+        worker = self.launcher.get(task.to_role)
+        if worker is not None and worker.mode == "real":
+            reclaim: dict[str, Any] = {
+                "role": task.to_role,
+                "deferred": True,
+                "note": "real worker exits naturally; usage captured on exit",
+            }
+        else:
+            reclaim = self._stop_worker(task.to_role)
         return 200, {"task": task.to_dict(), "reclaim": reclaim}
 
     def tasks(self, *, role: str = "", status: str = "") -> dict[str, Any]:
@@ -1026,6 +1367,48 @@ class Router:
         if task is None:
             raise TaskNotFound(task_id)
         return {"task": task.to_dict(), "messages": self.store.messages(task_id)}
+
+    def usage(self, *, task_id: str = "", role: str = "", day: str = "") -> dict[str, Any]:
+        return {
+            "usage": self.store.list_usage(task_id=task_id, role=role, day=day),
+            "summary": self.store.usage_summary(role=role, day=day),
+        }
+
+    def _agent_view(self, record: AgentRecord) -> dict[str, Any]:
+        data = record.to_dict()
+        data["alive"] = process_alive(record.pid)
+        return data
+
+    def observability(self) -> dict[str, Any]:
+        agents = [self._agent_view(record) for record in self.registry.list()]
+        tasks = [record.to_dict() for record in self.store.list_tasks()]
+        residual: list[dict[str, Any]] = []
+        for record in self.registry.list():
+            if record.status == "running" and not process_alive(record.pid):
+                residual.append({"type": "agent", "role": record.role, "pid": record.pid})
+        for task in self.store.list_tasks():
+            if task.status in ACTIVE_STATUSES:
+                agent = self.registry.get(task.to_role)
+                if agent is None or not process_alive(agent.pid):
+                    residual.append(
+                        {
+                            "type": "task",
+                            "task_id": task.task_id,
+                            "role": task.to_role,
+                        }
+                    )
+        return {
+            "agents": agents,
+            "tasks": tasks,
+            "recent_messages": self.store.recent_messages(20),
+            "usage": self.store.usage_summary(),
+            "residual": residual,
+            "budgets": {
+                "role_budget_tokens": role_budget_tokens(),
+                "task_max_tokens": default_task_max_tokens(),
+                "task_max_minutes": default_task_max_minutes(),
+            },
+        }
 
     def check_timeouts(self, timeout_seconds: float) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
@@ -1108,8 +1491,68 @@ class Router:
             )
         return actions
 
+    def _record_worker_usage(self, worker: Worker) -> dict[str, Any] | None:
+        if not worker.task_id or worker.mode != "real":
+            return None
+        usage = parse_claude_usage(worker.log_path)
+        if usage is None:
+            return None
+        record = self.store.record_usage(
+            task_id=worker.task_id,
+            role=worker.role,
+            model=str(usage.get("model", "")),
+            input_tokens=int(usage.get("input_tokens", 0)),
+            output_tokens=int(usage.get("output_tokens", 0)),
+            cache_creation_tokens=int(usage.get("cache_creation_tokens", 0)),
+            cache_read_tokens=int(usage.get("cache_read_tokens", 0)),
+            cost_usd=float(usage.get("cost_usd", 0.0)),
+            duration_ms=int(usage.get("duration_ms", 0)),
+            status=str(usage.get("status", "completed")),
+        )
+        self.apply_task_budget(worker.task_id)
+        return record
+
+    def apply_task_budget(self, task_id: str) -> None:
+        task = self.store.get(task_id)
+        if task is None or task.max_tokens is None or task.max_tokens <= 0:
+            return
+        billed = self.store.task_billed(task_id)
+        if billed >= task.max_tokens:
+            if task.status != "budget_exceeded":
+                self.store.mark_budget_exceeded(task_id, f"tokens {billed}/{task.max_tokens}")
+                self._stop_worker(task.to_role)
+            return
+        if billed >= task.max_tokens * 0.8 and not self.store.has_message(
+            task_id, "budget_warning"
+        ):
+            self.store.add_budget_warning(
+                task_id,
+                {"billed_tokens": billed, "max_tokens": task.max_tokens},
+            )
+
+    def check_task_budgets(self) -> list[dict[str, Any]]:
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task in self.store.list_tasks():
+            if task.status not in ACTIVE_STATUSES or task.max_minutes is None:
+                continue
+            created = _parse_timestamp(task.created_at)
+            if created is None:
+                continue
+            if (now - created).total_seconds() >= task.max_minutes * 60:
+                self.store.mark_budget_exceeded(task.task_id, f"minutes >= {task.max_minutes}")
+                self._stop_worker(task.to_role)
+                actions.append(
+                    {
+                        "task_id": task.task_id,
+                        "action": "budget_exceeded",
+                        "reason": "max_minutes",
+                    }
+                )
+        return actions
+
     def watch_workers(self) -> list[dict[str, Any]]:
-        """看护：存活的 worker 刷新 heartbeat；退出/超时未完成 → 活动任务 failed。"""
+        """看护：刷新 heartbeat；退出/超时未完成 → failed；真实 worker 退出前记录 usage。"""
         actions: list[dict[str, Any]] = []
         for worker in self.launcher.workers():
             if process_alive(worker.pid):
@@ -1125,19 +1568,27 @@ class Router:
                     actions.append({"role": worker.role, "action": "heartbeat_refreshed"})
                 continue
             exit_code = worker.process.poll()
+            usage_record = self._record_worker_usage(worker)
+            task = (
+                self.store.get(worker.task_id)
+                if worker.task_id
+                else self.store.active_task_for(worker.role)
+            )
             try:
                 self.launcher.stop(worker.role)
             except (KeyError, OSError):
                 pass
-            self.registry.set_status(worker.role, "failed")
-            active = self.store.active_task_for(worker.role)
-            if active is not None:
-                self.store.mark_failed(active.task_id, f"worker_exit:{exit_code}")
+            if task is not None and task.status in ACTIVE_STATUSES:
+                self.store.mark_failed(task.task_id, f"worker_exit:{exit_code}")
+                self.registry.set_status(worker.role, "failed")
+            else:
+                self.registry.set_status(worker.role, "stopped")
             actions.append(
                 {
                     "role": worker.role,
                     "action": "worker_exit",
                     "exit_code": exit_code,
+                    "usage_recorded": usage_record is not None,
                 }
             )
         return actions

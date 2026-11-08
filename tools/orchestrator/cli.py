@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib import error, request
 from urllib.parse import urlencode
 
@@ -149,6 +149,62 @@ def _ensure_daemon(home: Path) -> None:
     _daemon_start(home, 0)
 
 
+def _render_observability(data: dict[str, Any]) -> str:
+    lines: list[str] = []
+    daemon = cast(dict[str, Any], data.get("daemon") or {})
+    lines.append(f"daemon: pid={daemon.get('pid')} port={daemon.get('port')}")
+    lines.append("agents:")
+    agents = cast(list[Any], data.get("agents") or [])
+    for agent in agents:
+        if isinstance(agent, dict):
+            lines.append(
+                f"  {agent.get('role')}: status={agent.get('status')} "
+                f"pid={agent.get('pid')} alive={agent.get('alive')} "
+                f"task={agent.get('current_task_id', '')}"
+            )
+    tasks = cast(list[Any], data.get("tasks") or [])
+    counts: dict[str, int] = {}
+    for task in tasks:
+        if isinstance(task, dict):
+            key = str(task.get("status", "unknown"))
+            counts[key] = counts.get(key, 0) + 1
+    lines.append(
+        "tasks: " + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "none")
+    )
+    usage = cast(dict[str, Any], data.get("usage") or {})
+    totals = cast(dict[str, Any], usage.get("totals") or {})
+    lines.append(
+        f"usage: runs={totals.get('runs', 0)} billed={totals.get('billed_tokens', 0)} "
+        f"cost=${float(totals.get('cost_usd', 0.0)):.4f}"
+    )
+    roles = cast(list[Any], usage.get("roles") or [])
+    for role in roles:
+        if isinstance(role, dict):
+            lines.append(
+                f"  {role.get('role')}: billed={role.get('billed_tokens', 0)} "
+                f"cost=${float(role.get('cost_usd', 0.0)):.4f}"
+            )
+    residual = cast(list[Any], data.get("residual") or [])
+    lines.append(
+        "residual: " + ("none" if not residual else json.dumps(residual, ensure_ascii=False))
+    )
+    recent = cast(list[Any], data.get("recent_messages") or [])
+    if recent:
+        lines.append("recent messages:")
+        for message in recent[:5]:
+            if isinstance(message, dict):
+                lines.append(
+                    f"  {message.get('created_at')} {message.get('type')} {message.get('task_id')}"
+                )
+    budgets = cast(dict[str, Any], data.get("budgets") or {})
+    lines.append(
+        f"budgets: role={budgets.get('role_budget_tokens')} "
+        f"task_tokens={budgets.get('task_max_tokens')} "
+        f"task_minutes={budgets.get('task_max_minutes')}"
+    )
+    return "\n".join(lines)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--home", default="", help="orchestrator home directory")
@@ -170,7 +226,18 @@ def _parser() -> argparse.ArgumentParser:
     resolve = subparsers.add_parser("resolve", help="resolve a role")
     resolve.add_argument("--role", required=True)
 
-    subparsers.add_parser("status", help="daemon and agent status")
+    status_parser = subparsers.add_parser("status", help="daemon and agent status")
+    status_parser.add_argument("--verbose", action="store_true")
+
+    usage_parser = subparsers.add_parser("usage", help="usage ledger and summary")
+    usage_parser.add_argument("--task", default="")
+    usage_parser.add_argument("--role", default="")
+    usage_parser.add_argument("--day", default="")
+
+    observability = subparsers.add_parser(
+        "observability", help="agents/tasks/messages/residual/budget view"
+    )
+    observability.add_argument("--format", choices=["text", "json"], default="text")
 
     start = subparsers.add_parser("start", help="start a dummy worker")
     start.add_argument("--role", required=True)
@@ -241,7 +308,37 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "resolve":
             status, body = _request(home, "POST", "/resolve", {"role": args.role})
         elif args.command == "status":
+            if args.verbose:
+                status, body = _request(home, "GET", "/observability")
+                if 200 <= status < 300:
+                    print(_render_observability(body))
+                    return 0
+                print(json.dumps(body, ensure_ascii=False), file=sys.stderr)
+                return 1
             status, body = _request(home, "GET", "/status")
+        elif args.command == "usage":
+            query = urlencode(
+                {
+                    key: value
+                    for key, value in (
+                        ("task", args.task),
+                        ("role", args.role),
+                        ("day", args.day),
+                    )
+                    if value
+                }
+            )
+            status, body = _request(home, "GET", "/usage" + (f"?{query}" if query else ""))
+        elif args.command == "observability":
+            status, body = _request(home, "GET", "/observability")
+            if 200 <= status < 300:
+                if args.format == "text":
+                    print(_render_observability(body))
+                else:
+                    print(json.dumps(body, ensure_ascii=False))
+                return 0
+            print(json.dumps(body, ensure_ascii=False), file=sys.stderr)
+            return 1
         elif args.command == "start":
             status, body = _request(
                 home, "POST", "/start", {"role": args.role, "dummy": bool(args.dummy)}

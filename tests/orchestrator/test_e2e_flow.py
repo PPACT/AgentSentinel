@@ -257,7 +257,13 @@ def test_real_worker_end_to_end(tmp_path: Path) -> None:
             "ack",
             "completed",
         ]
+        # 真实 worker 在 completed 后自然退出；等看护线程记录 usage 并回收
+        deadline = time.monotonic() + 60
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
         assert process_alive(pid) is False
+        _, usage = _api(daemon.home, "GET", f"/usage?task={task_id}")
+        assert usage["usage"]
     finally:
         daemon.stop()
         output.unlink(missing_ok=True)

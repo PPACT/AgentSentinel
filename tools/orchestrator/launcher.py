@@ -336,6 +336,52 @@ def real_worker_command(
     ]
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    return default
+
+
+def parse_claude_usage(log_path: Path) -> dict[str, Any] | None:
+    """从 ``claude -p --output-format json`` 的退出日志中解析 usage/cost。"""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        usage = data.get("usage")
+        if not isinstance(usage, dict) and "total_cost_usd" not in data:
+            continue
+        model = ""
+        model_usage = data.get("modelUsage")
+        if isinstance(model_usage, dict) and model_usage:
+            model = str(next(iter(model_usage)))
+        usage_map = usage if isinstance(usage, dict) else {}
+        cost = data.get("total_cost_usd")
+        return {
+            "model": model,
+            "input_tokens": _as_int(usage_map.get("input_tokens")),
+            "output_tokens": _as_int(usage_map.get("output_tokens")),
+            "cache_creation_tokens": _as_int(usage_map.get("cache_creation_input_tokens")),
+            "cache_read_tokens": _as_int(usage_map.get("cache_read_input_tokens")),
+            "cost_usd": float(cost) if isinstance(cost, (int, float)) else 0.0,
+            "duration_ms": _as_int(data.get("duration_ms")),
+            "status": "error" if data.get("is_error") else "completed",
+        }
+    return None
+
+
 def _wait_for_pid_file(path: Path, key: str, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_error = ""
@@ -373,6 +419,7 @@ class Worker:
     log_path: Path
     task_id: str = ""
     deadline: float = 0.0
+    mode: str = "dummy"
 
 
 class Launcher:
@@ -456,6 +503,7 @@ class Launcher:
             process=process,
             pid_file=pid_file,
             log_path=log_path,
+            mode="dummy",
         )
         self._workers[role] = worker
         return worker
@@ -538,6 +586,7 @@ class Launcher:
             log_path=log_path,
             task_id=task_id,
             deadline=deadline,
+            mode="real",
         )
         self._workers[role] = worker
         return worker

@@ -25,6 +25,7 @@ from tools.orchestrator.launcher import Launcher, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import (
     InvalidTransition,
+    RoleBudgetExceeded,
     RoleBusy,
     RoleMismatch,
     Router,
@@ -216,6 +217,22 @@ class Daemon:
     def task_detail(self, task_id: str) -> dict[str, Any]:
         return self.router.task_detail(task_id)
 
+    def usage(self, *, task_id: str = "", role: str = "", day: str = "") -> dict[str, Any]:
+        return self.router.usage(task_id=task_id, role=role, day=day)
+
+    def observability(self) -> dict[str, Any]:
+        data = self.router.observability()
+        port = self.port
+        if self.server is not None:
+            port = int(self.server.server_address[1])
+        data["daemon"] = {
+            "pid": os.getpid(),
+            "host": self.host,
+            "port": port,
+            "started_at": self.started_at,
+        }
+        return data
+
     def heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         role = _role(payload)
         raw_task_id = payload.get("task_id")
@@ -252,6 +269,7 @@ class Daemon:
             try:
                 self.router.check_timeouts(self.ack_timeout)
                 self.router.check_heartbeats(self.lost_seconds)
+                self.router.check_task_budgets()
                 now = time.monotonic()
                 if now - self._last_watchdog >= self.watchdog_seconds:
                     self._last_watchdog = now
@@ -396,6 +414,8 @@ class _Handler(BaseHTTPRequestHandler):
                 status, body = self.daemon.need(payload)
             except RoleBusy as exc:
                 status, body = 409, {"error": str(exc)}
+            except RoleBudgetExceeded as exc:
+                status, body = 429, {"error": str(exc)}
             except ValueError as exc:
                 status, body = 400, {"error": str(exc)}
             except (OSError, RuntimeError, TimeoutError) as exc:
@@ -494,6 +514,18 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(404, {"error": str(exc)})
             else:
                 self._send(400, {"error": "idem_key or task_id is required"})
+        elif method == "GET" and path == "/usage":
+            query = parse_qs(urlparse(self.path).query)
+            self._send(
+                200,
+                self.daemon.usage(
+                    task_id=query.get("task", [""])[0],
+                    role=query.get("role", [""])[0],
+                    day=query.get("day", [""])[0],
+                ),
+            )
+        elif method == "GET" and path == "/observability":
+            self._send(200, self.daemon.observability())
         elif method == "POST" and path == "/shutdown":
             self._send(200, {"stopping": True, "pid": os.getpid()})
             self.daemon.request_shutdown()

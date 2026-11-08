@@ -55,6 +55,30 @@ HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/s
 
 MCP（`.mcp.json` 中的 `sentinel` server）：`orchestrator_status/resolve/need/ack/completed/heartbeat/task/tasks`。新会话启动后加载。
 
+## 用量、预算与观测
+
+```powershell
+# 最近用量与按角色/当日汇总
+uv run python -m tools.orchestrator usage
+uv run python -m tools.orchestrator usage --role dev --day 2026-11-08
+
+# 观测页（agents / tasks / 最近消息 / 残留 / 预算）
+uv run python -m tools.orchestrator observability
+uv run python -m tools.orchestrator observability --format json
+uv run python -m tools.orchestrator status --verbose
+```
+
+预算相关环境变量（脚本已透传）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SENTINEL_ORCH_TASK_MAX_TOKENS` | 200000 | 每任务 billed tokens 上限（80% 警告，100% `budget_exceeded`） |
+| `SENTINEL_ORCH_TASK_MAX_MINUTES` | 30 | 每任务分钟上限 |
+| `SENTINEL_ORCH_ROLE_BUDGET_TOKENS` | 200000 | 每角色/UTC 日 billed tokens 上限，超出时 `/need` 返回 429 |
+| `SENTINEL_ORCH_WORKER_BUDGET_USD` | 0.50 | 传给 `claude -p --max-budget-usd` |
+
+真实 worker 的 usage/cost 在进程退出时从 `claude -p --output-format json` 日志解析；`completed` 对真实 worker 采用延迟回收（worker 自然退出后看护线程记录 usage 并关闭 Job），dummy 仍立即回收。
+
 ## 验证“任务结束后没有残留进程”
 
 任务进入 `done` / `failed` / `timeout` 时，daemon 会关闭该 worker 的 Job 并等待 `alive=false`。验证方式：

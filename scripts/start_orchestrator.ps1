@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   AgentSentinel 编排服务 daemon 的启动/停止脚本（开发期工具，不接入产品）。
 
@@ -43,7 +43,9 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     throw "uv not found in PATH. Run this script from a shell where the project's uv is available."
 }
 
-$env:SENTINEL_ORCH_HOME = Join-Path $Root '.claude\orchestrator'
+if (-not $env:SENTINEL_ORCH_HOME) {
+    $env:SENTINEL_ORCH_HOME = Join-Path $Root '.claude\orchestrator'
+}
 $env:SENTINEL_ORCH_WORKER_MODE = $WorkerMode
 $env:SENTINEL_ORCH_WORKER_BUDGET_USD = "$BudgetUsd"
 $env:SENTINEL_ORCH_WORKER_TIMEOUT_SECONDS = "$WorkerTimeoutSeconds"
@@ -60,12 +62,17 @@ switch ($Action) {
         & uv run python -m tools.orchestrator.service --serve --port $Port
     }
     'start' {
+        # daemon start polls /health internally and only returns success once healthy.
         & uv run python -m tools.orchestrator daemon start --port $Port
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Write-Host "Orchestrator daemon is running. Home: $env:SENTINEL_ORCH_HOME"
     }
     'stop' {
         & uv run python -m tools.orchestrator daemon stop
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     'status' {
         & uv run python -m tools.orchestrator daemon status
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }

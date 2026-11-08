@@ -34,6 +34,14 @@ scripts\start_orchestrator.cmd -Action status
 scripts\start_orchestrator.cmd -Action stop
 ```
 
+双击启动（后台 daemon）：
+
+```bat
+scripts\start_orchestrator.bat
+```
+
+双击后 bat 调用 `start_orchestrator.ps1 -Action start`，由 CLI 在后台拉起 daemon 并轮询 `/health`，通过后脚本退出（不保留常驻窗口）；失败时打印可读错误并等待约 10 秒。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
+
 可选参数（默认值）：
 
 | 参数 | 默认 | 说明 |
@@ -53,7 +61,9 @@ scripts\start_orchestrator.cmd -Action stop
 
 HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/shutdown`。
 
-MCP（`.mcp.json` 中的 `sentinel` server）：`orchestrator_status/resolve/need/ack/completed/heartbeat/task/tasks`。新会话启动后加载。
+MCP（`.mcp.json` 中的 `sentinel` server）：`orchestrator_register/status/resolve/need/ack/completed/heartbeat/task/tasks`。新会话启动后加载。
+
+`orchestrator_register` 参数为 `role` / `session` / `ref`：MCP server 用自身 `pid`/`pgid` 注册，`command` 记录为 `mcp_server session=<...> ref=<...>`，重复调用幂等更新；daemon 离线时返回 `isError:true` 的结构化错误，不抛异常、不重试、不轮询。新窗口按角色提示词静默调用一次即可。
 
 ## 用量、预算与观测
 

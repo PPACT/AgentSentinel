@@ -38,6 +38,19 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "orchestrator_register",
+        "description": "Register this MCP server as a role (idempotent).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string"},
+                "session": {"type": "string"},
+                "ref": {"type": "string"},
+            },
+            "required": ["role"],
+        },
+    },
+    {
         "name": "orchestrator_need",
         "description": "Create a task for a target role.",
         "inputSchema": {
@@ -136,6 +149,22 @@ def tool_request(name: str, arguments: dict[str, Any]) -> tuple[str, str, dict[s
         return "GET", "/status", None
     if name == "orchestrator_resolve":
         return "POST", "/resolve", {"role": _required(arguments, "role")}
+    if name == "orchestrator_register":
+        role = _required(arguments, "role")
+        session = _optional(arguments, "session")
+        ref = _optional(arguments, "ref")
+        pid = os.getpid()
+        return (
+            "POST",
+            "/register",
+            {
+                "role": role,
+                "pid": pid,
+                "pgid": pid,
+                "status": "registered",
+                "command": f"mcp_server session={session} ref={ref}",
+            },
+        )
     if name == "orchestrator_need":
         payload: dict[str, Any] = {
             "from_role": _required(arguments, "from_role"),
@@ -186,6 +215,11 @@ def _required(arguments: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} is required")
     return value.strip()
+
+
+def _optional(arguments: dict[str, Any], key: str) -> str:
+    value = arguments.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def daemon_request(

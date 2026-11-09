@@ -33,6 +33,30 @@ npm run tauri dev
 应用启动时：若 `http://127.0.0.1:8765/health` 不可用，则用 `uv run python -m tools.orchestrator.service
 --serve --port 8765` 拉起隔离 daemon；失败会在顶栏下方显示可读错误。关闭窗口时仅回收本应用拉起的 daemon。
 
+## 隔离数据与「空表」说明
+
+- 应用拉起的 daemon 使用**独立 home**：`appDataDir()/orchestrator`（Windows 下为
+  `%APPDATA%\com.agentsentinel.console\orchestrator`），与项目的 `.claude/orchestrator` 隔离。
+- 首次启动 registry 为空，页面显示「暂无 agent / 暂无任务」是**正常现象**。
+- 若 `127.0.0.1:8765` 已被其他 daemon 占用，应用会复用该 daemon（不再重复拉起），此时数据来自其 home。
+- 注册一个 demo agent（PowerShell，daemon 已运行）：
+
+  ```powershell
+  $home  = Join-Path $env:APPDATA "com.agentsentinel.console\orchestrator"
+  $token = (Get-Content (Join-Path $home "token") -Raw).Trim()
+  $body  = @{ role = "demo"; pid = $PID; status = "registered" } | ConvertTo-Json
+  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8765/register" `
+    -Headers @{ Authorization = "Bearer $token" } -ContentType "application/json" -Body $body
+  ```
+
+  页面应在 SSE 事件驱动下自动出现 `demo`；停止它：
+
+  ```powershell
+  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8765/stop" `
+    -Headers @{ Authorization = "Bearer $token" } -ContentType "application/json" `
+    -Body '{"role":"demo"}'
+  ```
+
 ## 校验
 
 ```bash

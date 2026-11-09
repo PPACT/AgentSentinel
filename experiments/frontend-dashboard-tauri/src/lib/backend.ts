@@ -18,6 +18,7 @@ export class ApiError extends Error {
 }
 
 let daemonChild: Child | null = null;
+let daemonStart: Promise<void> | null = null;
 
 export function projectRoot(): string {
   return import.meta.env.VITE_AGENT_SENTINEL_ROOT?.trim() ?? "";
@@ -37,7 +38,7 @@ async function healthy(): Promise<boolean> {
 }
 
 /** 拉起隔离 daemon（cwd=项目根，home=appData/orchestrator）；已在线则跳过。 */
-export async function ensureDaemon(): Promise<void> {
+async function startDaemonOnce(): Promise<void> {
   if (await healthy()) return;
   const root = projectRoot();
   if (!root) {
@@ -56,6 +57,16 @@ export async function ensureDaemon(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`daemon 启动超时（cwd=${root}）`);
+}
+
+/** StrictMode 双挂载/并发调用共享同一次启动，避免双拉 daemon 与端口竞争。 */
+export function ensureDaemon(): Promise<void> {
+  if (daemonStart === null) {
+    daemonStart = startDaemonOnce().finally(() => {
+      daemonStart = null;
+    });
+  }
+  return daemonStart;
 }
 
 export async function stopDaemon(): Promise<void> {

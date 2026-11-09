@@ -29,7 +29,7 @@ PowerShell：
 cmd.exe：
 
 ```bat
-rem 无参数：前台中控面板（停止后窗口保留）
+rem 无参数：前台中控 + 事件驱动刷新（停止后窗口保留）
 scripts\start_orchestrator.cmd
 
 rem 带参数：原样转发给 start_orchestrator.ps1
@@ -39,16 +39,16 @@ scripts\start_orchestrator.cmd -Action status
 scripts\start_orchestrator.cmd -Action stop
 ```
 
-双击/无参数运行 `.cmd` 进入前台中控：先打印「正在启动编排中控...」，随后显示横幅与 agent 表；Ctrl+C 或异常退出后打印「编排中控已停止」，窗口保留（按任意键关闭）。显式 `-Action start` 仍是 detached 后台启动并等待 health；`-Action status/stop` 原样转发。前台启动失败（uv 缺失、端口占用等）会打印可读错误并保留窗口。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
+双击/无参数运行 `.cmd` 进入前台中控并默认启用事件驱动刷新（`-Action foreground -Watch`）：先打印「正在启动编排中控...」，随后显示横幅与 agent 表，注册/停止等状态变化时重绘，空闲不输出；Ctrl+C 或异常退出后打印「编排中控已停止」，窗口保留（按任意键关闭）。显式 `-Action foreground`（不带 `-Watch`）只打印启动快照；`-Action start` 仍是 detached 后台启动并等待 health；`-Action status/stop` 原样转发。前台启动失败（uv 缺失、端口占用等）会打印可读错误并保留窗口。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
 
 ## 中控视图（foreground）
 
-`-Action foreground` 启动成功后，终端打印：
+`-Action foreground`（不带 `-Watch`）启动成功后，终端打印：
 
 - 启动横幅：`AgentSentinel 编排中控已启动`、pid、`host:port`、home、worker mode、启动时间；
 - 已注册 agent 表：`role` / `pid` / `status` / `alive`（在线/已停止）/ `last_heartbeat` / `current_task_id`；无注册时显示「暂无已注册 agent」。
 
-默认不周期刷新，只打印一次启动快照；设置 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS=<正秒数>` 可显式开启周期刷新，设为 `0` 只打印启动快照，无效/空值等同默认（不刷新）。需要查看当前状态时执行 `uv run python -m tools.orchestrator status`（或 MCP `orchestrator_status`）。`-Action start`（detached）不输出中控视图，只写日志。启动失败（如端口占用）打印可读错误并以非 0 退出。
+不带 `-Watch` 时默认不周期刷新，只打印一次启动快照；设置 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS=<正秒数>` 可显式开启周期刷新，设为 `0` 只打印启动快照，无效/空值等同默认（不刷新）。需要查看当前状态时执行 `uv run python -m tools.orchestrator status`（或 MCP `orchestrator_status`）。`-Action start`（detached）不输出中控视图，只写日志。启动失败（如端口占用）打印可读错误并以非 0 退出。
 
 事件驱动刷新：`-Action foreground -Watch`（或 `uv run python -m tools.orchestrator.service --serve --watch`）在注册、停止、任务状态变化时重绘 agent 表，空闲不输出；仅 `last_heartbeat` 变化默认不重绘，加 `--show-heartbeat` 才会重绘。兼容 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS` 的周期刷新（未设置 `--watch` 时生效）。
 

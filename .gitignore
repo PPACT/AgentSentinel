@@ -51,3 +51,7 @@ uv.lock
 
 # ===== 暂不纳入版本管理 =====
 docs/修订01.txt
+
+# ===== 前端试验产物 =====
+experiments/frontend-dashboard/node_modules/
+experiments/frontend-dashboard/dist/

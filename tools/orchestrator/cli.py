@@ -88,6 +88,9 @@ def _daemon_start(home: Path, port: int) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment["SENTINEL_ORCH_HOME"] = str(home)
+    # daemon 的 stdout/stderr 重定向到 UTF-8 日志文件；固定子进程编码，避免 cp936 乱码。
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(

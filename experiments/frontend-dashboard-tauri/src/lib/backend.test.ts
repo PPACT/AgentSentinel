@@ -33,5 +33,8 @@ describe("ensureDaemon", () => {
 
     expect(mocks.create).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledTimes(1);
+    expect(mocks.create.mock.calls[0]?.[2]).toMatchObject({
+      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
+    });
   });
 });

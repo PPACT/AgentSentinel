@@ -55,6 +55,11 @@ $env:SENTINEL_ORCH_WATCHDOG_SECONDS = "$WatchdogSeconds"
 $env:SENTINEL_ORCH_ACK_TIMEOUT_SECONDS = "$AckTimeoutSeconds"
 $env:SENTINEL_ORCH_LOST_SECONDS = "$LostSeconds"
 $env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+# Keep the console and Python stdio on UTF-8 so localized Windows errors do not
+# turn into mojibake in daemon.log / worker logs.
+chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 switch ($Action) {
     'foreground' {

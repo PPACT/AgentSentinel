@@ -52,6 +52,18 @@ LOG_POLL_SECONDS = 0.3
 LOG_CHUNK_BYTES = 64 * 1024
 
 
+def _configure_stdio(*streams: Any) -> None:
+    """daemon 入口：编码失败时用替换字符，避免日志写入中断或产生乱码。"""
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def dashboard_refresh_seconds() -> float:
     raw = os.environ.get(DASHBOARD_REFRESH_ENV, "").strip()
     if not raw:
@@ -649,17 +661,29 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, BrokenPipeError):
+            # 客户端已断开（常见于前端取消/刷新），不是 daemon 错误。
+            return
 
-    def _write_event(self, revision: int, event: str, data: dict[str, Any]) -> None:
+    def _write_bytes(self, data: bytes) -> bool:
+        """写 SSE 字节；客户端断开时返回 False，由调用方结束流。"""
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+        except (ConnectionResetError, BrokenPipeError):
+            return False
+        return True
+
+    def _write_event(self, revision: int, event: str, data: dict[str, Any]) -> bool:
         body = json.dumps(data, ensure_ascii=False)
         frame = f"id: {revision}\nevent: {event}\ndata: {body}\n\n"
-        self.wfile.write(frame.encode("utf-8"))
-        self.wfile.flush()
+        return self._write_bytes(frame.encode("utf-8"))
 
     def _stream_events(self) -> None:
         daemon = self.daemon
@@ -673,7 +697,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             sent = daemon.revision
-            self._write_event(sent, "snapshot", daemon.status())
+            if not self._write_event(sent, "snapshot", daemon.status()):
+                return
             ping = sse_ping_seconds()
             while True:
                 try:
@@ -681,13 +706,14 @@ class _Handler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     if daemon.is_stopping:
                         break
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
+                    if not self._write_bytes(b": ping\n\n"):
+                        return
                     continue
                 revision = int(frame["revision"])
                 if revision <= sent:  # 并发发布可能乱序到达，丢弃旧帧
                     continue
-                self._write_event(revision, str(frame["event"]), frame["data"])
+                if not self._write_event(revision, str(frame["event"]), frame["data"]):
+                    return
                 sent = revision
                 if frame["event"] == "shutdown":
                     break
@@ -696,13 +722,12 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             daemon.unsubscribe(subscriber)
 
-    def _write_log_frame(self, seq: int, role: str, line: str, event: str = "log") -> None:
+    def _write_log_frame(self, seq: int, role: str, line: str, event: str = "log") -> bool:
         payload = (
             {"role": role, "line": line, "ts": utc_now()} if event == "log" else {"stopping": True}
         )
         frame = f"id: {seq}\nevent: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        self.wfile.write(frame.encode("utf-8"))
-        self.wfile.flush()
+        return self._write_bytes(frame.encode("utf-8"))
 
     def _log_targets(self) -> list[tuple[str, Path]] | None:
         """解析 ?role= 或列出 logs/*.log；非法 role 返回 None（已发送 400）。"""
@@ -750,7 +775,8 @@ class _Handler(BaseHTTPRequestHandler):
             for role, path in targets:
                 for line in _tail_lines(path, tail):
                     seq += 1
-                    self._write_log_frame(seq, role, line)
+                    if not self._write_log_frame(seq, role, line):
+                        return
                 try:
                     offsets[path] = path.stat().st_size
                 except OSError:
@@ -787,7 +813,8 @@ class _Handler(BaseHTTPRequestHandler):
                     pending[path] = parts.pop()
                     for line in parts:
                         seq += 1
-                        self._write_log_frame(seq, role, line.rstrip("\r"))
+                        if not self._write_log_frame(seq, role, line.rstrip("\r")):
+                            return
                         emitted = True
                 now = time.monotonic()
                 if not specific_role and now >= rescan_at:
@@ -802,8 +829,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if emitted:
                     last_emit = now
                 elif now - last_emit >= ping:
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
+                    if not self._write_bytes(b": ping\n\n"):
+                        return
                     last_emit = now
                 time.sleep(LOG_POLL_SECONDS)
         except OSError:
@@ -1001,6 +1028,7 @@ def _install_signal_handlers(daemon: Daemon) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio(sys.stdout, sys.stderr)
     parser = argparse.ArgumentParser(prog="orchestrator-service")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--host", default=DEFAULT_HOST)

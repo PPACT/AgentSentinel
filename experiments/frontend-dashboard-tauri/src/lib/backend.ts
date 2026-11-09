@@ -65,7 +65,7 @@ async function startDaemonOnce(): Promise<void> {
   const command = Command.create(
     "start-daemon",
     ["run", "python", "-m", "tools.orchestrator.service", "--serve", "--port", "8765"],
-    { cwd: root, env: { SENTINEL_ORCH_HOME: home } },
+    { cwd: root, env: { SENTINEL_ORCH_HOME: home, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" } },
   );
   daemonChild = await command.spawn();
   const deadline = Date.now() + 20_000;

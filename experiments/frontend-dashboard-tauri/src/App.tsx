@@ -7,8 +7,8 @@ import { TaskTable } from "@/components/TaskTable";
 import { TopBar } from "@/components/TopBar";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import {
-  DAEMON_BASE,
   ensureDaemon,
+  eventStreamUrl,
   getStatus,
   getTasks,
   stopDaemon,
@@ -61,14 +61,24 @@ export default function App() {
     }, 250);
   }, [refreshTasks]);
 
-  const startStream = useCallback(() => {
+  const startStream = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setConnection("connecting");
     appendLog("info", "正在连接中控事件流…");
+    let url: string;
+    try {
+      url = await eventStreamUrl();
+    } catch (err) {
+      const message = errorMessage(err);
+      setError(message);
+      appendLog("error", message);
+      setConnection("error");
+      return;
+    }
     void consumeEventStream({
-      url: `${DAEMON_BASE}/events`,
+      url,
       fetchImpl: streamFetch,
       signal: controller.signal,
       onFrame(frame) {
@@ -117,7 +127,7 @@ export default function App() {
         if (cancelled) return;
         appendLog("info", "daemon 已就绪，加载状态…");
         await refreshAll();
-        startStream();
+        void startStream();
       } catch (err) {
         if (!cancelled) {
           const message = errorMessage(err);
@@ -222,7 +232,9 @@ export default function App() {
         onRefresh={() => {
           void refreshAll();
         }}
-        onReconnect={startStream}
+        onReconnect={() => {
+          void startStream();
+        }}
         onClearLogs={() => setLogs([])}
       />
     </div>

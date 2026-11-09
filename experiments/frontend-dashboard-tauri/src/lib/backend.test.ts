@@ -6,10 +6,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/path", () => ({
-  appDataDir: vi.fn(async () => "C:\\app"),
   join: vi.fn(async (...parts: string[]) => parts.join("\\")),
 }));
-vi.mock("@tauri-apps/plugin-fs", () => ({ readTextFile: vi.fn(async () => "token") }));
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  readTextFile: vi.fn(async (filePath: string) =>
+    filePath.endsWith("daemon.json") ? '{"host":"127.0.0.1","port":8954}' : "token",
+  ),
+}));
 vi.mock("@tauri-apps/plugin-http", () => ({ fetch: mocks.fetch }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ Command: { create: mocks.create } }));
 

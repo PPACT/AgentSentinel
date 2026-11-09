@@ -19,18 +19,11 @@
     },
     {
       "identifier": "http:default",
-      "allow": [{ "url": "http://127.0.0.1:8765/**" }]
+      "allow": [{ "url": "http://127.0.0.1:*" }]
     },
     {
       "identifier": "http:allow-fetch",
-      "allow": [{ "url": "http://127.0.0.1:8765/**" }]
-    },
-    {
-      "identifier": "fs:allow-read-text-file",
-      "allow": [
-        { "path": "$APPDATA/orchestrator/token" },
-        { "path": "$APPDATA/orchestrator/daemon.json" }
-      ]
+      "allow": [{ "url": "http://127.0.0.1:*" }]
     }
   ]
 }

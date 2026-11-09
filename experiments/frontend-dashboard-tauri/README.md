@@ -18,8 +18,8 @@ Rust 端只做插件初始化与 `Command` 拉起 Python daemon，网络/SSE/状
 |---|---|---|
 | `VITE_AGENT_SENTINEL_ROOT` | 否 | AgentSentinel 项目根（daemon 的 `cwd`）。`npm run tauri ...` 会由 `scripts/tauri.mjs` 自动设为项目根；只有直接跑 `vite`/`cargo` 时才需要手动设置。 |
 
-daemon 的 `SENTINEL_ORCH_HOME` 由应用固定为 **`appDataDir()/orchestrator`**（Windows 下即
-`%APPDATA%\com.agentsentinel.console\orchestrator`），与 capability 的 `$APPDATA/orchestrator/*` 一致。
+daemon 使用**项目默认 home** `<项目根>/.claude/orchestrator`：应用读取其中的 `daemon.json` 与 `token`，
+连接 dev/doc/MCP 注册的同一个 daemon。`scripts/tauri.mjs` 会生成本机的 fs 读取授权（`local.dev.json`，gitignored）。
 
 ## 运行
 
@@ -29,36 +29,39 @@ npm install
 npm run tauri dev
 ```
 
-应用启动时：若 `http://127.0.0.1:8765/health` 不可用，则用 `uv run python -m tools.orchestrator.service
---serve --port 8765` 拉起隔离 daemon；失败会在顶栏下方显示可读错误。**关闭窗口不保证回收 daemon**
-（优雅退出属阶段 C3）；开发时用 `POST /shutdown` 收掉（Bearer token 在
-`%APPDATA%\com.agentsentinel.console\orchestrator\token`）。
+应用启动时：读取 `<项目根>/.claude/orchestrator/daemon.json` 连接现有 daemon；若不可用，则用该 home
+执行 `uv run python -m tools.orchestrator.service --serve --port 8765` 拉起默认 daemon。失败会在顶栏下方
+显示可读错误。**关闭窗口不保证回收 daemon**（优雅退出属阶段 C3）；开发时用 `POST /shutdown` 收掉
+（Bearer token 在 `<项目根>/.claude/orchestrator/token`）。
 
 > **构建目录**：`npm run tauri ...` 通过 `scripts/tauri.mjs` 把 `CARGO_TARGET_DIR` 固定为
 > `<项目根>/.claude/tauri-target`。Windows 下沙箱/工具可能给项目树打上 Low 完整性标签，
 > 产物若继承该标签会无法写 `%LOCALAPPDATA%`，Tauri/WebView2 启动时报 `os error 5`。
 > 直接用 `cargo build` 时请自行设置同一环境变量。
 
-## 隔离数据与「空表」说明
+## 数据来源（dev/doc agent）
 
-- 应用拉起的 daemon 使用**独立 home**：`appDataDir()/orchestrator`（Windows 下为
-  `%APPDATA%\com.agentsentinel.console\orchestrator`），与项目的 `.claude/orchestrator` 隔离。
-- 首次启动 registry 为空，页面显示「暂无 agent / 暂无任务」是**正常现象**。
-- 若 `127.0.0.1:8765` 已被其他 daemon 占用，应用会复用该 daemon（不再重复拉起），此时数据来自其 home。
-- 注册一个 demo agent（PowerShell，daemon 已运行）：
+- 前端连接的是**项目默认 daemon**（`.claude/orchestrator`），与 dev/doc 会话、MCP、`start_orchestrator.cmd`
+  使用的是同一个 registry，因此能直接看到已注册的 dev/doc agent。
+- 若默认 daemon 已在运行（端口任意），应用按 `daemon.json` 连接，不会重复拉起。
+- 若默认 daemon 未运行，应用用同一 home 在 `8765` 拉起；registry 中已有的 dev/doc 记录会随之显示
+  （`alive` 由 pid 是否存活决定）。
+- 页面显示「暂无 agent」只表示该 registry 目前确实没有记录；需要时可手动注册 demo：
 
   ```powershell
-  $home  = Join-Path $env:APPDATA "com.agentsentinel.console\orchestrator"
-  $token = (Get-Content (Join-Path $home "token") -Raw).Trim()
+  # 在项目根执行
+  $orch  = Join-Path (Get-Location) ".claude\orchestrator"
+  $token = (Get-Content (Join-Path $orch "token") -Raw).Trim()
+  $port  = (Get-Content (Join-Path $orch "daemon.json") -Raw | ConvertFrom-Json).port
   $body  = @{ role = "demo"; pid = $PID; status = "registered" } | ConvertTo-Json
-  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8765/register" `
+  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/register" `
     -Headers @{ Authorization = "Bearer $token" } -ContentType "application/json" -Body $body
   ```
 
-  页面应在 SSE 事件驱动下自动出现 `demo`；停止它：
+  停止它：
 
   ```powershell
-  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8765/stop" `
+  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/stop" `
     -Headers @{ Authorization = "Bearer $token" } -ContentType "application/json" `
     -Body '{"role":"demo"}'
   ```

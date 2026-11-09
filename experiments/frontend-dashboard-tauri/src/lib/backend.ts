@@ -1,11 +1,12 @@
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { Command, type Child } from "@tauri-apps/plugin-shell";
 
 import type { StatusSnapshot, TaskList } from "./types";
 
-export const DAEMON_BASE = "http://127.0.0.1:8765";
+/** 默认 daemon 未写 daemon.json 时的兜底地址（与 shell scope 一致）。 */
+const FALLBACK_BASE = "http://127.0.0.1:8765";
 
 export class ApiError extends Error {
   status: number;
@@ -24,26 +25,42 @@ export function projectRoot(): string {
   return import.meta.env.VITE_AGENT_SENTINEL_ROOT?.trim() ?? "";
 }
 
+/** 项目默认 orchestrator home：`.claude/orchestrator`（dev/doc/MCP 注册的同一个 daemon）。 */
 export async function orchestratorHome(): Promise<string> {
-  return join(await appDataDir(), "orchestrator");
+  const root = projectRoot();
+  if (!root) {
+    throw new Error("未配置 VITE_AGENT_SENTINEL_ROOT（AgentSentinel 项目根目录）");
+  }
+  return join(root, ".claude", "orchestrator");
 }
 
-async function healthy(): Promise<boolean> {
+/** 读取项目 daemon.json 得到实际 host:port；daemon 重启换端口后也能跟上。 */
+export async function daemonBase(): Promise<string> {
   try {
-    const response = await tauriFetch(`${DAEMON_BASE}/health`);
+    const raw = await readTextFile(await join(await orchestratorHome(), "daemon.json"));
+    const info = JSON.parse(raw) as { host?: unknown; port?: unknown };
+    if (typeof info.host === "string" && typeof info.port === "number") {
+      return `http://${info.host}:${info.port}`;
+    }
+  } catch {
+    // daemon.json 尚不存在或不可读
+  }
+  return FALLBACK_BASE;
+}
+
+async function healthy(base: string): Promise<boolean> {
+  try {
+    const response = await tauriFetch(`${base}/health`);
     return response.ok;
   } catch {
     return false;
   }
 }
 
-/** 拉起隔离 daemon（cwd=项目根，home=appData/orchestrator）；已在线则跳过。 */
+/** 已在线则复用；否则用项目默认 home 在 8765 拉起 daemon。 */
 async function startDaemonOnce(): Promise<void> {
-  if (await healthy()) return;
+  if (await healthy(await daemonBase())) return;
   const root = projectRoot();
-  if (!root) {
-    throw new Error("未配置 VITE_AGENT_SENTINEL_ROOT（AgentSentinel 项目根目录）");
-  }
   const home = await orchestratorHome();
   const command = Command.create(
     "start-daemon",
@@ -53,10 +70,10 @@ async function startDaemonOnce(): Promise<void> {
   daemonChild = await command.spawn();
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (await healthy()) return;
+    if (await healthy(await daemonBase())) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`daemon 启动超时（cwd=${root}）`);
+  throw new Error(`daemon 启动超时（home=${home}）`);
 }
 
 /** StrictMode 双挂载/并发调用共享同一次启动，避免双拉 daemon 与端口竞争。 */
@@ -96,7 +113,7 @@ async function requestJSON<T>(path: string, init: RequestInit = {}): Promise<T> 
     ...(await tokenHeader()),
     ...(init.headers as Record<string, string> | undefined),
   };
-  const response = await tauriFetch(`${DAEMON_BASE}${path}`, { ...init, headers });
+  const response = await tauriFetch(`${await daemonBase()}${path}`, { ...init, headers });
   const raw = await response.text();
   let payload: unknown = null;
   try {
@@ -128,6 +145,10 @@ export async function stopRole(role: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role }),
   });
+}
+
+export async function eventStreamUrl(): Promise<string> {
+  return `${await daemonBase()}/events`;
 }
 
 /** plugin-http fetch（带 Bearer），供 SSE 读取循环使用。 */

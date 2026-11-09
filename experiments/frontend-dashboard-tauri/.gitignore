@@ -14,3 +14,6 @@ src-tauri/gen/
 
 # 本机镜像配置（不提交）
 .cargo/
+
+# 本机生成的能力文件（含绝对路径，不提交）
+src-tauri/capabilities/local.dev.json

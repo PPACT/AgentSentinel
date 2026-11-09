@@ -244,6 +244,9 @@ def _tail_lines(path: Path, limit: int) -> list[str]:
     except OSError:
         return []
     lines = data.split(b"\n")
+    if read_size < size and lines:
+        # 读窗口从文件中间开始，首段是残行，丢弃以免按 GBK 误判。
+        lines.pop(0)
     if lines and lines[-1] == b"":
         lines.pop()
     return [_decode_log_line(line.rstrip(b"\r")) for line in lines][-limit:]

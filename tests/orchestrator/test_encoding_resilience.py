@@ -102,6 +102,15 @@ def test_tail_lines_decodes_legacy_gbk(tmp_path: Path) -> None:
     assert service._tail_lines(log, 10) == ["旧日志", "新日志"]
 
 
+def test_tail_lines_drops_partial_first_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service, "LOG_CHUNK_BYTES", 12)
+    log = tmp_path / "daemon.log"
+    log.write_bytes(b"AAAA\nBBBB\nCCCC\n")
+    assert service._tail_lines(log, 10) == ["BBBB", "CCCC"]
+
+
 def test_daemon_start_forces_utf8_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

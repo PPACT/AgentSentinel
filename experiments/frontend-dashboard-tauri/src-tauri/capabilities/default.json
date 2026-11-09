@@ -1,0 +1,36 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "C1 minimal permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-kill",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "start-daemon",
+          "cmd": "uv",
+          "args": ["run", "python", "-m", "tools.orchestrator.service", "--serve", "--port", "8765"],
+          "sidecar": false
+        }
+      ]
+    },
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "http://127.0.0.1:8765/**" }]
+    },
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [{ "url": "http://127.0.0.1:8765/**" }]
+    },
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [
+        { "path": "$APPDATA/orchestrator/token" },
+        { "path": "$APPDATA/orchestrator/daemon.json" }
+      ]
+    }
+  ]
+}

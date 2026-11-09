@@ -63,6 +63,19 @@ npm run tauri dev
     -Body '{"role":"demo"}'
   ```
 
+## 一键启动（release exe）
+
+首次构建（一次即可，产物在 `.claude/tauri-target/release/`，不进 git）：
+
+```bash
+npm run tauri build -- --no-bundle
+```
+
+之后**双击 `start-console.cmd`** 即可打开前端窗口，无需终端、无需敲命令。release exe 内嵌前端资源
+（不依赖 Vite dev server），启动时自动拉起隔离 daemon；需要本机 `uv` 在 PATH 中。
+
+> 该 exe 是本机开发构建，未做安装包/签名/自动更新；分发与优雅退出属阶段 C3。
+
 ## 校验
 
 ```bash

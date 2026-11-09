@@ -63,18 +63,17 @@ npm run tauri dev
     -Body '{"role":"demo"}'
   ```
 
-## 一键启动（release exe）
+## 开发期一键启动（双击）
 
-首次构建（一次即可，产物在 `.claude/tauri-target/release/`，不进 git）：
+**双击 `start_frontend.bat`** 即可打开开发窗口（等价 `npm run tauri dev`，带热更新）。
+窗口保留控制台用于显示 Vite/Tauri 日志；关闭控制台或窗口即停止开发进程。
 
-```bash
-npm run tauri build -- --no-bundle
-```
+脚本会：
+- 将 `~/.cargo/bin` 加入 PATH、设置 `VITE_AGENT_SENTINEL_ROOT`；
+- 通过 `scripts/tauri.mjs` 自动设置 `CARGO_TARGET_DIR=<项目根>/.claude/tauri-target`；
+- 直接执行 `npm run tauri dev`，修改前端代码后热更新。
 
-之后**双击 `start-console.cmd`** 即可打开前端窗口，无需终端、无需敲命令。release exe 内嵌前端资源
-（不依赖 Vite dev server），启动时自动拉起隔离 daemon；需要本机 `uv` 在 PATH 中。
-
-> 该 exe 是本机开发构建，未做安装包/签名/自动更新；分发与优雅退出属阶段 C3。
+> 开发期（C1/C2）**不要**执行 `npm run tauri build`；release exe 与安装包留到阶段 C3。
 
 ## 校验
 

@@ -7,6 +7,7 @@ import {
   formatAgent,
   formatTask,
   isDaemonDown,
+  shortTimestamp,
 } from "./format";
 
 describe("formatAgent", () => {
@@ -63,6 +64,14 @@ describe("daemonSummary", () => {
     expect(daemonSummary({ pid: 9, host: "127.0.0.1", port: 8954, started_at: "t0" })).toBe(
       "pid 9 · 127.0.0.1:8954 · 启动于 t0",
     );
+  });
+});
+
+describe("shortTimestamp", () => {
+  it("formats to local MM-DD HH:mm:ss and passes through invalid values", () => {
+    expect(shortTimestamp(new Date(2026, 10, 9, 9, 5, 3).toISOString())).toBe("11-09 09:05:03");
+    expect(shortTimestamp("not-a-date")).toBe("not-a-date");
+    expect(shortTimestamp(null)).toBe("—");
   });
 });
 

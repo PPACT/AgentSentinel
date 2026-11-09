@@ -6,22 +6,32 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatTask } from "@/lib/format";
+import { formatTask, shortTimestamp } from "@/lib/format";
 import type { Task } from "@/lib/types";
 
 interface TaskTableProps {
   tasks: Task[];
 }
 
-const COLUMNS = ["task_id", "from_role", "to_role", "intent", "status", "updated_at"];
+/** 右侧 Tasks 栏较窄：固定列宽 + 截断，避免横向溢出。 */
+const COLUMNS = [
+  { key: "task_id", label: "task_id", width: "w-[32%]" },
+  { key: "from_role", label: "from_role", width: "w-[11%]" },
+  { key: "to_role", label: "to_role", width: "w-[11%]" },
+  { key: "intent", label: "intent", width: "w-[16%]" },
+  { key: "status", label: "status", width: "w-[13%]" },
+  { key: "updated_at", label: "updated_at", width: "w-[17%]" },
+] as const;
 
 export function TaskTable({ tasks }: TaskTableProps) {
   return (
-    <Table>
+    <Table className="table-fixed">
       <TableHeader>
         <TableRow>
           {COLUMNS.map((column) => (
-            <TableHead key={column}>{column}</TableHead>
+            <TableHead key={column.key} className={column.width}>
+              {column.label}
+            </TableHead>
           ))}
         </TableRow>
       </TableHeader>
@@ -37,12 +47,27 @@ export function TaskTable({ tasks }: TaskTableProps) {
             const row = formatTask(task);
             return (
               <TableRow key={`${row.taskId}-${row.updatedAt}`}>
-                <TableCell className="font-mono text-xs text-zinc-200">{row.taskId}</TableCell>
-                <TableCell className="text-zinc-300">{row.fromRole}</TableCell>
-                <TableCell className="text-zinc-300">{row.toRole}</TableCell>
-                <TableCell className="font-mono text-xs text-zinc-400">{row.intent}</TableCell>
-                <TableCell className="font-mono text-xs text-zinc-300">{row.status}</TableCell>
-                <TableCell className="font-mono text-xs text-zinc-400">{row.updatedAt}</TableCell>
+                <TableCell className="truncate font-mono text-xs text-zinc-200" title={row.taskId}>
+                  {row.taskId}
+                </TableCell>
+                <TableCell className="truncate text-zinc-300" title={row.fromRole}>
+                  {row.fromRole}
+                </TableCell>
+                <TableCell className="truncate text-zinc-300" title={row.toRole}>
+                  {row.toRole}
+                </TableCell>
+                <TableCell className="truncate font-mono text-xs text-zinc-400" title={row.intent}>
+                  {row.intent}
+                </TableCell>
+                <TableCell className="truncate font-mono text-xs text-zinc-300" title={row.status}>
+                  {row.status}
+                </TableCell>
+                <TableCell
+                  className="truncate font-mono text-xs text-zinc-400"
+                  title={row.updatedAt}
+                >
+                  {shortTimestamp(task.updated_at)}
+                </TableCell>
               </TableRow>
             );
           })

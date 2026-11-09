@@ -28,6 +28,18 @@ export function formatTask(task: Task | null | undefined) {
   };
 }
 
+/** 窄栏用短时间：`MM-DD HH:mm:ss`（本地时区）；无法解析时原样返回。 */
+export function shortTimestamp(value: unknown): string {
+  const raw = text(value);
+  if (raw === "—") return raw;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`;
+}
+
 export function daemonSummary(daemon: DaemonInfo | null | undefined): string {
   if (!daemon) return "中控未启动";
   return `pid ${text(daemon.pid)} · ${text(daemon.host)}:${text(daemon.port)} · 启动于 ${text(

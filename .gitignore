@@ -21,6 +21,7 @@ secrets*.json
 .claude/skills/
 .claude/mailbox/
 .claude/orchestrator/
+.claude/tauri-target/
 docs/local/
 
 # ===== Python 虚拟环境 =====

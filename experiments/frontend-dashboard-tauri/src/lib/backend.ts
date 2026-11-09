@@ -46,7 +46,7 @@ async function startDaemonOnce(): Promise<void> {
   }
   const home = await orchestratorHome();
   const command = Command.create(
-    "uv",
+    "start-daemon",
     ["run", "python", "-m", "tools.orchestrator.service", "--serve", "--port", "8765"],
     { cwd: root, env: { SENTINEL_ORCH_HOME: home } },
   );

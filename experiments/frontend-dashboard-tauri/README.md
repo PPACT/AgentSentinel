@@ -16,7 +16,7 @@ Rust 端只做插件初始化与 `Command` 拉起 Python daemon，网络/SSE/状
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `VITE_AGENT_SENTINEL_ROOT` | 是 | AgentSentinel 项目根（daemon 的 `cwd`，用于 `uv run ...`） |
+| `VITE_AGENT_SENTINEL_ROOT` | 否 | AgentSentinel 项目根（daemon 的 `cwd`）。`npm run tauri ...` 会由 `scripts/tauri.mjs` 自动设为项目根；只有直接跑 `vite`/`cargo` 时才需要手动设置。 |
 
 daemon 的 `SENTINEL_ORCH_HOME` 由应用固定为 **`appDataDir()/orchestrator`**（Windows 下即
 `%APPDATA%\com.agentsentinel.console\orchestrator`），与 capability 的 `$APPDATA/orchestrator/*` 一致。
@@ -26,12 +26,16 @@ daemon 的 `SENTINEL_ORCH_HOME` 由应用固定为 **`appDataDir()/orchestrator`
 ```powershell
 cd experiments/frontend-dashboard-tauri
 npm install
-$env:VITE_AGENT_SENTINEL_ROOT = (Resolve-Path ../..).Path
 npm run tauri dev
 ```
 
 应用启动时：若 `http://127.0.0.1:8765/health` 不可用，则用 `uv run python -m tools.orchestrator.service
 --serve --port 8765` 拉起隔离 daemon；失败会在顶栏下方显示可读错误。关闭窗口时仅回收本应用拉起的 daemon。
+
+> **构建目录**：`npm run tauri ...` 通过 `scripts/tauri.mjs` 把 `CARGO_TARGET_DIR` 固定为
+> `<项目根>/.claude/tauri-target`。Windows 下沙箱/工具可能给项目树打上 Low 完整性标签，
+> 产物若继承该标签会无法写 `%LOCALAPPDATA%`，Tauri/WebView2 启动时报 `os error 5`。
+> 直接用 `cargo build` 时请自行设置同一环境变量。
 
 ## 隔离数据与「空表」说明
 

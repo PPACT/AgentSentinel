@@ -10,6 +10,7 @@ import argparse
 import hmac
 import json
 import os
+import queue
 import re
 import secrets
 import signal
@@ -42,6 +43,9 @@ DEFAULT_HOST = "127.0.0.1"
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 DASHBOARD_REFRESH_ENV = "SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS"
 DEFAULT_DASHBOARD_REFRESH_SECONDS = 0.0
+SSE_PING_ENV = "SENTINEL_ORCH_SSE_PING_SECONDS"
+DEFAULT_SSE_PING_SECONDS = 20.0
+WATCH_DEBOUNCE_SECONDS = 0.15
 
 
 def dashboard_refresh_seconds() -> float:
@@ -52,6 +56,16 @@ def dashboard_refresh_seconds() -> float:
         return max(0.0, float(raw))
     except ValueError:
         return DEFAULT_DASHBOARD_REFRESH_SECONDS
+
+
+def sse_ping_seconds() -> float:
+    raw = os.environ.get(SSE_PING_ENV, "").strip()
+    if not raw:
+        return DEFAULT_SSE_PING_SECONDS
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return DEFAULT_SSE_PING_SECONDS
 
 
 def worker_mode() -> str:
@@ -118,18 +132,70 @@ def supports_ansi_clear() -> bool:
         return False
 
 
+def _render_agents_update(snapshot: dict[str, Any], clear: bool) -> None:
+    if clear:
+        sys.stdout.write("\033[2J\033[H")
+    else:
+        sys.stdout.write("\n" + "-" * 60 + "\n")
+    sys.stdout.write(f"[{utc_now()}] 已注册 agent\n")
+    sys.stdout.write(format_agents_table(snapshot["agents"]) + "\n")
+    sys.stdout.flush()
+
+
 def _dashboard_loop(daemon: Daemon, port: int, refresh: float, stop: threading.Event) -> None:
     del port  # 端口只在横幅里展示；周期刷新只重绘 agents 表
     clear = supports_ansi_clear()
     while not stop.wait(refresh):
-        if clear:
-            sys.stdout.write("\033[2J\033[H")
-        else:
-            sys.stdout.write("\n" + "-" * 60 + "\n")
-        sys.stdout.write(f"[{utc_now()}] 已注册 agent\n")
-        agents: list[dict[str, Any]] = daemon.status()["agents"]
-        sys.stdout.write(format_agents_table(agents) + "\n")
-        sys.stdout.flush()
+        _render_agents_update(daemon.status(), clear)
+
+
+def _agents_projection(snapshot: dict[str, Any]) -> tuple[tuple[str, str, bool, str], ...]:
+    return tuple(
+        sorted(
+            (
+                str(agent.get("role", "")),
+                str(agent.get("status", "")),
+                bool(agent.get("alive")),
+                str(agent.get("current_task_id") or ""),
+            )
+            for agent in snapshot.get("agents", [])
+        )
+    )
+
+
+def _watch_loop(daemon: Daemon, stop: threading.Event, show_heartbeat: bool) -> None:
+    clear = supports_ansi_clear()
+    previous = _agents_projection(daemon.status())
+    last_seen = daemon.revision
+    while not stop.is_set():
+        revision = daemon.wait_for_change(last_seen)
+        if stop.is_set():
+            break
+        if revision == last_seen:
+            continue
+        snapshot = daemon.status()
+        projection = _agents_projection(snapshot)
+        last_seen = revision
+        if show_heartbeat or projection != previous:
+            _render_agents_update(snapshot, clear)
+            previous = projection
+
+
+def _offer_latest(target: queue.Queue[dict[str, Any]], frame: dict[str, Any]) -> None:
+    """订阅者队列只保留最新帧：慢客户端不阻塞发布方。"""
+    try:
+        target.put_nowait(frame)
+        return
+    except queue.Full:
+        pass
+    try:
+        target.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        target.put_nowait(frame)
+    except queue.Full:
+        pass
 
 
 def default_home() -> Path:
@@ -209,12 +275,74 @@ class Daemon:
         self._stopping = threading.Event()
         self._stop_monitor = threading.Event()
         self._stop_dashboard = threading.Event()
+        self._revision = 0
+        self._condition = threading.Condition()
+        self._subscribers: list[queue.Queue[dict[str, Any]]] = []
         self.router.startup_recovery()
 
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
         data["alive"] = process_alive(record.pid)
         return data
+
+    @property
+    def revision(self) -> int:
+        with self._condition:
+            return self._revision
+
+    @property
+    def is_stopping(self) -> bool:
+        return self._stopping.is_set()
+
+    def wait_for_change(self, last_seen: int, timeout: float = 0.5) -> int:
+        """阻塞等待 revision 变化（wait 期间释放锁），返回最新 revision。"""
+        with self._condition:
+            self._condition.wait(timeout)
+            if self._revision == last_seen:
+                return last_seen
+            self._condition.wait(WATCH_DEBOUNCE_SECONDS)
+            return self._revision
+
+    def subscribe(self) -> queue.Queue[dict[str, Any]]:
+        subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+        with self._condition:
+            self._subscribers.append(subscriber)
+        return subscriber
+
+    def unsubscribe(self, subscriber: queue.Queue[dict[str, Any]]) -> None:
+        with self._condition:
+            if subscriber in self._subscribers:
+                self._subscribers.remove(subscriber)
+
+    def _publish(self, event: str = "snapshot") -> None:
+        """写事务提交后调用：先取快照，再短暂持锁递增 revision 并通知。"""
+        snapshot = self.status()
+        with self._condition:
+            self._revision += 1
+            revision = self._revision
+            subscribers = tuple(self._subscribers)
+            self._condition.notify_all()
+        frame = {"revision": revision, "event": event, "data": snapshot}
+        for subscriber in subscribers:
+            _offer_latest(subscriber, frame)
+
+    def _publish_shutdown(self) -> None:
+        with self._condition:
+            self._revision += 1
+            revision = self._revision
+            subscribers = tuple(self._subscribers)
+            self._condition.notify_all()
+        frame = {"revision": revision, "event": "shutdown", "data": {"stopping": True}}
+        for subscriber in subscribers:
+            _offer_latest(subscriber, frame)
+
+    def _wait_subscribers(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._condition:
+                if not self._subscribers:
+                    return
+            time.sleep(0.02)
 
     def register(self, payload: dict[str, Any]) -> dict[str, Any]:
         role = _role(payload)
@@ -236,6 +364,7 @@ class Daemon:
             ),
         )
         self.registry.upsert(record)
+        self._publish()
         return self._agent_dict(record)
 
     def resolve(self, role: str) -> dict[str, Any] | None:
@@ -280,6 +409,7 @@ class Daemon:
             updated_at=now,
         )
         self.registry.upsert(record)
+        self._publish()
         return 200, {"agent": self._agent_dict(record)}
 
     def stop(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -292,16 +422,23 @@ class Daemon:
         except KeyError:
             reclaim = {"role": role, "note": "no live worker in launcher"}
         self.registry.set_status(role, "stopped")
+        self._publish()
         return 200, {"stopped": True, "role": role, "reclaim": reclaim}
 
     def need(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        return self.router.need(payload)
+        result = self.router.need(payload)
+        self._publish()
+        return result
 
     def ack(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        return self.router.ack(payload)
+        result = self.router.ack(payload)
+        self._publish()
+        return result
 
     def completed(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        return self.router.completed(payload)
+        result = self.router.completed(payload)
+        self._publish()
+        return result
 
     def tasks(self, *, role: str = "", status: str = "") -> dict[str, Any]:
         return self.router.tasks(role=role, status=status)
@@ -329,13 +466,19 @@ class Daemon:
         role = _role(payload)
         raw_task_id = payload.get("task_id")
         task_id = raw_task_id.strip() if isinstance(raw_task_id, str) else ""
-        return {"heartbeat": self.router.heartbeat(role, task_id)}
+        result = {"heartbeat": self.router.heartbeat(role, task_id)}
+        self._publish("heartbeat")
+        return result
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.router.upsert_step(payload)
+        result = self.router.upsert_step(payload)
+        self._publish()
+        return result
 
     def effect(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.router.add_effect(payload)
+        result = self.router.add_effect(payload)
+        self._publish()
+        return result
 
     def steps(self, task_id: str) -> dict[str, Any]:
         return self.router.steps(task_id)
@@ -359,17 +502,25 @@ class Daemon:
         )
         while not self._stop_monitor.wait(interval):
             try:
-                self.router.check_timeouts(self.ack_timeout)
-                self.router.check_heartbeats(self.lost_seconds)
-                self.router.check_task_budgets()
+                changed = bool(self.router.check_timeouts(self.ack_timeout))
+                changed = bool(self.router.check_heartbeats(self.lost_seconds)) or changed
+                changed = bool(self.router.check_task_budgets()) or changed
                 now = time.monotonic()
                 if now - self._last_watchdog >= self.watchdog_seconds:
                     self._last_watchdog = now
-                    self.router.watch_workers()
+                    changed = bool(self.router.watch_workers()) or changed
+                if changed:
+                    self._publish()
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出
                 continue
 
-    def serve(self, *, dashboard: bool = True) -> None:
+    def serve(
+        self,
+        *,
+        dashboard: bool = True,
+        watch: bool = False,
+        show_heartbeat: bool = False,
+    ) -> None:
         server = _Server((self.host, self.port), _Handler)
         server.daemon = self
         self.server = server
@@ -389,24 +540,37 @@ class Daemon:
         monitor = threading.Thread(target=self._monitor_loop, daemon=True)
         monitor.start()
         dashboard_thread: threading.Thread | None = None
+        watch_thread: threading.Thread | None = None
         if dashboard:
             print(render_dashboard(self, port), flush=True)
-            refresh = dashboard_refresh_seconds()
-            if refresh > 0:
-                dashboard_thread = threading.Thread(
-                    target=_dashboard_loop,
-                    args=(self, port, refresh, self._stop_dashboard),
+            if watch:
+                watch_thread = threading.Thread(
+                    target=_watch_loop,
+                    args=(self, self._stop_dashboard, show_heartbeat),
                     daemon=True,
                 )
-                dashboard_thread.start()
+                watch_thread.start()
+            else:
+                refresh = dashboard_refresh_seconds()
+                if refresh > 0:
+                    dashboard_thread = threading.Thread(
+                        target=_dashboard_loop,
+                        args=(self, port, refresh, self._stop_dashboard),
+                        daemon=True,
+                    )
+                    dashboard_thread.start()
         try:
             server.serve_forever(poll_interval=0.2)
         finally:
             self._stop_monitor.set()
             self._stop_dashboard.set()
+            self._publish_shutdown()
             monitor.join(timeout=5)
             if dashboard_thread is not None:
                 dashboard_thread.join(timeout=5)
+            if watch_thread is not None:
+                watch_thread.join(timeout=5)
+            self._wait_subscribers(timeout=2.0)
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -418,6 +582,7 @@ class _Server(ThreadingHTTPServer):
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "SentinelOrchestrator/0.1"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -465,10 +630,54 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _write_event(self, revision: int, event: str, data: dict[str, Any]) -> None:
+        body = json.dumps(data, ensure_ascii=False)
+        frame = f"id: {revision}\nevent: {event}\ndata: {body}\n\n"
+        self.wfile.write(frame.encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_events(self) -> None:
+        daemon = self.daemon
+        subscriber = daemon.subscribe()
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            sent = daemon.revision
+            self._write_event(sent, "snapshot", daemon.status())
+            ping = sse_ping_seconds()
+            while True:
+                try:
+                    frame = subscriber.get(timeout=ping)
+                except queue.Empty:
+                    if daemon.is_stopping:
+                        break
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                revision = int(frame["revision"])
+                if revision <= sent:  # 并发发布可能乱序到达，丢弃旧帧
+                    continue
+                self._write_event(revision, str(frame["event"]), frame["data"])
+                sent = revision
+                if frame["event"] == "shutdown":
+                    break
+        except OSError:
+            return
+        finally:
+            daemon.unsubscribe(subscriber)
+
     def _dispatch(self, method: str) -> None:
         path = urlparse(self.path).path
         if not self._authorized(path):
             self._send(401, {"error": "unauthorized"})
+            return
+        if method == "GET" and path == "/events":
+            self._stream_events()
             return
         payload: dict[str, Any] = {}
         if method == "POST":
@@ -657,12 +866,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--home", default="")
     parser.add_argument("--no-dashboard", action="store_true")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--show-heartbeat", action="store_true")
     args = parser.parse_args(argv)
     home = Path(args.home).resolve() if args.home else default_home()
     try:
         daemon = Daemon(home, args.host, args.port)
         _install_signal_handlers(daemon)
-        daemon.serve(dashboard=not args.no_dashboard)
+        daemon.serve(
+            dashboard=not args.no_dashboard,
+            watch=args.watch,
+            show_heartbeat=args.show_heartbeat,
+        )
     except OSError as exc:
         print(f"orchestrator failed to start: {exc}", file=sys.stderr, flush=True)
         return 1

@@ -50,6 +50,8 @@ scripts\start_orchestrator.cmd -Action stop
 
 默认不周期刷新，只打印一次启动快照；设置 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS=<正秒数>` 可显式开启周期刷新，设为 `0` 只打印启动快照，无效/空值等同默认（不刷新）。需要查看当前状态时执行 `uv run python -m tools.orchestrator status`（或 MCP `orchestrator_status`）。`-Action start`（detached）不输出中控视图，只写日志。启动失败（如端口占用）打印可读错误并以非 0 退出。
 
+事件驱动刷新：`-Action foreground -Watch`（或 `uv run python -m tools.orchestrator.service --serve --watch`）在注册、停止、任务状态变化时重绘 agent 表，空闲不输出；仅 `last_heartbeat` 变化默认不重绘，加 `--show-heartbeat` 才会重绘。兼容 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS` 的周期刷新（未设置 `--watch` 时生效）。
+
 可选参数（默认值）：
 
 | 参数 | 默认 | 说明 |
@@ -62,12 +64,15 @@ scripts\start_orchestrator.cmd -Action stop
 | `-WatchdogSeconds` | `30` | 看护线程刷新 heartbeat 的间隔 |
 | `-AckTimeoutSeconds` | `120` | ACK 超时（首次超时重投一次） |
 | `-LostSeconds` | `120` | 无心跳判定失联 |
+| `-Watch` | 关闭 | `foreground` 下启用事件驱动刷新（等价 `--serve --watch`） |
 
 运行时数据都在 `.claude/orchestrator/`（gitignored）：`registry.sqlite3`、`token`、`daemon.json`、`logs/`、`run/`。
 
 ## 端点与 MCP 工具
 
-HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/shutdown`。
+HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/events` `/shutdown`。
+
+`GET /events`（SSE，Bearer token）：`200 text/event-stream; charset=utf-8`，先下发 `event: snapshot`，之后每次状态写入下发新帧；帧格式 `id: <revision>` / `event: snapshot|heartbeat|shutdown` / `data: <JSON>`，每 20s 发 `: ping` 保活（`SENTINEL_ORCH_SSE_PING_SECONDS` 可覆盖，主要用于测试）。慢客户端只保留最新快照；daemon 停止时下发 `shutdown` 并关闭连接。浏览器原生 `EventSource` 不能携带 `Authorization` 头，前端需用 `fetch()` + `ReadableStream`（或等价方式）附带 Bearer token。
 
 MCP（`.mcp.json` 中的 `sentinel` server）：`orchestrator_register/status/resolve/need/ack/completed/heartbeat/task/tasks`。新会话启动后加载。
 

@@ -32,7 +32,9 @@ param(
     [double]$WorkerTimeoutSeconds = 600,
     [double]$WatchdogSeconds = 30,
     [double]$AckTimeoutSeconds = 120,
-    [double]$LostSeconds = 120
+    [double]$LostSeconds = 120,
+
+    [switch]$Watch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,7 +63,9 @@ switch ($Action) {
         Write-Host "  worker mode: $WorkerMode"
         $code = 1
         try {
-            & uv run python -m tools.orchestrator.service --serve --port $Port
+            $serviceArgs = @('--serve', '--port', $Port)
+            if ($Watch) { $serviceArgs += '--watch' }
+            & uv run python -m tools.orchestrator.service @serviceArgs
             $code = $LASTEXITCODE
         }
         finally {

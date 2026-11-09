@@ -30,7 +30,9 @@ npm run tauri dev
 ```
 
 应用启动时：若 `http://127.0.0.1:8765/health` 不可用，则用 `uv run python -m tools.orchestrator.service
---serve --port 8765` 拉起隔离 daemon；失败会在顶栏下方显示可读错误。关闭窗口时仅回收本应用拉起的 daemon。
+--serve --port 8765` 拉起隔离 daemon；失败会在顶栏下方显示可读错误。**关闭窗口不保证回收 daemon**
+（优雅退出属阶段 C3）；开发时用 `POST /shutdown` 收掉（Bearer token 在
+`%APPDATA%\com.agentsentinel.console\orchestrator\token`）。
 
 > **构建目录**：`npm run tauri ...` 通过 `scripts/tauri.mjs` 把 `CARGO_TARGET_DIR` 固定为
 > `<项目根>/.claude/tauri-target`。Windows 下沙箱/工具可能给项目树打上 Low 完整性标签，

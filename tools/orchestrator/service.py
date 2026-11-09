@@ -214,6 +214,23 @@ def _offer_latest(target: queue.Queue[dict[str, Any]], frame: dict[str, Any]) ->
         pass
 
 
+def _decode_log_line(raw: bytes) -> str:
+    """日志行解码：UTF-8 优先；兼容旧版 cp936/GBK 日志；最后用替换字符兜底。"""
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _split_log_chunk(pending: bytes, chunk: bytes) -> tuple[list[str], bytes]:
+    """按换行切分日志块，返回已解码的完整行与未完成的尾行字节。"""
+    parts = (pending + chunk).split(b"\n")
+    rest = parts.pop()
+    return [_decode_log_line(line.rstrip(b"\r")) for line in parts], rest
+
+
 def _tail_lines(path: Path, limit: int) -> list[str]:
     if limit <= 0:
         return []
@@ -226,7 +243,10 @@ def _tail_lines(path: Path, limit: int) -> list[str]:
             data = stream.read(read_size)
     except OSError:
         return []
-    return data.decode("utf-8", errors="replace").splitlines()[-limit:]
+    lines = data.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    return [_decode_log_line(line.rstrip(b"\r")) for line in lines][-limit:]
 
 
 def default_home() -> Path:
@@ -764,7 +784,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         seq = 0
         offsets: dict[Path, int] = {}
-        pending: dict[Path, str] = {}
+        pending: dict[Path, bytes] = {}
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -798,7 +818,7 @@ class _Handler(BaseHTTPRequestHandler):
                     offset = offsets.get(path, 0)
                     if size < offset:  # 文件被截断/轮转
                         offset = 0
-                        pending[path] = ""
+                        pending[path] = b""
                     if size <= offset:
                         continue
                     try:
@@ -808,12 +828,10 @@ class _Handler(BaseHTTPRequestHandler):
                     except OSError:
                         continue
                     offsets[path] = offset + len(chunk)
-                    text = pending.get(path, "") + chunk.decode("utf-8", errors="replace")
-                    parts = text.split("\n")
-                    pending[path] = parts.pop()
-                    for line in parts:
+                    lines, pending[path] = _split_log_chunk(pending.get(path, b""), chunk)
+                    for line in lines:
                         seq += 1
-                        if not self._write_log_frame(seq, role, line.rstrip("\r")):
+                        if not self._write_log_frame(seq, role, line):
                             return
                         emitted = True
                 now = time.monotonic()

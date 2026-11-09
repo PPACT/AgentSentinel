@@ -73,6 +73,35 @@ def test_send_swallows_connection_reset() -> None:
     service._Handler._send(cast(Any, _HeaderResetHandler()), 200, {"ok": True})
 
 
+def test_decode_log_line_handles_legacy_gbk() -> None:
+    text = "远程主机强迫关闭了一个现有的连接。"
+    assert service._decode_log_line(text.encode()) == text
+    assert service._decode_log_line(text.encode("gbk")) == text
+    assert "�" in service._decode_log_line(b"\xff\xfe")
+
+
+def test_split_log_chunk_handles_mixed_encoding_and_partial_bytes() -> None:
+    legacy = "旧日志\n".encode("gbk")
+    current = "新日志\n".encode()
+    lines, rest = service._split_log_chunk(b"", legacy + current)
+    assert lines == ["旧日志", "新日志"]
+    assert rest == b""
+
+    payload = "中文".encode()
+    lines, rest = service._split_log_chunk(b"", payload[:2])
+    assert lines == []
+    assert rest == payload[:2]
+    lines, rest = service._split_log_chunk(rest, payload[2:] + b"\n")
+    assert lines == ["中文"]
+    assert rest == b""
+
+
+def test_tail_lines_decodes_legacy_gbk(tmp_path: Path) -> None:
+    log = tmp_path / "daemon.log"
+    log.write_bytes("旧日志\n".encode("gbk") + "新日志\n".encode())
+    assert service._tail_lines(log, 10) == ["旧日志", "新日志"]
+
+
 def test_daemon_start_forces_utf8_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

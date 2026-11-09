@@ -56,10 +56,19 @@ $env:PYTHONUTF8 = '1'
 
 switch ($Action) {
     'foreground' {
-        Write-Host "Starting orchestrator daemon in foreground (Ctrl+C to stop)..."
+        Write-Host "[AgentSentinel] 正在启动编排中控..."
         Write-Host "  home:        $env:SENTINEL_ORCH_HOME"
         Write-Host "  worker mode: $WorkerMode"
-        & uv run python -m tools.orchestrator.service --serve --port $Port
+        $code = 1
+        try {
+            & uv run python -m tools.orchestrator.service --serve --port $Port
+            $code = $LASTEXITCODE
+        }
+        finally {
+            Write-Host ""
+            Write-Host "[AgentSentinel] 编排中控已停止。"
+        }
+        exit $code
     }
     'start' {
         # daemon start polls /health internally and only returns success once healthy.

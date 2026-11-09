@@ -29,16 +29,17 @@ PowerShell：
 cmd.exe：
 
 ```bat
-rem 无参数：后台启动 daemon 并等待 /health 通过
+rem 无参数：前台中控面板（停止后窗口保留）
 scripts\start_orchestrator.cmd
 
 rem 带参数：原样转发给 start_orchestrator.ps1
 scripts\start_orchestrator.cmd -Action foreground
+scripts\start_orchestrator.cmd -Action start
 scripts\start_orchestrator.cmd -Action status
 scripts\start_orchestrator.cmd -Action stop
 ```
 
-双击 `scripts\start_orchestrator.cmd`（无参数）等价于后台启动：调用 `start_orchestrator.ps1 -Action start`，由 CLI 轮询 `/health`，通过后打印并退出（不保留常驻窗口）；失败时打印可读错误并等待约 10 秒。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
+双击/无参数运行 `.cmd` 进入前台中控：先打印「正在启动编排中控...」，随后显示横幅与 agent 表；Ctrl+C 或异常退出后打印「编排中控已停止」，窗口保留（按任意键关闭）。显式 `-Action start` 仍是 detached 后台启动并等待 health；`-Action status/stop` 原样转发。前台启动失败（uv 缺失、端口占用等）会打印可读错误并保留窗口。脚本沿用已设置的 `SENTINEL_ORCH_HOME`，便于隔离测试。
 
 ## 中控视图（foreground）
 

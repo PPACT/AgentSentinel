@@ -183,6 +183,18 @@ def test_start_failure_is_readable_and_nonzero(tmp_path: Path) -> None:
     assert "Traceback" not in combined, combined
 
 
+def test_output_has_no_ansi_when_redirected(tmp_path: Path) -> None:
+    home = tmp_path / "orch"
+    process = _spawn_service(home, env_overrides={"SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS": "0.2"})
+    try:
+        _wait_info(home)
+        time.sleep(0.5)
+    finally:
+        out, err = _stop(process)
+    assert "\x1b[" not in out, (out, err)
+    assert "---" in out, (out, err)
+
+
 def test_no_dashboard_prints_nothing(tmp_path: Path) -> None:
     home = tmp_path / "orch"
     process = _spawn_service(home, "--no-dashboard")

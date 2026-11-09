@@ -96,13 +96,36 @@ def render_dashboard(daemon: Daemon, port: int) -> str:
     return format_banner(daemon, port) + "\n\n" + format_agents_table(agents)
 
 
+def supports_ansi_clear() -> bool:
+    """终端支持 ANSI 清屏时返回 True；否则降级为分隔线重打印。"""
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        enabled = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if mode.value & enabled:
+            return True
+        return bool(kernel32.SetConsoleMode(handle, mode.value | enabled))
+    except (AttributeError, OSError):
+        return False
+
+
 def _dashboard_loop(daemon: Daemon, port: int, refresh: float, stop: threading.Event) -> None:
     del port  # 端口只在横幅里展示；周期刷新只重绘 agents 表
+    clear = supports_ansi_clear()
     while not stop.wait(refresh):
-        if sys.stdout.isatty():
+        if clear:
             sys.stdout.write("\033[2J\033[H")
         else:
-            sys.stdout.write("\n")
+            sys.stdout.write("\n" + "-" * 60 + "\n")
         sys.stdout.write(f"[{utc_now()}] 已注册 agent\n")
         agents: list[dict[str, Any]] = daemon.status()["agents"]
         sys.stdout.write(format_agents_table(agents) + "\n")

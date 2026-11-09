@@ -8,8 +8,8 @@ Rust 端只做插件初始化与 `Command` 拉起 Python daemon，网络/SSE/状
 - 前端：React 19、Vite 8、TypeScript 5.9、Tailwind v4、shadcn/ui（radix-nova 预设）、Inter / JetBrains Mono。
 - Rust：Tauri v2 + `plugin-shell` / `plugin-http` / `plugin-fs`；无自定义业务命令。
 - 数据：`plugin-http` 的 `fetch` + `ReadableStream` 读 `GET /events`；不使用 `EventSource`、无 `setInterval`、无循环轮询。
-- token：由 `plugin-fs` 从 app data 下的 `orchestrator/token` 读入 JS 内存，代理/打包产物中不出现 token。
-- 视口：顶栏 + 可拖拽 Agent/Task 双栏 + 底部可折叠 Console 占位；`Ctrl+K` 命令面板占位；日志虚拟滚动占位。
+- token：由 `plugin-fs` 从 `<项目根>/.claude/orchestrator/token` 读入 JS 内存（`scripts/tauri.mjs` 生成本机读取授权），代理/打包产物中不出现 token。
+- 视口：顶栏 + 可拖拽 Agent/Task 双栏 + 底部可折叠 Console（客户端事件流、虚拟滚动，上限 500 条）；`Ctrl+K` 命令面板；日志虚拟滚动。
 - 非目标：完整 C1 功能、日志流/stdin、打包分发、并入产品。
 
 ## 环境变量
@@ -78,6 +78,17 @@ npm run tauri dev
 
 > 开发期（C1/C2）**不要**执行 `npm run tauri build`；release exe 与安装包留到阶段 C3。
 
+## Console 日志流（C2）
+
+Console 现在订阅后端真实日志：
+
+- `GET /logs/stream?tail=100[&role=<role>]`（SSE，Bearer）：先回放每个 `logs/*.log` 的最后 `tail` 行，
+  之后持续推送新增行；帧格式 `id` + `event: log` + `data: {"role","line","ts"}`；新出现的角色日志
+  在约 2s 内自动纳入；每 20s 发 `: ping`。
+- 前端把日志行以 `[role] line` 前缀并入 Console（与连接/停止等客户端事件同一列表，虚拟滚动、上限 500 条）。
+- 当前覆盖 **orchestrator daemon 与 worker 日志**（`.claude/orchestrator/logs/*.log`）。dev/doc 等外部
+  Claude Code 窗口的终端输出不在 daemon 可见范围内；如需接入，需要会话侧主动把日志写入 daemon。
+
 ## 校验
 
 ```bash
@@ -93,5 +104,5 @@ cd src-tauri && cargo check
 ## 已知限制
 
 - 脚手架阶段：Agent/Task 数据来自 `/status` + `/tasks`；Console 展示**客户端事件**（连接/SSE/停止操作，虚拟滚动），后端日志流接口未实现（C2）。
-- 固定端口 `8765`；后续接入正式 daemon 时改读 `daemon.json` 并同步 capability URL scope。
+- daemon 地址优先读 `.claude/orchestrator/daemon.json`（运行中则复用）；仅在拉起新 daemon 时使用固定端口 `8765`；capability URL scope 为 `127.0.0.1:*`。
 - capability 改动后需重启 `tauri dev` 才生效。

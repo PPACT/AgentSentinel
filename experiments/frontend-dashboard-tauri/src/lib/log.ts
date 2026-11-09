@@ -30,3 +30,9 @@ export function appendBounded(logs: LogEntry[], entry: LogEntry, limit = 500): L
   const next = [...logs, entry];
   return next.length > limit ? next.slice(next.length - limit) : next;
 }
+
+/** 后端日志行 → Console 文本（带来源前缀）。 */
+export function logEventText(role: string | undefined, line: string): string {
+  const label = role?.trim() || "log";
+  return `[${label}] ${line}`;
+}

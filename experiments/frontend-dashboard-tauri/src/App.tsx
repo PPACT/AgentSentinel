@@ -11,12 +11,13 @@ import {
   eventStreamUrl,
   getStatus,
   getTasks,
+  logStreamUrl,
   stopDaemon,
   stopRole,
   streamFetch,
 } from "@/lib/backend";
 import { errorMessage } from "@/lib/format";
-import { appendBounded, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
+import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task } from "@/lib/types";
 
@@ -30,6 +31,7 @@ export default function App() {
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const logAbortRef = useRef<AbortController | null>(null);
   const tasksTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logIdRef = useRef(0);
 
@@ -61,24 +63,14 @@ export default function App() {
     }, 250);
   }, [refreshTasks]);
 
-  const startStream = useCallback(async () => {
+  const startStream = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setConnection("connecting");
     appendLog("info", "正在连接中控事件流…");
-    let url: string;
-    try {
-      url = await eventStreamUrl();
-    } catch (err) {
-      const message = errorMessage(err);
-      setError(message);
-      appendLog("error", message);
-      setConnection("error");
-      return;
-    }
     void consumeEventStream({
-      url,
+      url: eventStreamUrl,
       fetchImpl: streamFetch,
       signal: controller.signal,
       onFrame(frame) {
@@ -109,6 +101,32 @@ export default function App() {
     });
   }, [applySnapshot, appendLog, scheduleTasksRefresh]);
 
+  /** 后端真实日志流（logs/<role>.log + daemon.log）；与状态 SSE 分开，互不影响。 */
+  const startLogStream = useCallback(() => {
+    logAbortRef.current?.abort();
+    const controller = new AbortController();
+    logAbortRef.current = controller;
+    void consumeEventStream({
+      url: async () => `${await logStreamUrl()}?tail=100`,
+      fetchImpl: streamFetch,
+      signal: controller.signal,
+      onFrame(frame) {
+        if (frame.event !== "log") return;
+        const payload = parseEventData<{ role?: string; line?: string }>(frame);
+        if (payload?.line) appendLog("info", logEventText(payload.role, payload.line));
+      },
+      onState() {},
+      onError() {
+        // 状态流会提示连接错误；日志流保持静默重连，避免刷屏。
+      },
+    });
+  }, [appendLog]);
+
+  const reconnectStreams = useCallback(() => {
+    startStream();
+    startLogStream();
+  }, [startLogStream, startStream]);
+
   const refreshAll = useCallback(async () => {
     try {
       applySnapshot(await getStatus());
@@ -127,7 +145,8 @@ export default function App() {
         if (cancelled) return;
         appendLog("info", "daemon 已就绪，加载状态…");
         await refreshAll();
-        void startStream();
+        startStream();
+        startLogStream();
       } catch (err) {
         if (!cancelled) {
           const message = errorMessage(err);
@@ -148,10 +167,11 @@ export default function App() {
       cancelled = true;
       window.removeEventListener("keydown", onKeyDown);
       abortRef.current?.abort();
+      logAbortRef.current?.abort();
       if (tasksTimerRef.current !== null) clearTimeout(tasksTimerRef.current);
       void stopDaemon();
     };
-  }, [appendLog, refreshAll, startStream]);
+  }, [appendLog, refreshAll, startLogStream, startStream]);
 
   const handleStop = useCallback(
     async (role: string) => {
@@ -232,9 +252,7 @@ export default function App() {
         onRefresh={() => {
           void refreshAll();
         }}
-        onReconnect={() => {
-          void startStream();
-        }}
+        onReconnect={reconnectStreams}
         onClearLogs={() => setLogs([])}
       />
     </div>

@@ -151,6 +151,10 @@ export async function eventStreamUrl(): Promise<string> {
   return `${await daemonBase()}/events`;
 }
 
+export async function logStreamUrl(): Promise<string> {
+  return `${await daemonBase()}/logs/stream`;
+}
+
 /** plugin-http fetch（带 Bearer），供 SSE 读取循环使用。 */
 export async function streamFetch(url: string, init: RequestInit): Promise<Response> {
   const headers = { ...(await tokenHeader()), ...(init.headers as Record<string, string> | undefined) };

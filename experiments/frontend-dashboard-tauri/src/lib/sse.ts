@@ -65,7 +65,8 @@ export function nextRetryDelay(
 
 export interface EventStreamOptions {
   fetchImpl: (url: string, init: RequestInit) => Promise<Response>;
-  url: string;
+  /** 固定 URL 或每次重连时重新解析（daemon 重启可能换端口）。 */
+  url: string | (() => string | Promise<string>);
   signal: AbortSignal;
   onFrame: (frame: SSEFrame) => void;
   onState: (state: "open" | "closed" | "error") => void;
@@ -94,7 +95,8 @@ export async function consumeEventStream(options: EventStreamOptions): Promise<v
   while (!signal.aborted) {
     let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
-      const response = await fetchImpl(url, {
+      const streamUrl = typeof url === "function" ? await url() : url;
+      const response = await fetchImpl(streamUrl, {
         headers: { Accept: "text/event-stream", ...(await headers()) },
         signal,
       });

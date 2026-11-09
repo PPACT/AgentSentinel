@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { appendBounded, makeLogEntry } from "./log";
+import { appendBounded, logEventText, makeLogEntry } from "./log";
 
 describe("makeLogEntry", () => {
   it("formats time and keeps level/text", () => {
@@ -14,5 +14,13 @@ describe("appendBounded", () => {
     const logs = [makeLogEntry(1, "info", "a"), makeLogEntry(2, "info", "b")];
     const next = appendBounded(logs, makeLogEntry(3, "info", "c"), 2);
     expect(next.map((entry) => entry.id)).toEqual([2, 3]);
+  });
+});
+
+describe("logEventText", () => {
+  it("prefixes the role and falls back to log", () => {
+    expect(logEventText("dev", "started")).toBe("[dev] started");
+    expect(logEventText("", "line")).toBe("[log] line");
+    expect(logEventText(undefined, "line")).toBe("[log] line");
   });
 });

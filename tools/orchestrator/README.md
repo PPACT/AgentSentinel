@@ -70,7 +70,9 @@ scripts\start_orchestrator.cmd -Action stop
 
 ## 端点与 MCP 工具
 
-HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/events` `/shutdown`。
+HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/events` `/logs/stream` `/shutdown`。
+
+`GET /logs/stream?tail=100[&role=<role>]`（SSE）：回放 `logs/*.log` 的最后 `tail` 行并持续跟随新增行（新角色日志约 2s 内纳入）；帧为 `id` + `event: log` + `data: {"role","line","ts"}`，20s `: ping`。不传 `role` 时推送全部日志。
 
 `GET /events`（SSE，Bearer token）：`200 text/event-stream; charset=utf-8`，先下发 `event: snapshot`，之后每次状态写入下发新帧；帧格式 `id: <revision>` / `event: snapshot|heartbeat|shutdown` / `data: <JSON>`，每 20s 发 `: ping` 保活（`SENTINEL_ORCH_SSE_PING_SECONDS` 可覆盖，主要用于测试）。慢客户端只保留最新快照；daemon 停止时下发 `shutdown` 并关闭连接。浏览器原生 `EventSource` 不能携带 `Authorization` 头，前端需用 `fetch()` + `ReadableStream`（或等价方式）附带 Bearer token。
 

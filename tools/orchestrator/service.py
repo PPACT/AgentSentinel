@@ -46,6 +46,10 @@ DEFAULT_DASHBOARD_REFRESH_SECONDS = 0.0
 SSE_PING_ENV = "SENTINEL_ORCH_SSE_PING_SECONDS"
 DEFAULT_SSE_PING_SECONDS = 20.0
 WATCH_DEBOUNCE_SECONDS = 0.15
+LOG_TAIL_DEFAULT = 200
+LOG_TAIL_MAX = 1000
+LOG_POLL_SECONDS = 0.3
+LOG_CHUNK_BYTES = 64 * 1024
 
 
 def dashboard_refresh_seconds() -> float:
@@ -196,6 +200,21 @@ def _offer_latest(target: queue.Queue[dict[str, Any]], frame: dict[str, Any]) ->
         target.put_nowait(frame)
     except queue.Full:
         pass
+
+
+def _tail_lines(path: Path, limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            read_size = min(size, LOG_CHUNK_BYTES)
+            stream.seek(size - read_size)
+            data = stream.read(read_size)
+    except OSError:
+        return []
+    return data.decode("utf-8", errors="replace").splitlines()[-limit:]
 
 
 def default_home() -> Path:
@@ -677,6 +696,119 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             daemon.unsubscribe(subscriber)
 
+    def _write_log_frame(self, seq: int, role: str, line: str, event: str = "log") -> None:
+        payload = (
+            {"role": role, "line": line, "ts": utc_now()} if event == "log" else {"stopping": True}
+        )
+        frame = f"id: {seq}\nevent: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        self.wfile.write(frame.encode("utf-8"))
+        self.wfile.flush()
+
+    def _log_targets(self) -> list[tuple[str, Path]] | None:
+        """解析 ?role= 或列出 logs/*.log；非法 role 返回 None（已发送 400）。"""
+        logs_dir = self.daemon.home / "logs"
+        raw = parse_qs(urlparse(self.path).query).get("role", [""])[0].strip()
+        if raw:
+            if raw != "daemon" and not _ROLE_PATTERN.match(raw):
+                self._send(400, {"error": "invalid role"})
+                return None
+            return [(raw, logs_dir / f"{raw}.log")]
+        if not logs_dir.is_dir():
+            return []
+        targets: list[tuple[str, Path]] = []
+        for path in sorted(logs_dir.glob("*.log")):
+            role = path.stem
+            if role == "daemon" or _ROLE_PATTERN.match(role):
+                targets.append((role, path))
+        return targets
+
+    def _stream_logs(self) -> None:
+        """SSE 日志流：先回放每个文件最后 tail 行，再按文件增长持续推送。"""
+        targets = self._log_targets()
+        if targets is None:
+            return
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            tail = int(query.get("tail", [str(LOG_TAIL_DEFAULT)])[0])
+        except ValueError:
+            tail = LOG_TAIL_DEFAULT
+        tail = max(0, min(tail, LOG_TAIL_MAX))
+        specific_role = bool(query.get("role", [""])[0].strip())
+        logs_dir = self.daemon.home / "logs"
+        daemon = self.daemon
+        self.close_connection = True
+        seq = 0
+        offsets: dict[Path, int] = {}
+        pending: dict[Path, str] = {}
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            for role, path in targets:
+                for line in _tail_lines(path, tail):
+                    seq += 1
+                    self._write_log_frame(seq, role, line)
+                try:
+                    offsets[path] = path.stat().st_size
+                except OSError:
+                    offsets[path] = 0
+            ping = sse_ping_seconds()
+            last_emit = time.monotonic()
+            rescan_at = last_emit + 2.0
+            while True:
+                if daemon.is_stopping:
+                    seq += 1
+                    self._write_log_frame(seq, "daemon", "", event="shutdown")
+                    break
+                emitted = False
+                for role, path in targets:
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        continue
+                    offset = offsets.get(path, 0)
+                    if size < offset:  # 文件被截断/轮转
+                        offset = 0
+                        pending[path] = ""
+                    if size <= offset:
+                        continue
+                    try:
+                        with path.open("rb") as stream:
+                            stream.seek(offset)
+                            chunk = stream.read(size - offset)
+                    except OSError:
+                        continue
+                    offsets[path] = offset + len(chunk)
+                    text = pending.get(path, "") + chunk.decode("utf-8", errors="replace")
+                    parts = text.split("\n")
+                    pending[path] = parts.pop()
+                    for line in parts:
+                        seq += 1
+                        self._write_log_frame(seq, role, line.rstrip("\r"))
+                        emitted = True
+                now = time.monotonic()
+                if not specific_role and now >= rescan_at:
+                    rescan_at = now + 2.0
+                    known = {path for _, path in targets}
+                    for path in sorted(logs_dir.glob("*.log")):
+                        role = path.stem
+                        if path in known or not (role == "daemon" or _ROLE_PATTERN.match(role)):
+                            continue
+                        targets.append((role, path))
+                        offsets[path] = 0
+                if emitted:
+                    last_emit = now
+                elif now - last_emit >= ping:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    last_emit = now
+                time.sleep(LOG_POLL_SECONDS)
+        except OSError:
+            return
+
     def _dispatch(self, method: str) -> None:
         path = urlparse(self.path).path
         if not self._authorized(path):
@@ -684,6 +816,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if method == "GET" and path == "/events":
             self._stream_events()
+            return
+        if method == "GET" and path == "/logs/stream":
+            self._stream_logs()
             return
         payload: dict[str, Any] = {}
         if method == "POST":

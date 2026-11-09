@@ -294,10 +294,10 @@ class Daemon:
     def is_stopping(self) -> bool:
         return self._stopping.is_set()
 
-    def wait_for_change(self, last_seen: int, timeout: float = 0.5) -> int:
-        """阻塞等待 revision 变化（wait 期间释放锁），返回最新 revision。"""
+    def wait_for_change(self, last_seen: int) -> int:
+        """空闲时无超时阻塞（零唤醒）；被 notify_all 唤醒后去抖并返回最新 revision。"""
         with self._condition:
-            self._condition.wait(timeout)
+            self._condition.wait()
             if self._revision == last_seen:
                 return last_seen
             self._condition.wait(WATCH_DEBOUNCE_SECONDS)
@@ -578,6 +578,12 @@ class Daemon:
 
 class _Server(ThreadingHTTPServer):
     daemon: Daemon
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # SSE / keep-alive 客户端主动断开是正常情况，不打印 traceback。
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class _Handler(BaseHTTPRequestHandler):

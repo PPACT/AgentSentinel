@@ -279,6 +279,35 @@ def test_sse_ping_and_auth(tmp_path: Path) -> None:
         _stop(process)
 
 
+def test_sse_client_disconnect_keeps_daemon_healthy(tmp_path: Path) -> None:
+    home = tmp_path / "orch"
+    process = _spawn(home, "--no-dashboard", env_overrides={service.SSE_PING_ENV: "0.2"})
+    try:
+        _wait_info(home)
+        request = urllib.request.Request(
+            _url(home, "/events"),
+            headers={"Authorization": f"Bearer {_token(home)}"},
+            method="GET",
+        )
+        response = urllib.request.urlopen(request, timeout=10)
+        first_frame = b""
+        while True:
+            line = response.readline()
+            if not line or line in (b"\r\n", b"\n"):
+                break
+            first_frame += line
+        assert b"event: snapshot" in first_frame
+        response.close()
+        time.sleep(0.5)  # 让服务端 ping/写失败检测到断连
+        for _ in range(3):
+            assert _api(home, "POST", "/register", {"role": "dev", "pid": os.getpid()})[0] == 200
+            time.sleep(0.1)
+        assert _api(home, "GET", "/health")[0] == 200
+    finally:
+        out, err = _stop(process)
+    assert "Traceback" not in err, (out, err)
+
+
 def test_slow_subscriber_keeps_latest_snapshot(tmp_path: Path) -> None:
     daemon = service.Daemon(tmp_path / "orch")
     subscriber = daemon.subscribe()

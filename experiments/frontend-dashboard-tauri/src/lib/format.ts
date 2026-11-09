@@ -28,13 +28,30 @@ export function formatTask(task: Task | null | undefined) {
   };
 }
 
+function parseTimestamp(value: unknown): Date | null {
+  const raw = text(value);
+  if (raw === "—") return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function pad(part: number): string {
+  return String(part).padStart(2, "0");
+}
+
+/** 完整本地时间：`YYYY-MM-DD HH:mm:ss`（跟随系统时区，如北京时间）；无法解析时原样返回。 */
+export function localTimestamp(value: unknown): string {
+  const date = parseTimestamp(value);
+  if (!date) return text(value);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 /** 窄栏用短时间：`MM-DD HH:mm:ss`（本地时区）；无法解析时原样返回。 */
 export function shortTimestamp(value: unknown): string {
-  const raw = text(value);
-  if (raw === "—") return raw;
-  const date = new Date(raw);
-  if (Number.isNaN(date.getTime())) return raw;
-  const pad = (part: number) => String(part).padStart(2, "0");
+  const date = parseTimestamp(value);
+  if (!date) return text(value);
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
     date.getMinutes(),
   )}:${pad(date.getSeconds())}`;
@@ -42,7 +59,7 @@ export function shortTimestamp(value: unknown): string {
 
 export function daemonSummary(daemon: DaemonInfo | null | undefined): string {
   if (!daemon) return "中控未启动";
-  return `pid ${text(daemon.pid)} · ${text(daemon.host)}:${text(daemon.port)} · 启动于 ${text(
+  return `pid ${text(daemon.pid)} · ${text(daemon.host)}:${text(daemon.port)} · 启动于 ${localTimestamp(
     daemon.started_at,
   )}`;
 }

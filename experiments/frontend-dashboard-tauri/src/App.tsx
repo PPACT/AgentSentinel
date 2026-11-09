@@ -35,8 +35,8 @@ export default function App() {
   const tasksTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logIdRef = useRef(0);
 
-  const appendLog = useCallback((level: LogLevel, text: string) => {
-    const entry = makeLogEntry(logIdRef.current++, level, text);
+  const appendLog = useCallback((level: LogLevel, text: string, at?: Date) => {
+    const entry = makeLogEntry(logIdRef.current++, level, text, at);
     setLogs((prev) => appendBounded(prev, entry));
   }, []);
 
@@ -112,8 +112,12 @@ export default function App() {
       signal: controller.signal,
       onFrame(frame) {
         if (frame.event !== "log") return;
-        const payload = parseEventData<{ role?: string; line?: string }>(frame);
-        if (payload?.line) appendLog("info", logEventText(payload.role, payload.line));
+        const payload = parseEventData<{ role?: string; line?: string; ts?: string }>(frame);
+        if (payload?.line) {
+          const parsed = payload.ts ? new Date(payload.ts) : null;
+          const at = parsed && !Number.isNaN(parsed.getTime()) ? parsed : undefined;
+          appendLog("info", logEventText(payload.role, payload.line), at);
+        }
       },
       onState() {},
       onError() {

@@ -6,7 +6,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatTask, shortTimestamp } from "@/lib/format";
+import { formatTask, localTimestamp } from "@/lib/format";
 import type { Task } from "@/lib/types";
 
 interface TaskTableProps {
@@ -64,9 +64,9 @@ export function TaskTable({ tasks }: TaskTableProps) {
                 </TableCell>
                 <TableCell
                   className="truncate font-mono text-xs text-zinc-400"
-                  title={row.updatedAt}
+                  title={localTimestamp(task.updated_at)}
                 >
-                  {shortTimestamp(task.updated_at)}
+                  {localTimestamp(task.updated_at)}
                 </TableCell>
               </TableRow>
             );

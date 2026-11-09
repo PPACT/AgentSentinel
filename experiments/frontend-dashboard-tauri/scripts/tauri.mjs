@@ -47,6 +47,7 @@ writeFileSync(
 const child = spawn("tauri", process.argv.slice(2), {
   stdio: "inherit",
   shell: true,
+  windowsHide: true,
   env: {
     ...process.env,
     CARGO_TARGET_DIR: targetDir,

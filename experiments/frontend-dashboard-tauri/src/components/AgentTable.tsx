@@ -7,7 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatAgent } from "@/lib/format";
+import { formatAgent, localTimestamp } from "@/lib/format";
 import type { Agent } from "@/lib/types";
 
 interface AgentTableProps {
@@ -49,7 +49,12 @@ export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
                 <TableCell className={agent.alive ? "text-emerald-400" : "text-zinc-500"}>
                   {row.alive}
                 </TableCell>
-                <TableCell className="font-mono text-xs text-zinc-400">{row.lastHeartbeat}</TableCell>
+                <TableCell
+                  className="truncate font-mono text-xs text-zinc-400"
+                  title={localTimestamp(agent.last_heartbeat)}
+                >
+                  {localTimestamp(agent.last_heartbeat)}
+                </TableCell>
                 <TableCell className="font-mono text-xs text-zinc-400">{row.currentTask}</TableCell>
                 <TableCell>
                   <Button

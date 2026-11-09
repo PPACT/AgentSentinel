@@ -7,6 +7,7 @@ import {
   formatAgent,
   formatTask,
   isDaemonDown,
+  localTimestamp,
   shortTimestamp,
 } from "./format";
 
@@ -64,6 +65,19 @@ describe("daemonSummary", () => {
     expect(daemonSummary({ pid: 9, host: "127.0.0.1", port: 8954, started_at: "t0" })).toBe(
       "pid 9 · 127.0.0.1:8954 · 启动于 t0",
     );
+  });
+});
+
+describe("localTimestamp", () => {
+  it("formats local time as YYYY-MM-DD HH:mm:ss", () => {
+    const at = new Date(2026, 10, 9, 9, 5, 3);
+    expect(localTimestamp(at.toISOString())).toBe("2026-11-09 09:05:03");
+  });
+
+  it("returns raw text or placeholder when unparsable", () => {
+    expect(localTimestamp("not-a-date")).toBe("not-a-date");
+    expect(localTimestamp(null)).toBe("—");
+    expect(localTimestamp("")).toBe("—");
   });
 });
 

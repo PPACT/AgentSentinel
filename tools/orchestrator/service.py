@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import signal
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,73 @@ from tools.orchestrator.router import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+DASHBOARD_REFRESH_ENV = "SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS"
+DEFAULT_DASHBOARD_REFRESH_SECONDS = 5.0
+
+
+def dashboard_refresh_seconds() -> float:
+    raw = os.environ.get(DASHBOARD_REFRESH_ENV, "").strip()
+    if not raw:
+        return DEFAULT_DASHBOARD_REFRESH_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_DASHBOARD_REFRESH_SECONDS
+
+
+def worker_mode() -> str:
+    return os.environ.get("SENTINEL_ORCH_WORKER_MODE", "dummy").strip().lower() or "dummy"
+
+
+def format_agents_table(agents: list[dict[str, Any]]) -> str:
+    header = (
+        f"{'role':<10} {'pid':<8} {'status':<12} {'alive':<6} "
+        f"{'last_heartbeat':<26} current_task_id"
+    )
+    lines = [header]
+    if not agents:
+        lines.append("暂无已注册 agent")
+        return "\n".join(lines)
+    for agent in agents:
+        alive = "在线" if agent.get("alive") else "已停止"
+        lines.append(
+            f"{agent.get('role', '')!s:<10} {agent.get('pid', '')!s:<8} "
+            f"{agent.get('status', '')!s:<12} {alive:<6} "
+            f"{agent.get('last_heartbeat') or '-'!s:<26} "
+            f"{agent.get('current_task_id') or '-'!s}"
+        )
+    return "\n".join(lines)
+
+
+def format_banner(daemon: Daemon, port: int) -> str:
+    return "\n".join(
+        [
+            "AgentSentinel 编排中控已启动",
+            f"  pid:         {os.getpid()}",
+            f"  listen:      {daemon.host}:{port}",
+            f"  home:        {daemon.home}",
+            f"  worker mode: {worker_mode()}",
+            f"  started at:  {daemon.started_at}",
+        ]
+    )
+
+
+def render_dashboard(daemon: Daemon, port: int) -> str:
+    agents: list[dict[str, Any]] = daemon.status()["agents"]
+    return format_banner(daemon, port) + "\n\n" + format_agents_table(agents)
+
+
+def _dashboard_loop(daemon: Daemon, port: int, refresh: float, stop: threading.Event) -> None:
+    del port  # 端口只在横幅里展示；周期刷新只重绘 agents 表
+    while not stop.wait(refresh):
+        if sys.stdout.isatty():
+            sys.stdout.write("\033[2J\033[H")
+        else:
+            sys.stdout.write("\n")
+        sys.stdout.write(f"[{utc_now()}] 已注册 agent\n")
+        agents: list[dict[str, Any]] = daemon.status()["agents"]
+        sys.stdout.write(format_agents_table(agents) + "\n")
+        sys.stdout.flush()
 
 
 def default_home() -> Path:
@@ -117,6 +185,7 @@ class Daemon:
         self.started_at = utc_now()
         self._stopping = threading.Event()
         self._stop_monitor = threading.Event()
+        self._stop_dashboard = threading.Event()
         self.router.startup_recovery()
 
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
@@ -277,7 +346,7 @@ class Daemon:
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出
                 continue
 
-    def serve(self) -> None:
+    def serve(self, *, dashboard: bool = True) -> None:
         server = _Server((self.host, self.port), _Handler)
         server.daemon = self
         self.server = server
@@ -293,13 +362,28 @@ class Daemon:
             },
         )
         self._stop_monitor.clear()
+        self._stop_dashboard.clear()
         monitor = threading.Thread(target=self._monitor_loop, daemon=True)
         monitor.start()
+        dashboard_thread: threading.Thread | None = None
+        if dashboard:
+            print(render_dashboard(self, port), flush=True)
+            refresh = dashboard_refresh_seconds()
+            if refresh > 0:
+                dashboard_thread = threading.Thread(
+                    target=_dashboard_loop,
+                    args=(self, port, refresh, self._stop_dashboard),
+                    daemon=True,
+                )
+                dashboard_thread.start()
         try:
             server.serve_forever(poll_interval=0.2)
         finally:
             self._stop_monitor.set()
+            self._stop_dashboard.set()
             monitor.join(timeout=5)
+            if dashboard_thread is not None:
+                dashboard_thread.join(timeout=5)
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -549,11 +633,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--home", default="")
+    parser.add_argument("--no-dashboard", action="store_true")
     args = parser.parse_args(argv)
     home = Path(args.home).resolve() if args.home else default_home()
-    daemon = Daemon(home, args.host, args.port)
-    _install_signal_handlers(daemon)
-    daemon.serve()
+    try:
+        daemon = Daemon(home, args.host, args.port)
+        _install_signal_handlers(daemon)
+        daemon.serve(dashboard=not args.no_dashboard)
+    except OSError as exc:
+        print(f"orchestrator failed to start: {exc}", file=sys.stderr, flush=True)
+        return 1
     return 0
 
 

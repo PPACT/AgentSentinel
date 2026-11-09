@@ -106,6 +106,7 @@ def _daemon_start(home: Path, port: int) -> dict[str, Any]:
                 str(port),
                 "--home",
                 str(home),
+                "--no-dashboard",
             ],
             cwd=PROJECT_ROOT,
             env=environment,

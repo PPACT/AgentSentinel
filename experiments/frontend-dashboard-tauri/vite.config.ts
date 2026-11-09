@@ -20,7 +20,7 @@ export default defineConfig(() => ({
   clearScreen: false,
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {

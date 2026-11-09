@@ -13,9 +13,16 @@ interface CommandPaletteProps {
   onOpenChange: (open: boolean) => void;
   onRefresh: () => void;
   onReconnect: () => void;
+  onClearLogs: () => void;
 }
 
-export function CommandPalette({ open, onOpenChange, onRefresh, onReconnect }: CommandPaletteProps) {
+export function CommandPalette({
+  open,
+  onOpenChange,
+  onRefresh,
+  onReconnect,
+  onClearLogs,
+}: CommandPaletteProps) {
   return (
     <CommandDialog
       open={open}
@@ -43,6 +50,14 @@ export function CommandPalette({ open, onOpenChange, onRefresh, onReconnect }: C
             }}
           >
             重新连接 SSE
+          </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              onClearLogs();
+              onOpenChange(false);
+            }}
+          >
+            清空 Console 事件
           </CommandItem>
           <CommandItem onSelect={() => onOpenChange(false)}>
             关闭面板

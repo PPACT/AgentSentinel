@@ -16,6 +16,7 @@ import {
   streamFetch,
 } from "@/lib/backend";
 import { errorMessage } from "@/lib/format";
+import { appendBounded, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task } from "@/lib/types";
 
@@ -27,8 +28,15 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const tasksTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const logIdRef = useRef(0);
+
+  const appendLog = useCallback((level: LogLevel, text: string) => {
+    const entry = makeLogEntry(logIdRef.current++, level, text);
+    setLogs((prev) => appendBounded(prev, entry));
+  }, []);
 
   const applySnapshot = useCallback((snapshot: StatusSnapshot) => {
     setDaemon(snapshot.daemon);
@@ -58,6 +66,7 @@ export default function App() {
     const controller = new AbortController();
     abortRef.current = controller;
     setConnection("connecting");
+    appendLog("info", "正在连接中控事件流…");
     void consumeEventStream({
       url: `${DAEMON_BASE}/events`,
       fetchImpl: streamFetch,
@@ -68,17 +77,27 @@ export default function App() {
           applySnapshot(payload);
           setError(null);
         }
-        if (frame.event === "shutdown") setConnection("closed");
+        if (frame.event === "snapshot") {
+          appendLog("info", `snapshot #${frame.id ?? "-"} · agents=${payload?.agents?.length ?? 0}`);
+        }
+        if (frame.event === "shutdown") {
+          setConnection("closed");
+          appendLog("warn", "中控已停止（shutdown）");
+        }
         if (frame.event === "snapshot") scheduleTasksRefresh();
       },
       onState(state) {
         setConnection(state);
+        if (state === "open") appendLog("info", "SSE 已连接");
+        else if (state === "closed") appendLog("warn", "SSE 已关闭，准备重连");
+        else if (state === "error") appendLog("warn", "SSE 连接中断，正在重连");
       },
       onError(err) {
         setError(errorMessage(err));
+        appendLog("warn", errorMessage(err));
       },
     });
-  }, [applySnapshot, scheduleTasksRefresh]);
+  }, [applySnapshot, appendLog, scheduleTasksRefresh]);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -96,11 +115,14 @@ export default function App() {
       try {
         await ensureDaemon();
         if (cancelled) return;
+        appendLog("info", "daemon 已就绪，加载状态…");
         await refreshAll();
         startStream();
       } catch (err) {
         if (!cancelled) {
-          setError(errorMessage(err));
+          const message = errorMessage(err);
+          setError(message);
+          appendLog("error", message);
           setConnection("stopped");
         }
       }
@@ -119,22 +141,34 @@ export default function App() {
       if (tasksTimerRef.current !== null) clearTimeout(tasksTimerRef.current);
       void stopDaemon();
     };
-  }, [refreshAll, startStream]);
+  }, [appendLog, refreshAll, startStream]);
 
   const handleStop = useCallback(
     async (role: string) => {
       setPendingRole(role);
+      setAgents((prev) =>
+        prev.map((agent) => (agent.role === role ? { ...agent, status: "stopping" } : agent)),
+      );
+      appendLog("info", `正在停止 ${role}…`);
       try {
         await stopRole(role);
+        appendLog("info", `已停止 ${role}`);
         setError(null);
         await refreshTasks();
       } catch (err) {
-        setError(errorMessage(err));
+        const message = errorMessage(err);
+        appendLog("error", `停止 ${role} 失败：${message}`);
+        setError(message);
+        try {
+          applySnapshot(await getStatus());
+        } catch {
+          // 保留乐观状态，等待下一次 SSE 覆盖
+        }
       } finally {
         setPendingRole(null);
       }
     },
-    [refreshTasks],
+    [appendLog, applySnapshot, refreshTasks],
   );
 
   return (
@@ -179,7 +213,7 @@ export default function App() {
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize="28" minSize="10" collapsible>
-          <ConsolePanel />
+          <ConsolePanel logs={logs} />
         </ResizablePanel>
       </ResizablePanelGroup>
       <CommandPalette
@@ -189,6 +223,7 @@ export default function App() {
           void refreshAll();
         }}
         onReconnect={startStream}
+        onClearLogs={() => setLogs([])}
       />
     </div>
   );

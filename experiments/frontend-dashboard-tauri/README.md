@@ -89,6 +89,6 @@ cd src-tauri && cargo check
 
 ## 已知限制
 
-- 脚手架阶段：Agent/Task 数据来自 `/status` + `/tasks`，Console 为占位；日志流接口未实现。
+- 脚手架阶段：Agent/Task 数据来自 `/status` + `/tasks`；Console 展示**客户端事件**（连接/SSE/停止操作，虚拟滚动），后端日志流接口未实现（C2）。
 - 固定端口 `8765`；后续接入正式 daemon 时改读 `daemon.json` 并同步 capability URL scope。
 - capability 改动后需重启 `tauri dev` 才生效。

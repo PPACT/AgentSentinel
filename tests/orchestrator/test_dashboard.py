@@ -47,13 +47,13 @@ def test_table_lists_agents_with_alive_state() -> None:
 
 def test_refresh_seconds_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(service.DASHBOARD_REFRESH_ENV, raising=False)
-    assert service.dashboard_refresh_seconds() == 5.0
+    assert service.dashboard_refresh_seconds() == 0.0
     monkeypatch.setenv(service.DASHBOARD_REFRESH_ENV, "0")
     assert service.dashboard_refresh_seconds() == 0.0
     monkeypatch.setenv(service.DASHBOARD_REFRESH_ENV, "2.5")
     assert service.dashboard_refresh_seconds() == 2.5
     monkeypatch.setenv(service.DASHBOARD_REFRESH_ENV, "nope")
-    assert service.dashboard_refresh_seconds() == 5.0
+    assert service.dashboard_refresh_seconds() == 0.0
 
 
 def _wait_info(home: Path, timeout: float = 15.0) -> None:
@@ -119,6 +119,20 @@ def test_foreground_banner_and_empty_state(tmp_path: Path) -> None:
     assert str(home) in out
     assert "worker mode:" in out
     assert "暂无已注册 agent" in out
+
+
+def test_default_refresh_prints_only_startup_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(service.DASHBOARD_REFRESH_ENV, raising=False)
+    home = tmp_path / "orch"
+    process = _spawn_service(home)
+    try:
+        _wait_info(home)
+        time.sleep(0.5)
+    finally:
+        out, err = _stop(process)
+    assert out.count("已注册 agent") == 1, (out, err)
 
 
 def test_periodic_refresh_repeats_snapshot(tmp_path: Path) -> None:

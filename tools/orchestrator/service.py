@@ -41,7 +41,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 DASHBOARD_REFRESH_ENV = "SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS"
-DEFAULT_DASHBOARD_REFRESH_SECONDS = 5.0
+DEFAULT_DASHBOARD_REFRESH_SECONDS = 0.0
 
 
 def dashboard_refresh_seconds() -> float:

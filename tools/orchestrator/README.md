@@ -48,7 +48,7 @@ scripts\start_orchestrator.cmd -Action stop
 - 启动横幅：`AgentSentinel 编排中控已启动`、pid、`host:port`、home、worker mode、启动时间；
 - 已注册 agent 表：`role` / `pid` / `status` / `alive`（在线/已停止）/ `last_heartbeat` / `current_task_id`；无注册时显示「暂无已注册 agent」。
 
-默认每 5 秒刷新一次 agent 表；`SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS=<秒>` 可覆盖，设为 `0` 只打印启动快照。`-Action start`（detached）不输出中控视图，只写日志。启动失败（如端口占用）打印可读错误并以非 0 退出。
+默认不周期刷新，只打印一次启动快照；设置 `SENTINEL_ORCH_DASHBOARD_REFRESH_SECONDS=<正秒数>` 可显式开启周期刷新，设为 `0` 只打印启动快照，无效/空值等同默认（不刷新）。需要查看当前状态时执行 `uv run python -m tools.orchestrator status`（或 MCP `orchestrator_status`）。`-Action start`（detached）不输出中控视图，只写日志。启动失败（如端口占用）打印可读错误并以非 0 退出。
 
 可选参数（默认值）：
 

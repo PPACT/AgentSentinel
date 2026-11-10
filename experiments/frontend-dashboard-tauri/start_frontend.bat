@@ -78,10 +78,12 @@ if /i "%~1"=="--console" (
   call npm run tauri dev >> "%LOG%" 2>&1
 )
 set "CODE=%ERRORLEVEL%"
+if not defined CODE set "CODE=0"
 
 rem Distinguish "never showed the app window" from "app ran and then exited".
 set "RESULT=failed"
 %SystemRoot%\System32\findstr.exe /C:"agentsentinel-console.exe" "%LOG%" >nul 2>nul && set "RESULT=exited"
+if not defined RESULT set "RESULT=failed"
 > "%STATE%" echo %RESULT%:%CODE%
 >>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat end code=%CODE% result=%RESULT% log=%LOG%
 call :say "tauri dev ended with code %CODE% (%RESULT%)"

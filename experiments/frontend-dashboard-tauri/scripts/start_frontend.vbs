@@ -34,8 +34,13 @@ On Error GoTo 0
 ' The bat writes a unique run log and points frontend-dev.current at it.
 logPath = ReadCurrentLog(currentPath, defaultLogPath)
 statePath = logPath & ".state"
-state = ReadState(statePath)
-LogLaunch "vbs end rc=" & rc & " state=" & state
+state = ReadStateWithWait(statePath, 2000)
+If rc = 0 And (state = "" Or Left(state, 6) = "failed") Then
+  ' The state file may not be visible yet when the bat exits; the run log is
+  ' the source of truth for "the app window did start".
+  If LogContains(logPath, "agentsentinel-console.exe") Then state = "exited:0"
+End If
+LogLaunch "vbs end rc=" & rc & " state=" & state & " log=" & logPath & " statefile=" & statePath & " exists=" & fso.FileExists(statePath)
 
 Select Case rc
   Case 2
@@ -89,10 +94,19 @@ Function ReadCurrentLog(path, fallback)
     Err.Clear
     Exit Function
   End If
-  text = Trim(f.ReadAll)
+  text = f.ReadAll
   f.Close
   On Error GoTo 0
+  text = CleanPath(text)
   If Len(text) > 0 Then ReadCurrentLog = text
+End Function
+
+' VBScript Trim only removes spaces; echo writes CRLF, so strip CR/LF explicitly.
+Function CleanPath(value)
+  Dim text
+  text = Replace(value, vbCr, "")
+  text = Replace(text, vbLf, "")
+  CleanPath = Trim(text)
 End Function
 
 Function ReadState(path)
@@ -108,7 +122,56 @@ Function ReadState(path)
   text = f.ReadAll
   f.Close
   On Error GoTo 0
-  ReadState = Trim(text)
+  ReadState = CleanPath(text)
+End Function
+
+' The bat writes the state file just before exiting; on some machines the file
+' becomes visible a few ms after the child process ends. Retry briefly.
+Function ReadStateWithWait(path, timeoutMs)
+  Dim i, value, iterations
+  ReadStateWithWait = ""
+  iterations = timeoutMs \ 100
+  If iterations < 1 Then iterations = 1
+  For i = 1 To iterations
+    value = ReadState(path)
+    If Len(value) > 0 Then
+      ReadStateWithWait = value
+      Exit Function
+    End If
+    WScript.Sleep 100
+  Next
+End Function
+
+Function ReadAll(path)
+  Dim stream, text
+  ReadAll = ""
+  If Not fso.FileExists(path) Then Exit Function
+  On Error Resume Next
+  Set stream = CreateObject("ADODB.Stream")
+  If Err.Number <> 0 Then
+    Err.Clear
+    Exit Function
+  End If
+  stream.Type = 2
+  stream.Charset = "utf-8"
+  stream.Open
+  stream.LoadFromFile path
+  text = stream.ReadText(-1)
+  stream.Close
+  If Err.Number <> 0 Then
+    Err.Clear
+    Exit Function
+  End If
+  On Error GoTo 0
+  ReadAll = text
+End Function
+
+Function LogContains(path, needle)
+  Dim text
+  LogContains = False
+  text = ReadAll(path)
+  If Len(text) = 0 Then Exit Function
+  LogContains = (InStr(1, text, needle, vbTextCompare) > 0)
 End Function
 
 Function ReadTail(path, maxChars)

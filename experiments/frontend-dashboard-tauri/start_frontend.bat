@@ -16,13 +16,12 @@ for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 set "VITE_AGENT_SENTINEL_ROOT=%ROOT%"
 set "LOGDIR=%ROOT%\.claude\logs"
-set "LOG=%LOGDIR%\frontend-dev.log"
-set "STATE=%LOG%.state"
+set "LAUNCHLOG=%LOGDIR%\frontend-launch.log"
+set "CURRENT=%LOGDIR%\frontend-dev.current"
 cd /d "%~dp0"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>nul
-set "LAUNCHLOG=%LOGDIR%\frontend-launch.log"
 
-rem Diagnostics only: separate file, safe to append even while the app holds frontend-dev.log.
+rem Diagnostics only: separate file, safe to append even while an old run holds its log.
 >>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat start args=%~1 cwd=%CD%
 >>"%LAUNCHLOG%" echo PATH=%PATH%
 >>"%LAUNCHLOG%" %SystemRoot%\System32\where.exe npm 2>&1
@@ -43,6 +42,18 @@ if not errorlevel 1 (
   exit /b 3
 )
 
+rem Each run gets a unique log: a viewer/lingering process holding an old log
+rem can no longer block startup or make stale content look like a fresh run.
+set "LOG=%LOGDIR%\frontend-dev-%RANDOM%%RANDOM%%RANDOM%.log"
+set "STATE=%LOG%.state"
+> "%CURRENT%" echo %LOG%
+%SystemRoot%\System32\cmd.exe /c copy /y nul "%LOG%" >nul 2>nul
+if errorlevel 1 (
+  >>"%LAUNCHLOG%" echo [%DATE% %TIME%] cannot create run log %LOG%
+  exit /b 6
+)
+>>"%LOG%" echo [%DATE% %TIME%] run start
+
 %SystemRoot%\System32\where.exe npm >nul 2>nul
 if errorlevel 1 (
   call :say "npm not found in PATH. Install Node.js or open a terminal with npm available."
@@ -54,10 +65,6 @@ if errorlevel 1 (
   call :say "cargo not found. Install Rust (rustup) or add %USERPROFILE%\.cargo\bin to PATH."
   exit /b 5
 )
-
-rem Keep one previous run, then start a fresh log so state detection is unambiguous.
-if exist "%LOG%" move /y "%LOG%" "%LOG%.1" >nul 2>nul
-if exist "%STATE%" del /q "%STATE%" >nul 2>nul
 
 %SystemRoot%\System32\netstat.exe -ano | %SystemRoot%\System32\findstr.exe /C:":8765 " | %SystemRoot%\System32\findstr.exe /C:"LISTENING" >nul
 if not errorlevel 1 (
@@ -76,7 +83,7 @@ rem Distinguish "never showed the app window" from "app ran and then exited".
 set "RESULT=failed"
 %SystemRoot%\System32\findstr.exe /C:"agentsentinel-console.exe" "%LOG%" >nul 2>nul && set "RESULT=exited"
 > "%STATE%" echo %RESULT%:%CODE%
->>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat end code=%CODE% result=%RESULT%
+>>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat end code=%CODE% result=%RESULT% log=%LOG%
 call :say "tauri dev ended with code %CODE% (%RESULT%)"
 exit /b %CODE%
 

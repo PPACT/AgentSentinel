@@ -1202,12 +1202,14 @@ class Router:
         launcher: Launcher,
         token: str,
         orchestrator_url: str = "",
+        project: str = "",
     ) -> None:
         self.store = store
         self.registry = registry
         self.launcher = launcher
         self.token = token
         self.orchestrator_url = orchestrator_url
+        self.project = project
 
     def _remember_agent(
         self,
@@ -1231,6 +1233,7 @@ class Router:
                 command=command,
                 updated_at=now,
                 current_task_id=task_id,
+                project=self.project,
             )
         )
 

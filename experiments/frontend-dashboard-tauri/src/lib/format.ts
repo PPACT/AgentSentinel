@@ -14,6 +14,7 @@ export function formatAgent(agent: Agent | null | undefined) {
     alive: agent?.alive ? "在线" : "已停止",
     lastHeartbeat: text(agent?.last_heartbeat),
     currentTask: text(agent?.current_task_id),
+    project: text(agent?.project),
   };
 }
 
@@ -59,9 +60,18 @@ export function shortTimestamp(value: unknown): string {
 
 export function daemonSummary(daemon: DaemonInfo | null | undefined): string {
   if (!daemon) return "中控未启动";
+  const project = daemon.project ? ` · 项目 ${shortProject(daemon.project)}` : "";
   return `pid ${text(daemon.pid)} · ${text(daemon.host)}:${text(daemon.port)} · 启动于 ${localTimestamp(
     daemon.started_at,
-  )}`;
+  )}${project}`;
+}
+
+/** 项目路径 → 末级目录名，用于窄栏展示；空值返回占位。 */
+export function shortProject(project: unknown): string {
+  const raw = text(project);
+  if (raw === "—") return raw;
+  const parts = raw.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || raw;
 }
 
 const CONNECTION_LABELS: Record<ConnectionState, string> = {

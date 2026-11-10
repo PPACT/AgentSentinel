@@ -188,3 +188,54 @@ def test_shutdown_reclaims_all_workers(daemon: Path) -> None:
         time.sleep(0.1)
     assert process_alive(pid) is False
     assert process_alive(child_pid) is False
+
+
+def test_discover_reconciles_agent_liveness(daemon: Path) -> None:
+    status, _ = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "alive", "pid": os.getpid(), "status": "stopped"},
+    )
+    assert status == 200
+    status, _ = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "dead", "pid": 999_999_999, "status": "running"},
+    )
+    assert status == 200
+
+    status, body = _api(daemon, "POST", "/discover", {})
+    assert status == 200
+    assert body["discovered"] is True
+    by_role = {item["role"]: item for item in body["agents"]}
+    assert by_role["alive"]["alive"] is True
+    assert by_role["alive"]["status"] == "registered"
+    assert by_role["dead"]["alive"] is False
+    assert by_role["dead"]["status"] == "stopped"
+
+
+def test_register_scopes_agents_to_daemon_project(daemon: Path) -> None:
+    project = os.path.normcase(str(ROOT.resolve()))
+    status, body = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "dev", "pid": os.getpid(), "project": str(ROOT)},
+    )
+    assert status == 200
+    assert body["agent"]["project"] == project
+
+    status, body = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "doc", "pid": os.getpid(), "project": "C:\\other\\project"},
+    )
+    assert status == 409
+    assert "project mismatch" in body["error"]
+
+    status, body = _api(daemon, "GET", "/status")
+    assert status == 200
+    assert body["daemon"]["project"] == project

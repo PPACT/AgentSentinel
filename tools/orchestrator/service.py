@@ -53,6 +53,25 @@ LOG_CHUNK_BYTES = 64 * 1024
 REPORT_LINE_MAX = 4000
 
 
+class ProjectMismatch(ValueError):
+    """agent 上报的项目与 daemon 所属项目不一致。"""
+
+
+def _normalize_project(value: str | Path) -> str:
+    return os.path.normcase(str(Path(value).resolve()))
+
+
+def derive_project(home: Path) -> str:
+    """daemon 所属项目：显式 env 优先；默认取 <项目>/.claude/orchestrator 的祖父目录。"""
+    override = os.environ.get("SENTINEL_PROJECT_ROOT", "").strip()
+    if override:
+        return _normalize_project(override)
+    resolved = home.resolve()
+    if resolved.name == "orchestrator" and resolved.parent.name == ".claude":
+        return _normalize_project(resolved.parent.parent)
+    return _normalize_project(PROJECT_ROOT)
+
+
 def _configure_stdio(*streams: Any) -> None:
     """daemon 入口：编码失败时用替换字符，避免日志写入中断或产生乱码。"""
     for stream in streams:
@@ -309,6 +328,7 @@ def _str(value: object) -> str:
 class Daemon:
     def __init__(self, home: Path, host: str = DEFAULT_HOST, port: int = 0) -> None:
         self.home = home
+        self.project = derive_project(home)
         self.host = host
         self.port = port
         self.token = load_or_create_token(home)
@@ -320,6 +340,7 @@ class Daemon:
             registry=self.registry,
             launcher=self.launcher,
             token=self.token,
+            project=self.project,
         )
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
@@ -401,6 +422,11 @@ class Daemon:
 
     def register(self, payload: dict[str, Any]) -> dict[str, Any]:
         role = _role(payload)
+        reported_project = _str(payload.get("project")).strip()
+        if reported_project and _normalize_project(reported_project) != self.project:
+            raise ProjectMismatch(
+                f"project mismatch: daemon={self.project} agent={_normalize_project(reported_project)}"
+            )
         now = utc_now()
         record = AgentRecord(
             role=role,
@@ -417,6 +443,7 @@ class Daemon:
             cost_budget=(
                 _int(payload.get("cost_budget")) if payload.get("cost_budget") is not None else None
             ),
+            project=self.project,
         )
         self.registry.upsert(record)
         self._publish()
@@ -425,6 +452,22 @@ class Daemon:
     def resolve(self, role: str) -> dict[str, Any] | None:
         record = self.registry.get(role)
         return self._agent_dict(record) if record is not None else None
+
+    def discover(self) -> dict[str, Any]:
+        """手动检测：重新探测已登记 agent 的进程存活，修正 status 后返回最新列表。"""
+        changed = False
+        for record in self.registry.list():
+            alive = process_alive(record.pid)
+            if alive and record.status in ("stopped", "lost"):
+                changed = self.registry.set_status(record.role, "registered") or changed
+            elif not alive and record.status != "stopped":
+                changed = self.registry.set_status(record.role, "stopped") or changed
+        if changed:
+            self._publish()
+        return {
+            "discovered": True,
+            "agents": [self._agent_dict(record) for record in self.registry.list()],
+        }
 
     def status(self) -> dict[str, Any]:
         port = self.port
@@ -436,6 +479,7 @@ class Daemon:
                 "host": self.host,
                 "port": port,
                 "started_at": self.started_at,
+                "project": self.project,
             },
             "agents": [self._agent_dict(record) for record in self.registry.list()],
         }
@@ -462,6 +506,7 @@ class Daemon:
             last_heartbeat=now,
             command=f"dummy_worker --role {role}",
             updated_at=now,
+            project=self.project,
         )
         self.registry.upsert(record)
         self._publish()
@@ -900,6 +945,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._report_log(payload)
             return
 
+        if method == "POST" and path == "/discover":
+            self._send(200, self.daemon.discover())
+            return
+
         if method == "GET" and path == "/health":
             self._send(
                 200,
@@ -910,6 +959,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif method == "POST" and path == "/register":
             try:
                 self._send(200, {"agent": self.daemon.register(payload)})
+            except ProjectMismatch as exc:
+                self._send(409, {"error": str(exc)})
             except ValueError as exc:
                 self._send(400, {"error": str(exc)})
         elif method == "POST" and path == "/resolve":

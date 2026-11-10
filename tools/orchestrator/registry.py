@@ -26,6 +26,7 @@ _COLUMNS = (
     "current_task_id",
     "cost_tokens",
     "cost_budget",
+    "project",
 )
 
 
@@ -48,6 +49,7 @@ class AgentRecord:
     current_task_id: str = ""
     cost_tokens: int = 0
     cost_budget: int | None = None
+    project: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,6 +70,7 @@ def _row_to_record(row: sqlite3.Row) -> AgentRecord:
         current_task_id=str(row["current_task_id"] or ""),
         cost_tokens=int(row["cost_tokens"] or 0),
         cost_budget=int(budget) if budget is not None else None,
+        project=str(row["project"] or ""),
     )
 
 
@@ -104,7 +107,8 @@ class Registry:
                 "updated_at TEXT NOT NULL, "
                 "current_task_id TEXT NOT NULL DEFAULT '', "
                 "cost_tokens INTEGER NOT NULL DEFAULT 0, "
-                "cost_budget INTEGER)"
+                "cost_budget INTEGER, "
+                "project TEXT NOT NULL DEFAULT '')"
             )
             existing = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(agents)").fetchall()
@@ -113,6 +117,7 @@ class Registry:
                 ("current_task_id", "TEXT NOT NULL DEFAULT ''"),
                 ("cost_tokens", "INTEGER NOT NULL DEFAULT 0"),
                 ("cost_budget", "INTEGER"),
+                ("project", "TEXT NOT NULL DEFAULT ''"),
             )
             for column, definition in migrations:
                 if column not in existing:
@@ -130,7 +135,7 @@ class Registry:
                 "pid=excluded.pid, pgid=excluded.pgid, job_id=excluded.job_id, "
                 "status=excluded.status, started_at=excluded.started_at, "
                 "last_heartbeat=excluded.last_heartbeat, command=excluded.command, "
-                "updated_at=excluded.updated_at",
+                "updated_at=excluded.updated_at, project=excluded.project",
                 tuple(getattr(record, column) for column in _COLUMNS),
             )
         finally:

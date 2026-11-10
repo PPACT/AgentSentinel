@@ -8,6 +8,7 @@ import {
   formatTask,
   isDaemonDown,
   localTimestamp,
+  shortProject,
   shortTimestamp,
 } from "./format";
 
@@ -31,6 +32,7 @@ describe("formatAgent", () => {
       alive: "在线",
       lastHeartbeat: "2026-11-09T00:00:00Z",
       currentTask: "—",
+      project: "—",
     });
     expect(formatAgent({ alive: false }).alive).toBe("已停止");
     expect(formatAgent(null).role).toBe("—");
@@ -65,6 +67,26 @@ describe("daemonSummary", () => {
     expect(daemonSummary({ pid: 9, host: "127.0.0.1", port: 8954, started_at: "t0" })).toBe(
       "pid 9 · 127.0.0.1:8954 · 启动于 t0",
     );
+  });
+
+  it("appends the short project name", () => {
+    expect(
+      daemonSummary({
+        pid: 9,
+        host: "127.0.0.1",
+        port: 8954,
+        started_at: "t0",
+        project: "D:\\Code\\Work_Code\\projects\\AgentSentinel",
+      }),
+    ).toBe("pid 9 · 127.0.0.1:8954 · 启动于 t0 · 项目 AgentSentinel");
+  });
+});
+
+describe("shortProject", () => {
+  it("returns the last path segment", () => {
+    expect(shortProject("D:\\Code\\Work_Code\\projects\\AgentSentinel")).toBe("AgentSentinel");
+    expect(shortProject("/home/user/project/")).toBe("project");
+    expect(shortProject(null)).toBe("—");
   });
 });
 

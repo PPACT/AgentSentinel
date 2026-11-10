@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,6 +22,11 @@ SUPPORTED_PROTOCOL = "2024-11-05"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOME = PROJECT_ROOT / ".claude" / "orchestrator"
 REQUEST_TIMEOUT_SECONDS = 30.0
+HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
+DEFAULT_HEARTBEAT_SECONDS = 15.0
+_heartbeat_lock = threading.Lock()
+_heartbeat_stop: threading.Event | None = None
+_heartbeat_payload: dict[str, Any] | None = None
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -135,6 +141,81 @@ def orchestrator_home() -> Path:
     return Path(override).resolve() if override else DEFAULT_HOME
 
 
+def heartbeat_interval_seconds() -> float:
+    raw = os.environ.get(HEARTBEAT_SECONDS_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_HEARTBEAT_SECONDS
+    return value if value > 0 else DEFAULT_HEARTBEAT_SECONDS
+
+
+def project_root() -> Path:
+    override = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    return Path(override).resolve() if override else PROJECT_ROOT
+
+
+def registration_payload(role: str, session: str = "", ref: str = "") -> dict[str, Any]:
+    pid = os.getpid()
+    return {
+        "role": role,
+        "pid": pid,
+        "pgid": pid,
+        "status": "registered",
+        "command": f"mcp_server session={session} ref={ref}",
+        "project": str(project_root()),
+    }
+
+
+def start_registration_heartbeat(
+    payload: dict[str, Any], interval: float | None = None
+) -> threading.Event:
+    """注册后周期重注册：daemon 重启/后启动时，agent 能在下一拍被重新识别。"""
+    global _heartbeat_stop, _heartbeat_payload
+    with _heartbeat_lock:
+        _heartbeat_payload = dict(payload)
+        if _heartbeat_stop is not None and not _heartbeat_stop.is_set():
+            return _heartbeat_stop
+        stop = threading.Event()
+        _heartbeat_stop = stop
+    delay = interval if interval is not None else heartbeat_interval_seconds()
+
+    def loop() -> None:
+        while not stop.wait(delay):
+            current: dict[str, Any] | None = _heartbeat_payload
+            if current is None:
+                continue
+            try:
+                daemon_request("POST", "/register", current)
+            except (OSError, urllib.error.URLError):
+                continue
+
+    threading.Thread(target=loop, daemon=True, name="orchestrator-heartbeat").start()
+    return stop
+
+
+def stop_registration_heartbeat() -> None:
+    global _heartbeat_stop, _heartbeat_payload
+    with _heartbeat_lock:
+        if _heartbeat_stop is not None:
+            _heartbeat_stop.set()
+        _heartbeat_stop = None
+        _heartbeat_payload = None
+
+
+def auto_register() -> threading.Event | None:
+    """MCP server 启动时若进程带 SENTINEL_ROLE，则立即注册并开始心跳。"""
+    role = os.environ.get("SENTINEL_ROLE", "").strip()
+    if not role:
+        return None
+    payload = registration_payload(role)
+    try:
+        daemon_request("POST", "/register", payload)
+    except (OSError, urllib.error.URLError):
+        pass
+    return start_registration_heartbeat(payload)
+
+
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -153,18 +234,7 @@ def tool_request(name: str, arguments: dict[str, Any]) -> tuple[str, str, dict[s
         role = _required(arguments, "role")
         session = _optional(arguments, "session")
         ref = _optional(arguments, "ref")
-        pid = os.getpid()
-        return (
-            "POST",
-            "/register",
-            {
-                "role": role,
-                "pid": pid,
-                "pgid": pid,
-                "status": "registered",
-                "command": f"mcp_server session={session} ref={ref}",
-            },
-        )
+        return "POST", "/register", registration_payload(role, session, ref)
     if name == "orchestrator_need":
         payload: dict[str, Any] = {
             "from_role": _required(arguments, "from_role"),
@@ -270,6 +340,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         status, body = daemon_request(method, path, payload)
     except (OSError, urllib.error.URLError) as exc:
         return _tool_result(503, {"error": str(exc)})
+    if name == "orchestrator_register" and 200 <= status < 300 and payload is not None:
+        start_registration_heartbeat(payload)
     return _tool_result(status, body)
 
 
@@ -320,6 +392,7 @@ def _reply(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    auto_register()
     for line in sys.stdin:
         stripped = line.strip()
         if not stripped:

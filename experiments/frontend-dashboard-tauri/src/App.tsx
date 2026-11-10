@@ -6,8 +6,10 @@ import { ConsolePanel } from "@/components/ConsolePanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
 import { TaskTable } from "@/components/TaskTable";
 import { TopBar } from "@/components/TopBar";
+import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import {
+  discoverAgents,
   ensureDaemon,
   eventStreamUrl,
   getStatus,
@@ -31,6 +33,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const logAbortRef = useRef<AbortController | null>(null);
@@ -207,6 +210,22 @@ export default function App() {
     [appendLog, applySnapshot, refreshTasks],
   );
 
+  const handleDiscover = useCallback(async () => {
+    setDiscovering(true);
+    try {
+      const result = await discoverAgents();
+      const found = Array.isArray(result.agents) ? result.agents : [];
+      setAgents(found);
+      const online = found.filter((agent) => agent.alive).length;
+      appendLog("info", `检测 Agent：${found.length} 个，在线 ${online} 个`);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setDiscovering(false);
+    }
+  }, [appendLog]);
+
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <TopBar daemon={daemon} connection={connection} onOpenCommand={() => setPaletteOpen(true)} />
@@ -220,9 +239,22 @@ export default function App() {
           <ResizablePanelGroup orientation="horizontal" className="min-h-0">
             <ResizablePanel defaultSize="60" minSize="30">
               <section className="flex h-full min-h-0 flex-col p-3">
-                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-sky-400">
-                  Agents
-                </h2>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-sky-400">
+                    Agents
+                  </h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    disabled={discovering}
+                    onClick={() => {
+                      void handleDiscover();
+                    }}
+                  >
+                    {discovering ? "检测中…" : "检测 Agent"}
+                  </Button>
+                </div>
                 <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-zinc-800">
                   <AgentTable
                     agents={agents}

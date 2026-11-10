@@ -7,7 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatAgent, localTimestamp } from "@/lib/format";
+import { formatAgent, localTimestamp, shortProject } from "@/lib/format";
 import type { Agent } from "@/lib/types";
 
 interface AgentTableProps {
@@ -42,7 +42,17 @@ export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
             const pending = pendingRole === role;
             return (
               <TableRow key={`${role}-${row.pid}`}>
-                <TableCell className="font-medium text-zinc-100">{row.role}</TableCell>
+                <TableCell className="min-w-0 py-1 font-medium text-zinc-100">
+                  <div className="truncate">{row.role}</div>
+                  {row.project !== "—" ? (
+                    <div
+                      className="max-w-[9rem] truncate font-mono text-[10px] text-zinc-500"
+                      title={row.project}
+                    >
+                      {shortProject(row.project)}
+                    </div>
+                  ) : null}
+                </TableCell>
                 <TableCell className="font-mono text-zinc-300">{row.pid}</TableCell>
                 <TableCell className="font-mono text-zinc-300">{row.pgid}</TableCell>
                 <TableCell className="font-mono text-zinc-300">{row.status}</TableCell>

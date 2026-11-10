@@ -64,7 +64,10 @@ def test_stop_hook_does_not_read_transcript(tmp_path: Path) -> None:
     try:
         home = _home(tmp_path, int(server.server_address[1]))
         transcript = tmp_path / "session.jsonl"
-        payload = {"type": "assistant", "message": {"content": [{"type": "text", "text": "不应读取"}]}}
+        payload = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "不应读取"}]},
+        }
         transcript.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
         result = run_hook(
             "report_session_log.py",

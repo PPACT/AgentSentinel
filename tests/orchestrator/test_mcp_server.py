@@ -32,6 +32,12 @@ def _wait_daemon(home: Path, timeout: float = 15.0) -> None:
     raise AssertionError(f"daemon did not become healthy at {home}")
 
 
+@pytest.fixture(autouse=True)
+def _stop_heartbeat() -> Iterator[None]:
+    yield
+    mcp_server.stop_registration_heartbeat()
+
+
 @pytest.fixture
 def daemon_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     home = tmp_path / "orch"
@@ -157,6 +163,7 @@ def test_tool_request_register_uses_mcp_server_pid() -> None:
     assert payload["pgid"] == os.getpid()
     assert payload["status"] == "registered"
     assert payload["command"] == "mcp_server session=agentsentinel-xx ref=abc123"
+    assert payload["project"] == str(mcp_server.project_root())
 
 
 def test_register_is_idempotent_and_resolvable(daemon_home: Path) -> None:
@@ -277,3 +284,43 @@ def test_stdio_roundtrip() -> None:
     responses = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
     assert [response["id"] for response in responses] == [1, 2, 3]
     assert len(responses[2]["result"]["tools"]) == 9
+
+
+def test_registration_heartbeat_repeats(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
+        return 200, {}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
+    stop = mcp_server.start_registration_heartbeat({"role": "dev", "pid": 1}, interval=0.05)
+    deadline = time.monotonic() + 2
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    stop.set()
+    assert len(calls) >= 2
+    assert calls[0]["role"] == "dev"
+
+
+def test_auto_register_uses_sentinel_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
+        return 200, {}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
+    monkeypatch.setenv("SENTINEL_ROLE", "doc")
+    stop = mcp_server.auto_register()
+    assert stop is not None
+    stop.set()
+    assert calls and calls[0]["role"] == "doc"
+    assert calls[0]["pid"] == os.getpid()
+
+    monkeypatch.delenv("SENTINEL_ROLE", raising=False)
+    assert mcp_server.auto_register() is None

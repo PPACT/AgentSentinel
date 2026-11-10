@@ -11,6 +11,7 @@ export interface Agent {
   current_task_id?: string;
   cost_tokens?: number;
   cost_budget?: number | null;
+  project?: string;
   alive?: boolean;
 }
 
@@ -39,6 +40,7 @@ export interface DaemonInfo {
   host?: string;
   port?: number;
   started_at?: string;
+  project?: string;
 }
 
 export interface StatusSnapshot {

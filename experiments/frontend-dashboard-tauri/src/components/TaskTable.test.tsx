@@ -27,7 +27,7 @@ describe("TaskTable", () => {
       />,
     );
     expect(screen.getByText("T-1")).toBeInTheDocument();
-    expect(screen.getByText("doc")).toBeInTheDocument();
+    expect(screen.getByText("doc → dev")).toBeInTheDocument();
     expect(screen.getByText("implement")).toBeInTheDocument();
   });
 

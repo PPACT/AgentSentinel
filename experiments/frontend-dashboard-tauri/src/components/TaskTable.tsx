@@ -6,7 +6,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatTask, localTimestamp } from "@/lib/format";
+import { formatTask, localTimestamp, shortTimestamp } from "@/lib/format";
 import type { Task } from "@/lib/types";
 
 interface TaskTableProps {
@@ -14,23 +14,25 @@ interface TaskTableProps {
   onSelect?: (task: Task) => void;
 }
 
-/** 右侧 Tasks 栏较窄：固定列宽 + 截断，避免横向溢出。 */
+/** 右侧 Tasks 栏较窄：合并收发角色、压缩列宽，窄于此宽度改为横向滚动。 */
 const COLUMNS = [
-  { key: "task_id", label: "task_id", width: "w-[32%]" },
-  { key: "from_role", label: "from_role", width: "w-[11%]" },
-  { key: "to_role", label: "to_role", width: "w-[11%]" },
-  { key: "intent", label: "intent", width: "w-[16%]" },
-  { key: "status", label: "status", width: "w-[13%]" },
-  { key: "updated_at", label: "updated_at", width: "w-[17%]" },
+  { key: "task_id", label: "任务", width: "w-[30%]" },
+  { key: "flow", label: "流转", width: "w-[17%]" },
+  { key: "intent", label: "意图", width: "w-[23%]" },
+  { key: "status", label: "状态", width: "w-[12%]" },
+  { key: "updated_at", label: "更新时间", width: "w-[18%]" },
 ] as const;
 
 export function TaskTable({ tasks, onSelect }: TaskTableProps) {
   return (
-    <Table className="table-fixed">
+    <Table className="min-w-[520px] table-fixed">
       <TableHeader>
         <TableRow>
           {COLUMNS.map((column) => (
-            <TableHead key={column.key} className={column.width}>
+            <TableHead
+              key={column.key}
+              className={`${column.width} text-[11px] font-medium text-zinc-400`}
+            >
               {column.label}
             </TableHead>
           ))}
@@ -66,11 +68,11 @@ export function TaskTable({ tasks, onSelect }: TaskTableProps) {
                 <TableCell className="truncate font-mono text-xs text-zinc-200" title={row.taskId}>
                   {row.taskId}
                 </TableCell>
-                <TableCell className="truncate text-zinc-300" title={row.fromRole}>
-                  {row.fromRole}
-                </TableCell>
-                <TableCell className="truncate text-zinc-300" title={row.toRole}>
-                  {row.toRole}
+                <TableCell
+                  className="truncate font-mono text-xs text-zinc-300"
+                  title={`${row.fromRole} → ${row.toRole}`}
+                >
+                  {row.fromRole} → {row.toRole}
                 </TableCell>
                 <TableCell className="truncate font-mono text-xs text-zinc-400" title={row.intent}>
                   {row.intent}
@@ -82,7 +84,7 @@ export function TaskTable({ tasks, onSelect }: TaskTableProps) {
                   className="truncate font-mono text-xs text-zinc-400"
                   title={localTimestamp(task.updated_at)}
                 >
-                  {localTimestamp(task.updated_at)}
+                  {shortTimestamp(task.updated_at)}
                 </TableCell>
               </TableRow>
             );

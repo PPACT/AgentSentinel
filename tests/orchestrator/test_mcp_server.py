@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -230,10 +231,15 @@ def test_register_again_updates_mcp_server_pid(daemon_home: Path) -> None:
     assert agents[0]["command"] == "mcp_server session=next ref=next"
 
 
-def test_register_offline_returns_structured_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("SENTINEL_ORCH_HOME", str(tmp_path / "missing"))
+def test_register_offline_schedules_retry(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+
+    def offline(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        raise urllib.error.URLError("daemon offline")
+
+    monkeypatch.setattr(mcp_server, "daemon_request", offline)
     response = _call(
         {
             "jsonrpc": "2.0",
@@ -246,8 +252,142 @@ def test_register_offline_returns_structured_error(
         }
     )
     result = response["result"]
-    assert result["isError"] is True
-    assert "not running" in result["content"][0]["text"]
+    assert result["isError"] is False
+    body = json.loads(result["content"][0]["text"])
+    assert body["status"] == "pending"
+
+    cached = mcp_server.load_cached_registration()
+    assert cached is not None
+    assert cached["role"] == "dev"
+    assert list((cache_env / "agents").glob("*.json"))
+
+
+def test_offline_registration_retries_until_success(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+    calls: list[dict[str, Any]] = []
+
+    def flaky(method: str, path: str, payload: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
+        if len(calls) == 1:
+            raise urllib.error.URLError("daemon offline")
+        return 200, {"agent": {"role": (payload or {}).get("role", "")}}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", flaky)
+    response = _call(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "orchestrator_register",
+                "arguments": {"role": "dev", "session": "s", "ref": "r"},
+            },
+        }
+    )
+    body = json.loads(response["result"]["content"][0]["text"])
+    assert body["status"] == "pending"
+
+    deadline = time.monotonic() + 2
+    while len(calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert len(calls) >= 2
+    assert calls[1]["role"] == "dev"
+
+
+def test_register_server_error_schedules_retry(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+
+    def failing(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        return 500, {"error": "boom"}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", failing)
+    response = _call(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "orchestrator_register",
+                "arguments": {"role": "dev", "session": "s", "ref": "r"},
+            },
+        }
+    )
+    result = response["result"]
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"])["status"] == "pending"
+    assert mcp_server.load_cached_registration() is not None
+
+
+def test_offline_registration_recovers_when_daemon_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "late-orch"
+    monkeypatch.setenv("SENTINEL_ORCH_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "late-session")
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+    monkeypatch.delenv("SENTINEL_ROLE", raising=False)
+    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+
+    response = _call(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "orchestrator_register",
+                "arguments": {"role": "dev", "session": "late", "ref": "r"},
+            },
+        }
+    )
+    assert json.loads(response["result"]["content"][0]["text"])["status"] == "pending"
+
+    environment = os.environ.copy()
+    environment["SENTINEL_ORCH_HOME"] = str(home)
+    environment["PYTHONUTF8"] = "1"
+    log_path = tmp_path / "daemon.log"
+    with log_path.open("w", encoding="utf-8") as stream:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tools.orchestrator.service",
+                "--serve",
+                "--port",
+                "0",
+                "--home",
+                str(home),
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            creationflags=hidden_creationflags(),
+        )
+    try:
+        _wait_daemon(home)
+        deadline = time.monotonic() + 10
+        agents: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            _, body = mcp_server.daemon_request("GET", "/status", None)
+            raw_agents = body.get("agents")
+            agents = raw_agents if isinstance(raw_agents, list) else []
+            if any(agent.get("role") == "dev" and agent.get("alive") for agent in agents):
+                break
+            time.sleep(0.05)
+        assert any(agent.get("role") == "dev" for agent in agents)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 def test_unknown_method_returns_jsonrpc_error() -> None:

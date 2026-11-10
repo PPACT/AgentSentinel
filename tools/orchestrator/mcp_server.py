@@ -52,7 +52,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "orchestrator_register",
-        "description": "Register this MCP server as a role (idempotent).",
+        "description": (
+            "Register this MCP server as a role (idempotent). If the daemon is offline, "
+            "the registration is cached and retried by the heartbeat; the result is pending."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -446,10 +449,34 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         status, body = daemon_request(method, path, payload)
     except (OSError, urllib.error.URLError) as exc:
+        if name == "orchestrator_register" and payload is not None:
+            # 中控未启动时也要留下缓存并启动重试心跳；daemon 起来后自动注册。
+            save_registration(payload)
+            start_registration_heartbeat(payload)
+            return _tool_result(
+                202,
+                {
+                    "status": "pending",
+                    "detail": "daemon offline; retry scheduled",
+                    "error": str(exc),
+                },
+            )
         return _tool_result(503, {"error": str(exc)})
-    if name == "orchestrator_register" and 200 <= status < 300 and payload is not None:
-        save_registration(payload)
-        start_registration_heartbeat(payload)
+    if name == "orchestrator_register" and payload is not None:
+        if 200 <= status < 300:
+            save_registration(payload)
+            start_registration_heartbeat(payload)
+        elif status >= 500:
+            save_registration(payload)
+            start_registration_heartbeat(payload)
+            return _tool_result(
+                202,
+                {
+                    "status": "pending",
+                    "detail": "daemon error; retry scheduled",
+                    "error": str(body.get("error", "")),
+                },
+            )
     return _tool_result(status, body)
 
 

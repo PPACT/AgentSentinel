@@ -7,14 +7,17 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -152,6 +155,37 @@ TOOLS: list[dict[str, Any]] = [
 def orchestrator_home() -> Path:
     override = os.environ.get("SENTINEL_ORCH_HOME", "").strip()
     return Path(override).resolve() if override else DEFAULT_HOME
+
+
+def _log_path() -> Path:
+    return orchestrator_home() / "logs" / f"mcp-server-{os.getpid()}.log"
+
+
+def log_event(event: str) -> None:
+    """MCP stdio 不能污染 stdout；诊断写项目内日志 + stderr。"""
+    line = f"{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%S.%fZ')} pid={os.getpid()} {event}\n"
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(line)
+    except OSError:
+        pass
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def log_exception(context: str) -> None:
+    detail = traceback.format_exc().replace("\n", " | ")[:2000]
+    log_event(f"exception in {context}: {detail}")
+
+
+def _signal_handler(signum: int, _frame: Any) -> None:
+    log_event(f"signal {signum}")
+    raise SystemExit(0)
 
 
 def heartbeat_interval_seconds() -> float:
@@ -355,17 +389,20 @@ def auto_register() -> threading.Event | None:
     role = os.environ.get("SENTINEL_ROLE", "").strip()
     if not role and cached is not None:
         role = str(cached.get("role", "")).strip()
+    log_event(f"auto_register role={role!r} cached={cached is not None}")
     if not role:
+        log_event("auto_register skip: no role")
         return None
     session = str(cached.get("session", "")) if cached is not None else ""
     ref = str(cached.get("ref", "")) if cached is not None else ""
     payload = registration_payload(role, session, ref)
     try:
         daemon_request("POST", "/register", payload)
-    except (OSError, urllib.error.URLError):
-        pass
+    except (OSError, urllib.error.URLError) as exc:
+        log_event(f"auto_register daemon offline: {exc}")
     # 无论 daemon 是否在线都落盘：PID File 供中控启动后惰性发现。
     save_registration(payload)
+    log_event(f"auto_register saved role={role} session={session!r} ref={ref!r}")
     return start_registration_heartbeat(payload)
 
 
@@ -570,7 +607,15 @@ def _reply(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
-    auto_register()
+    atexit.register(lambda: log_event("atexit"))
+    log_event(f"start session={session_id()!r} role_env={os.environ.get('SENTINEL_ROLE', '')!r}")
+    try:
+        auto_register()
+    except Exception:  # noqa: BLE001 - 启动失败也要留下诊断
+        log_exception("auto_register")
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    log_event("stdin loop start")
     for line in sys.stdin:
         stripped = line.strip()
         if not stripped:
@@ -581,10 +626,20 @@ def main() -> int:
             continue
         if not isinstance(message, dict):
             continue
-        response = handle_message(message)
+        log_event(f"recv method={message.get('method')!r} id={message.get('id')!r}")
+        try:
+            response = handle_message(message)
+        except Exception:  # noqa: BLE001 - 单条消息异常不应拖垮 MCP server
+            log_exception(f"handle_message {message.get('method')}")
+            response = {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "error": {"code": -32603, "message": "internal error"},
+            }
         if response is not None:
             sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
+    log_event("stdin EOF; exiting")
     return 0
 
 

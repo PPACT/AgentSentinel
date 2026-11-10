@@ -490,6 +490,11 @@ def test_stdio_roundtrip(tmp_path: Path) -> None:
     responses = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
     assert [response["id"] for response in responses] == [1, 2, 3]
     assert len(responses[2]["result"]["tools"]) == 9
+    logs = list((tmp_path / "orch" / "logs").glob("mcp-server-*.log"))
+    assert logs
+    text = logs[0].read_text(encoding="utf-8")
+    assert "stdin loop start" in text
+    assert "stdin EOF; exiting" in text
 
 
 def test_registration_heartbeat_repeats(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:

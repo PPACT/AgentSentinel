@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentTable } from "@/components/AgentTable";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
+import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
 import { TaskTable } from "@/components/TaskTable";
 import { TopBar } from "@/components/TopBar";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
@@ -25,6 +26,7 @@ export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -239,7 +241,7 @@ export default function App() {
                   Tasks
                 </h2>
                 <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-zinc-800">
-                  <TaskTable tasks={tasks} />
+                  <TaskTable tasks={tasks} onSelect={setSelectedTask} />
                 </div>
               </section>
             </ResizablePanel>
@@ -258,6 +260,12 @@ export default function App() {
         }}
         onReconnect={reconnectStreams}
         onClearLogs={() => setLogs([])}
+      />
+      <TaskDetailsDialog
+        task={selectedTask}
+        onOpenChange={(open) => {
+          if (!open) setSelectedTask(null);
+        }}
       />
     </div>
   );

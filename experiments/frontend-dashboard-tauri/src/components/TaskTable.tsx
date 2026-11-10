@@ -11,6 +11,7 @@ import type { Task } from "@/lib/types";
 
 interface TaskTableProps {
   tasks: Task[];
+  onSelect?: (task: Task) => void;
 }
 
 /** 右侧 Tasks 栏较窄：固定列宽 + 截断，避免横向溢出。 */
@@ -23,7 +24,7 @@ const COLUMNS = [
   { key: "updated_at", label: "updated_at", width: "w-[17%]" },
 ] as const;
 
-export function TaskTable({ tasks }: TaskTableProps) {
+export function TaskTable({ tasks, onSelect }: TaskTableProps) {
   return (
     <Table className="table-fixed">
       <TableHeader>
@@ -46,7 +47,22 @@ export function TaskTable({ tasks }: TaskTableProps) {
           tasks.map((task) => {
             const row = formatTask(task);
             return (
-              <TableRow key={`${row.taskId}-${row.updatedAt}`}>
+              <TableRow
+                key={`${row.taskId}-${row.updatedAt}`}
+                className={onSelect ? "cursor-pointer hover:bg-zinc-800/40" : undefined}
+                tabIndex={onSelect ? 0 : undefined}
+                onClick={onSelect ? () => onSelect(task) : undefined}
+                onKeyDown={
+                  onSelect
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onSelect(task);
+                        }
+                      }
+                    : undefined
+                }
+              >
                 <TableCell className="truncate font-mono text-xs text-zinc-200" title={row.taskId}>
                   {row.taskId}
                 </TableCell>

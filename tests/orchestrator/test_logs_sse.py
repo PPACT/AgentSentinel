@@ -155,3 +155,45 @@ def test_logs_stream_validates_auth_and_role(daemon: Path) -> None:
     with pytest.raises(urllib.error.HTTPError) as invalid:
         _open(daemon, "/logs/stream?role=..%2Fevil")
     assert invalid.value.code == 400
+
+
+def _post(
+    home: Path, path: str, payload: dict[str, Any], *, token: bool = True
+) -> tuple[int, dict[str, Any]]:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {_token(home)}"
+    request = urllib.request.Request(
+        _url(home, path),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return int(response.status), json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), json.loads(exc.read() or b"{}")
+
+
+def test_report_log_appends_and_streams(daemon: Path) -> None:
+    status, body = _post(daemon, "/logs/report", {"role": "dev", "line": "第一行\n第二行"})
+    assert status == 200
+    assert body["reported"] is True
+
+    with _open(daemon, "/logs/stream?role=dev&tail=1") as response:
+        frame = _next_frame(response)
+    assert frame["data"]["role"] == "dev"
+    assert frame["data"]["line"] == "第一行 第二行"
+    assert (daemon / "logs" / "dev.log").read_text(encoding="utf-8").strip() == "第一行 第二行"
+
+
+def test_report_log_validates_token_role_and_line(daemon: Path) -> None:
+    status, _ = _post(daemon, "/logs/report", {"role": "dev", "line": "x"}, token=False)
+    assert status == 401
+
+    status, _ = _post(daemon, "/logs/report", {"role": "../evil", "line": "x"})
+    assert status == 400
+
+    status, _ = _post(daemon, "/logs/report", {"role": "dev", "line": "   "})
+    assert status == 400

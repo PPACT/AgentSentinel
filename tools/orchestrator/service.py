@@ -50,6 +50,7 @@ LOG_TAIL_DEFAULT = 200
 LOG_TAIL_MAX = 1000
 LOG_POLL_SECONDS = 0.3
 LOG_CHUNK_BYTES = 64 * 1024
+REPORT_LINE_MAX = 4000
 
 
 def _configure_stdio(*streams: Any) -> None:
@@ -752,6 +753,26 @@ class _Handler(BaseHTTPRequestHandler):
         frame = f"id: {seq}\nevent: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         return self._write_bytes(frame.encode("utf-8"))
 
+    def _report_log(self, payload: dict[str, Any]) -> None:
+        """外部会话上报（POST /logs/report）：追加到 logs/<role>.log，供 /logs/stream 跟随。"""
+        role = str(payload.get("role", "")).strip()
+        line = " ".join(str(payload.get("line", "")).split())[:REPORT_LINE_MAX]
+        if role != "daemon" and not _ROLE_PATTERN.match(role):
+            self._send(400, {"error": "invalid role"})
+            return
+        if not line:
+            self._send(400, {"error": "line required"})
+            return
+        logs_dir = self.daemon.home / "logs"
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with (logs_dir / f"{role}.log").open("a", encoding="utf-8") as stream:
+                stream.write(f"{line}\n")
+        except OSError as exc:
+            self._send(500, {"error": f"write failed: {exc}"})
+            return
+        self._send(200, {"reported": True, "role": role, "chars": len(line)})
+
     def _log_targets(self) -> list[tuple[str, Path]] | None:
         """解析 ?role= 或列出 logs/*.log；非法 role 返回 None（已发送 400）。"""
         logs_dir = self.daemon.home / "logs"
@@ -874,6 +895,10 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed is None:
                 return
             payload = parsed
+
+        if method == "POST" and path == "/logs/report":
+            self._report_log(payload)
+            return
 
         if method == "GET" and path == "/health":
             self._send(

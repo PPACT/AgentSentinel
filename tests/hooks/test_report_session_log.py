@@ -37,13 +37,6 @@ def _home(tmp_path: Path, port: int) -> Path:
     return home
 
 
-def _transcript(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "session.jsonl"
-    payload = {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
-    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
-    return path
-
-
 def test_stop_hook_reports_last_assistant_message(tmp_path: Path) -> None:
     _Recorder.bodies = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
@@ -51,10 +44,9 @@ def test_stop_hook_reports_last_assistant_message(tmp_path: Path) -> None:
     thread.start()
     try:
         home = _home(tmp_path, int(server.server_address[1]))
-        transcript = _transcript(tmp_path, "已完成修复\n并跑了测试")
         result = run_hook(
             "report_session_log.py",
-            {"hook_event_name": "Stop", "transcript_path": str(transcript)},
+            {"hook_event_name": "Stop", "last_assistant_message": "已完成修复\n并跑了测试"},
             env={"SENTINEL_ROLE": "dev", "SENTINEL_ORCH_HOME": str(home)},
         )
         assert result.returncode == 0
@@ -64,7 +56,29 @@ def test_stop_hook_reports_last_assistant_message(tmp_path: Path) -> None:
         server.server_close()
 
 
-def test_stop_hook_prefers_direct_message_and_truncates(tmp_path: Path) -> None:
+def test_stop_hook_does_not_read_transcript(tmp_path: Path) -> None:
+    _Recorder.bodies = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        home = _home(tmp_path, int(server.server_address[1]))
+        transcript = tmp_path / "session.jsonl"
+        payload = {"type": "assistant", "message": {"content": [{"type": "text", "text": "不应读取"}]}}
+        transcript.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        result = run_hook(
+            "report_session_log.py",
+            {"hook_event_name": "Stop", "transcript_path": str(transcript)},
+            env={"SENTINEL_ROLE": "dev", "SENTINEL_ORCH_HOME": str(home)},
+        )
+        assert result.returncode == 0
+        assert _Recorder.bodies == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_stop_hook_reports_direct_message_and_truncates(tmp_path: Path) -> None:
     _Recorder.bodies = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -43,33 +43,12 @@ def _text_blocks(content: Any) -> str:
 
 
 def last_assistant_text(payload: dict[str, Any]) -> str:
-    """优先用 Stop 事件自带的 last_assistant_message；否则回读 transcript 最后一条 assistant。"""
+    """只使用 Stop 事件自带的 last_assistant_message；不读取项目外 transcript。"""
     direct = payload.get("last_assistant_message")
-    if isinstance(direct, str) and direct.strip():
+    if isinstance(direct, str):
         return direct
     if isinstance(direct, dict):
-        text = _text_blocks(direct.get("content"))
-        if text.strip():
-            return text
-    transcript = payload.get("transcript_path")
-    if not isinstance(transcript, str) or not transcript:
-        return ""
-    try:
-        lines = Path(transcript).read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    for raw in reversed(lines):
-        try:
-            item = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(item, dict) or item.get("type") != "assistant":
-            continue
-        message = item.get("message")
-        if isinstance(message, dict):
-            text = _text_blocks(message.get("content"))
-            if text.strip():
-                return text
+        return _text_blocks(direct.get("content"))
     return ""
 
 

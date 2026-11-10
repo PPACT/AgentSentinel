@@ -487,13 +487,14 @@ class Daemon:
             mcp_pid = _int(data.get("mcp_pid")) if data else 0
             claude_pid = _int(data.get("claude_pid")) if data else 0
             project = _str(data.get("project")).strip() if data else ""
-            project_ok = not project or _normalize_project(project) == self.project
+            # 共享 home 时其它项目的缓存只跳过、不删除，避免跨项目互删。
+            if project and _normalize_project(project) != self.project:
+                continue
             if (
                 not role
                 or mcp_pid <= 0
                 or not process_alive(mcp_pid)
                 or (claude_pid > 0 and not process_alive(claude_pid))
-                or not project_ok
             ):
                 path.unlink(missing_ok=True)
                 pruned += 1

@@ -333,6 +333,7 @@ def test_registration_cache_roundtrip(cache_env: Path) -> None:
     assert cached["mcp_pid"] == os.getpid()
     assert cached["claude_pid"] == os.getpid()
     assert len(list((cache_env / "agents").glob("*.json"))) == 1
+    assert not list((cache_env / "agents").glob("*.tmp"))
 
 
 def test_auto_register_falls_back_to_cached_role(

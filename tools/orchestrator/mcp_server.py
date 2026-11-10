@@ -232,10 +232,17 @@ def save_registration(payload: dict[str, Any]) -> None:
         "claude_pid": claude_pid(),
         "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
+    # 原子替换：避免 daemon 在写一半时读到坏 JSON 并删除缓存。
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
     except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return
 
 

@@ -293,3 +293,23 @@ def test_discover_recovers_live_cache_and_prunes_dead(daemon: Path) -> None:
     assert by_role["dev"]["pid"] == os.getpid()
     assert by_role["dev"]["started_at"] == started_at
     assert not (cache_dir / "s2.json").exists()
+
+
+def test_discover_skips_other_project_cache(daemon: Path) -> None:
+    cache_dir = daemon / "agents"
+    cache_dir.mkdir()
+    foreign = {
+        "session_id": "foreign",
+        "role": "dev",
+        "project": "C:\\other\\project",
+        "mcp_pid": os.getpid(),
+        "claude_pid": os.getpid(),
+    }
+    path = cache_dir / "foreign.json"
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+
+    status, body = _api(daemon, "POST", "/discover", {})
+    assert status == 200
+    assert body["pruned"] == 0
+    assert path.exists()
+    assert body["agents"] == []

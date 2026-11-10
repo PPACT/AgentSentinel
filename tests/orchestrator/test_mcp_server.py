@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -333,6 +334,22 @@ def test_registration_cache_roundtrip(cache_env: Path) -> None:
     assert cached["mcp_pid"] == os.getpid()
     assert cached["claude_pid"] == os.getpid()
     assert len(list((cache_env / "agents").glob("*.json"))) == 1
+    assert not list((cache_env / "agents").glob("*.tmp"))
+
+
+def test_registration_cache_concurrent_writes(cache_env: Path) -> None:
+    payload = mcp_server.registration_payload("dev", "session-c", "ref-c")
+    threads = [
+        threading.Thread(target=mcp_server.save_registration, args=(payload,)) for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    cached = mcp_server.load_cached_registration()
+    assert cached is not None
+    assert cached["role"] == "dev"
     assert not list((cache_env / "agents").glob("*.tmp"))
 
 

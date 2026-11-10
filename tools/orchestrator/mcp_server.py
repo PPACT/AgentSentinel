@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -232,11 +233,16 @@ def save_registration(payload: dict[str, Any]) -> None:
         "claude_pid": claude_pid(),
         "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
-    # 原子替换：避免 daemon 在写一半时读到坏 JSON 并删除缓存。
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # 原子替换：mkdir 后用唯一临时文件，避免心跳与工具调用并发写同一 .tmp。
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    except OSError:
+        return
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2))
         os.replace(tmp_path, path)
     except OSError:
         try:

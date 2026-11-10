@@ -209,7 +209,7 @@ def _cache_file() -> Path | None:
 
 
 def load_cached_registration() -> dict[str, Any] | None:
-    """读取本 Claude Code 会话上次注册的角色；窗口重置后 session id 变化即自然失效。"""
+    """读取本 Claude Code 会话缓存的角色；--resume 复用 session id 时可恢复。"""
     path = _cache_file()
     if path is None:
         return None
@@ -350,7 +350,7 @@ def stop_registration_heartbeat() -> None:
 
 
 def auto_register() -> threading.Event | None:
-    """有 SENTINEL_ROLE 用环境角色；否则回退到本会话缓存中的角色。"""
+    """有 SENTINEL_ROLE 用环境角色（窗口级兜底）；否则回退到本会话缓存（--resume）。"""
     cached = load_cached_registration()
     role = os.environ.get("SENTINEL_ROLE", "").strip()
     if not role and cached is not None:

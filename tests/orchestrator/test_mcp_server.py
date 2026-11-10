@@ -620,6 +620,8 @@ def test_auto_register_uses_sentinel_role(cache_env: Path, monkeypatch: pytest.M
     cached = mcp_server.load_cached_registration()
     assert cached is not None
     assert cached["role"] == "doc"
+    pending = cache_env / "pending" / "test-session-1.json"
+    assert json.loads(pending.read_text(encoding="utf-8"))["role"] == "doc"
 
     # 环境变量缺失时回退到本会话缓存。
     monkeypatch.delenv("SENTINEL_ROLE", raising=False)
@@ -627,3 +629,59 @@ def test_auto_register_uses_sentinel_role(cache_env: Path, monkeypatch: pytest.M
     assert fallback is not None
     fallback.set()
     assert calls[-1]["role"] == "doc"
+
+
+def test_auto_register_sentinel_role_offline_writes_pending(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_ROLE", "doc")
+    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+
+    def offline(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        raise urllib.error.URLError("daemon offline")
+
+    monkeypatch.setattr(mcp_server, "daemon_request", offline)
+    stop = mcp_server.auto_register()
+    assert stop is not None
+    stop.set()
+
+    data = json.loads((cache_env / "pending" / "test-session-1.json").read_text(encoding="utf-8"))
+    assert data["role"] == "doc"
+    assert data["pid"] == os.getpid()
+
+
+def test_resume_auto_register_uses_kept_cache(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模拟 --resume：旧 MCP 已死，缓存仍保留 role，新 MCP 自动注册。"""
+    payload = mcp_server.registration_payload("dev", "session-resume", "ref-r")
+    mcp_server.save_registration(payload)
+    cache_path = cache_env / "agents" / "test-session-1.json"
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
+    data["mcp_pid"] = 999_999_999
+    data["claude_pid"] = 999_999_999
+    cache_path.write_text(json.dumps(data), encoding="utf-8")
+    pending_path = cache_env / "pending" / "test-session-1.json"
+    pending_path.unlink(missing_ok=True)
+    monkeypatch.delenv("SENTINEL_ROLE", raising=False)
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
+        return 200, {}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
+    stop = mcp_server.auto_register()
+    assert stop is not None
+    stop.set()
+    assert calls and calls[0]["role"] == "dev"
+    assert calls[0]["pid"] == os.getpid()
+    cached = mcp_server.load_cached_registration()
+    assert cached is not None
+    assert cached["mcp_pid"] == os.getpid()
+    assert json.loads(pending_path.read_text(encoding="utf-8"))["role"] == "dev"

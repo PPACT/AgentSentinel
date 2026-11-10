@@ -17,7 +17,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
@@ -58,6 +58,7 @@ REPORT_LINE_MAX = 4000
 AGENT_CACHE_INTERVAL_ENV = "SENTINEL_ORCH_AGENT_CACHE_SECONDS"
 DEFAULT_AGENT_CACHE_SECONDS = 30.0
 AGENT_CACHE_DIR = "agents"
+AGENT_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PENDING_DIR = "pending"
 PENDING_CLEANUP_THRESHOLD = 100
 PID_CREATE_TIME_TOLERANCE = 0.01
@@ -352,6 +353,23 @@ def _unlink(path: Path) -> bool:
     return True
 
 
+def _cache_expired(data: dict[str, Any], path: Path) -> bool:
+    """角色缓存只在 TTL 到期后删除；进程死亡不删，留给 --resume 复用。"""
+    raw = _str(data.get("updated_at"))
+    timestamp: datetime | None = None
+    if raw:
+        try:
+            timestamp = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        except ValueError:
+            timestamp = None
+    if timestamp is None:
+        try:
+            timestamp = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+        except OSError:
+            return False
+    return datetime.now(UTC) - timestamp > timedelta(seconds=AGENT_CACHE_TTL_SECONDS)
+
+
 class Daemon:
     def __init__(self, home: Path, host: str = DEFAULT_HOST, port: int = 0) -> None:
         self.home = home
@@ -487,7 +505,7 @@ class Daemon:
         return self._agent_dict(record) if record is not None else None
 
     def _reconcile_agent_cache(self) -> tuple[bool, int, int]:
-        """home/agents/<session>.json：存活会话恢复登记，死缓存删除。返回 (changed, recovered, pruned)。"""
+        """home/agents/<session>.json：存活会话恢复登记；死缓存保留给 --resume，按 TTL 清理。"""
         cache_dir = self.home / AGENT_CACHE_DIR
         if not cache_dir.is_dir():
             return False, 0, 0
@@ -501,20 +519,24 @@ class Daemon:
                 parsed = None
             data = dict(parsed) if isinstance(parsed, dict) else None
             role = _str(data.get("role")).strip() if data else ""
-            mcp_pid = _int(data.get("mcp_pid")) if data else 0
-            claude_pid = _int(data.get("claude_pid")) if data else 0
             project = _str(data.get("project")).strip() if data else ""
+            if data is None or not role:
+                pruned += int(_unlink(path))
+                continue
             # 共享 home 时其它项目的缓存只跳过、不删除，避免跨项目互删。
             if project and _normalize_project(project) != self.project:
                 continue
+            if _cache_expired(data, path):
+                pruned += int(_unlink(path))
+                continue
+            mcp_pid = _int(data.get("mcp_pid"))
+            claude_pid = _int(data.get("claude_pid"))
             if (
-                not role
-                or mcp_pid <= 0
+                mcp_pid <= 0
                 or not process_alive(mcp_pid)
                 or (claude_pid > 0 and not process_alive(claude_pid))
             ):
-                path.unlink(missing_ok=True)
-                pruned += 1
+                # 进程已死也保留角色缓存：--resume 复用同一 session id 时需要它。
                 continue
             existing = self.registry.get(role)
             now = utc_now()

@@ -295,10 +295,10 @@ def test_reregister_preserves_agent_started_at(daemon: Path) -> None:
     assert body["agent"]["started_at"] == started_at
 
 
-def test_discover_recovers_live_cache_and_prunes_dead(daemon: Path) -> None:
+def test_discover_recovers_live_cache_and_keeps_dead_for_resume(daemon: Path) -> None:
     cache_dir = daemon / "agents"
     cache_dir.mkdir()
-    started_at = "2026-01-02T03:04:05.000000Z"
+    started_at = "2026-11-10T00:00:00.000000Z"
     live = {
         "session_id": "s1",
         "session": "agentsentinel-test",
@@ -317,12 +317,35 @@ def test_discover_recovers_live_cache_and_prunes_dead(daemon: Path) -> None:
     status, body = _api(daemon, "POST", "/discover", {})
     assert status == 200
     assert body["recovered"] == 1
-    assert body["pruned"] == 1
+    assert body["pruned"] == 0
     by_role = {item["role"]: item for item in body["agents"]}
     assert by_role["dev"]["alive"] is True
     assert by_role["dev"]["pid"] == os.getpid()
     assert by_role["dev"]["started_at"] == started_at
-    assert not (cache_dir / "s2.json").exists()
+    # 死进程缓存保留给 --resume，不能立刻删除。
+    assert (cache_dir / "s2.json").exists()
+
+
+def test_agent_cache_ttl_prunes_expired(daemon: Path) -> None:
+    cache_dir = daemon / "agents"
+    cache_dir.mkdir()
+    expired = {
+        "session_id": "old",
+        "role": "old",
+        "project": str(ROOT),
+        "started_at": "2026-01-01T00:00:00.000000Z",
+        "mcp_pid": 999_999_999,
+        "claude_pid": 0,
+        "updated_at": "2026-01-01T00:00:00.000000Z",
+    }
+    path = cache_dir / "old.json"
+    path.write_text(json.dumps(expired), encoding="utf-8")
+
+    status, body = _api(daemon, "POST", "/discover", {})
+
+    assert status == 200
+    assert body["pruned"] == 1
+    assert not path.exists()
 
 
 def test_discover_skips_other_project_cache(daemon: Path) -> None:

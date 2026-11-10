@@ -141,6 +141,8 @@ export function getTasks(): Promise<TaskList> {
 
 export interface DiscoverResult {
   discovered?: boolean;
+  recovered?: number;
+  pruned?: number;
   agents?: Agent[];
 }
 

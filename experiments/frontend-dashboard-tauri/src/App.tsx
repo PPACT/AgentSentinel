@@ -217,7 +217,12 @@ export default function App() {
       const found = Array.isArray(result.agents) ? result.agents : [];
       setAgents(found);
       const online = found.filter((agent) => agent.alive).length;
-      appendLog("info", `检测 Agent：${found.length} 个，在线 ${online} 个`);
+      const recovered = result.recovered ?? 0;
+      const pruned = result.pruned ?? 0;
+      appendLog(
+        "info",
+        `检测 Agent：${found.length} 个，在线 ${online} 个；缓存恢复 ${recovered}，清理 ${pruned}`,
+      );
       setError(null);
     } catch (err) {
       setError(errorMessage(err));

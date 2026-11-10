@@ -51,6 +51,18 @@ LOG_TAIL_MAX = 1000
 LOG_POLL_SECONDS = 0.3
 LOG_CHUNK_BYTES = 64 * 1024
 REPORT_LINE_MAX = 4000
+AGENT_CACHE_INTERVAL_ENV = "SENTINEL_ORCH_AGENT_CACHE_SECONDS"
+DEFAULT_AGENT_CACHE_SECONDS = 30.0
+AGENT_CACHE_DIR = "agents"
+
+
+def agent_cache_seconds() -> float:
+    raw = os.environ.get(AGENT_CACHE_INTERVAL_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_AGENT_CACHE_SECONDS
+    return value if value > 0 else DEFAULT_AGENT_CACHE_SECONDS
 
 
 class ProjectMismatch(ValueError):
@@ -346,6 +358,7 @@ class Daemon:
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
         self._last_watchdog = 0.0
+        self._last_agent_cache = 0.0
         self.server: ThreadingHTTPServer | None = None
         self.started_at = utc_now()
         self._stopping = threading.Event()
@@ -456,9 +469,65 @@ class Daemon:
         record = self.registry.get(role)
         return self._agent_dict(record) if record is not None else None
 
-    def discover(self) -> dict[str, Any]:
-        """手动检测：重新探测已登记 agent 的进程存活，修正 status 后返回最新列表。"""
+    def _reconcile_agent_cache(self) -> tuple[bool, int, int]:
+        """home/agents/<session>.json：存活会话恢复登记，死缓存删除。返回 (changed, recovered, pruned)。"""
+        cache_dir = self.home / AGENT_CACHE_DIR
+        if not cache_dir.is_dir():
+            return False, 0, 0
         changed = False
+        recovered = 0
+        pruned = 0
+        for path in sorted(cache_dir.glob("*.json")):
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                parsed = None
+            data = dict(parsed) if isinstance(parsed, dict) else None
+            role = _str(data.get("role")).strip() if data else ""
+            mcp_pid = _int(data.get("mcp_pid")) if data else 0
+            claude_pid = _int(data.get("claude_pid")) if data else 0
+            project = _str(data.get("project")).strip() if data else ""
+            project_ok = not project or _normalize_project(project) == self.project
+            if (
+                not role
+                or mcp_pid <= 0
+                or not process_alive(mcp_pid)
+                or (claude_pid > 0 and not process_alive(claude_pid))
+                or not project_ok
+            ):
+                path.unlink(missing_ok=True)
+                pruned += 1
+                continue
+            existing = self.registry.get(role)
+            now = utc_now()
+            started_at = _str(data.get("started_at")).strip() if data else ""
+            if not started_at:
+                started_at = existing.started_at if existing is not None else now
+            session = _str(data.get("session")).strip() if data else ""
+            ref = _str(data.get("ref")).strip() if data else ""
+            suffix = f" session={session}" if session else ""
+            suffix += f" ref={ref}" if ref else ""
+            self.registry.upsert(
+                AgentRecord(
+                    role=role,
+                    pid=mcp_pid,
+                    pgid=mcp_pid,
+                    job_id="",
+                    status="registered",
+                    started_at=started_at,
+                    last_heartbeat=now,
+                    command=f"mcp_server{suffix}".strip(),
+                    updated_at=now,
+                    project=self.project,
+                )
+            )
+            recovered += 1
+            changed = True
+        return changed, recovered, pruned
+
+    def discover(self) -> dict[str, Any]:
+        """手动检测：恢复存活会话缓存、清理死缓存，并重新探测已登记 agent 的存活。"""
+        changed, recovered, pruned = self._reconcile_agent_cache()
         for record in self.registry.list():
             alive = process_alive(record.pid)
             if alive and record.status in ("stopped", "lost"):
@@ -469,6 +538,8 @@ class Daemon:
             self._publish()
         return {
             "discovered": True,
+            "recovered": recovered,
+            "pruned": pruned,
             "agents": [self._agent_dict(record) for record in self.registry.list()],
         }
 
@@ -612,6 +683,9 @@ class Daemon:
                 if now - self._last_watchdog >= self.watchdog_seconds:
                     self._last_watchdog = now
                     changed = bool(self.router.watch_workers()) or changed
+                if now - self._last_agent_cache >= agent_cache_seconds():
+                    self._last_agent_cache = now
+                    changed = self._reconcile_agent_cache()[0] or changed
                 if changed:
                     self._publish()
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出

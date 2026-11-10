@@ -39,6 +39,16 @@ def _stop_heartbeat() -> Iterator[None]:
 
 
 @pytest.fixture
+def cache_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "cache-home"
+    monkeypatch.setenv("SENTINEL_ORCH_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-session-1")
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+    monkeypatch.delenv("SENTINEL_ROLE", raising=False)
+    return home
+
+
+@pytest.fixture
 def daemon_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     home = tmp_path / "orch"
     environment = os.environ.copy()
@@ -261,13 +271,17 @@ def test_tools_call_without_daemon_is_tool_error(
     assert "not running" in result["content"][0]["text"]
 
 
-def test_stdio_roundtrip() -> None:
+def test_stdio_roundtrip(tmp_path: Path) -> None:
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         {"jsonrpc": "2.0", "id": 2, "method": "server/discover"},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
     ]
     stdin = "\n".join(json.dumps(request) for request in requests) + "\n"
+    environment = os.environ.copy()
+    environment["SENTINEL_ORCH_HOME"] = str(tmp_path / "orch")
+    environment.pop("SENTINEL_ROLE", None)
+    environment.pop("CLAUDE_CODE_SESSION_ID", None)
     completed = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "orchestrator" / "mcp_server.py")],
         input=stdin,
@@ -278,6 +292,7 @@ def test_stdio_roundtrip() -> None:
         check=False,
         timeout=60,
         cwd=ROOT,
+        env=environment,
         creationflags=hidden_creationflags(),
     )
 
@@ -287,7 +302,7 @@ def test_stdio_roundtrip() -> None:
     assert len(responses[2]["result"]["tools"]) == 9
 
 
-def test_registration_heartbeat_repeats(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_registration_heartbeat_repeats(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_request(
@@ -306,7 +321,45 @@ def test_registration_heartbeat_repeats(monkeypatch: pytest.MonkeyPatch) -> None
     assert calls[0]["role"] == "dev"
 
 
-def test_auto_register_uses_sentinel_role(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_registration_cache_roundtrip(cache_env: Path) -> None:
+    payload = mcp_server.registration_payload("dev", "session-a", "ref-a")
+    mcp_server.save_registration(payload)
+
+    cached = mcp_server.load_cached_registration()
+    assert cached is not None
+    assert cached["role"] == "dev"
+    assert cached["session"] == "session-a"
+    assert cached["ref"] == "ref-a"
+    assert cached["mcp_pid"] == os.getpid()
+    assert cached["claude_pid"] == os.getpid()
+    assert len(list((cache_env / "agents").glob("*.json"))) == 1
+
+
+def test_auto_register_falls_back_to_cached_role(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_server.save_registration(mcp_server.registration_payload("doc", "session-b", "ref-b"))
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
+        return 200, {}
+
+    monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
+    stop = mcp_server.auto_register()
+    assert stop is not None
+    stop.set()
+    assert calls and calls[0]["role"] == "doc"
+    assert calls[0]["session"] == "session-b"
+
+    # 新 session id 没有缓存：不自动注册。
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-session-2")
+    assert mcp_server.auto_register() is None
+
+
+def test_auto_register_uses_sentinel_role(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
     def fake_request(
@@ -322,6 +375,13 @@ def test_auto_register_uses_sentinel_role(monkeypatch: pytest.MonkeyPatch) -> No
     stop.set()
     assert calls and calls[0]["role"] == "doc"
     assert calls[0]["pid"] == os.getpid()
+    cached = mcp_server.load_cached_registration()
+    assert cached is not None
+    assert cached["role"] == "doc"
 
+    # 环境变量缺失时回退到本会话缓存。
     monkeypatch.delenv("SENTINEL_ROLE", raising=False)
-    assert mcp_server.auto_register() is None
+    fallback = mcp_server.auto_register()
+    assert fallback is not None
+    fallback.set()
+    assert calls[-1]["role"] == "doc"

@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import urllib.error
@@ -26,6 +28,7 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
 PROCESS_STARTED_AT = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+CACHE_DIR_NAME = "agents"
 _heartbeat_lock = threading.Lock()
 _heartbeat_stop: threading.Event | None = None
 _heartbeat_payload: dict[str, Any] | None = None
@@ -167,7 +170,73 @@ def registration_payload(role: str, session: str = "", ref: str = "") -> dict[st
         "command": f"mcp_server session={session} ref={ref}",
         "project": str(project_root()),
         "started_at": PROCESS_STARTED_AT,
+        "session": session,
+        "ref": ref,
     }
+
+
+def session_id() -> str:
+    return os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+
+
+def claude_pid() -> int:
+    raw = os.environ.get("CLAUDE_PID", "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def _cache_key(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+        return value
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _cache_file() -> Path | None:
+    sid = session_id()
+    if not sid:
+        return None
+    return orchestrator_home() / CACHE_DIR_NAME / f"{_cache_key(sid)}.json"
+
+
+def load_cached_registration() -> dict[str, Any] | None:
+    """读取本 Claude Code 会话上次注册的角色；窗口重置后 session id 变化即自然失效。"""
+    path = _cache_file()
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or str(data.get("session_id", "")) != session_id():
+        return None
+    role = data.get("role")
+    if not isinstance(role, str) or not role.strip():
+        return None
+    return dict(data)
+
+
+def save_registration(payload: dict[str, Any]) -> None:
+    path = _cache_file()
+    if path is None:
+        return
+    data = {
+        "session_id": session_id(),
+        "session": str(payload.get("session", "")),
+        "ref": str(payload.get("ref", "")),
+        "role": str(payload.get("role", "")),
+        "project": str(payload.get("project", "")),
+        "started_at": str(payload.get("started_at", "")),
+        "mcp_pid": os.getpid(),
+        "claude_pid": claude_pid(),
+        "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
 
 
 def start_registration_heartbeat(
@@ -189,9 +258,11 @@ def start_registration_heartbeat(
             if current is None:
                 continue
             try:
-                daemon_request("POST", "/register", current)
+                status, _ = daemon_request("POST", "/register", current)
             except (OSError, urllib.error.URLError):
                 continue
+            if 200 <= status < 300:
+                save_registration(current)
 
     threading.Thread(target=loop, daemon=True, name="orchestrator-heartbeat").start()
     return stop
@@ -207,15 +278,22 @@ def stop_registration_heartbeat() -> None:
 
 
 def auto_register() -> threading.Event | None:
-    """MCP server 启动时若进程带 SENTINEL_ROLE，则立即注册并开始心跳。"""
+    """有 SENTINEL_ROLE 用环境角色；否则回退到本会话缓存中的角色。"""
+    cached = load_cached_registration()
     role = os.environ.get("SENTINEL_ROLE", "").strip()
+    if not role and cached is not None:
+        role = str(cached.get("role", "")).strip()
     if not role:
         return None
-    payload = registration_payload(role)
+    session = str(cached.get("session", "")) if cached is not None else ""
+    ref = str(cached.get("ref", "")) if cached is not None else ""
+    payload = registration_payload(role, session, ref)
     try:
-        daemon_request("POST", "/register", payload)
+        status, _ = daemon_request("POST", "/register", payload)
     except (OSError, urllib.error.URLError):
-        pass
+        status = 0
+    if 200 <= status < 300:
+        save_registration(payload)
     return start_registration_heartbeat(payload)
 
 
@@ -344,6 +422,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     except (OSError, urllib.error.URLError) as exc:
         return _tool_result(503, {"error": str(exc)})
     if name == "orchestrator_register" and 200 <= status < 300 and payload is not None:
+        save_registration(payload)
         start_registration_heartbeat(payload)
     return _tool_result(status, body)
 

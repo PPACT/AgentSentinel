@@ -84,6 +84,8 @@ def daemon(tmp_path: Path) -> Iterator[Path]:
     environment = os.environ.copy()
     environment["SENTINEL_ORCH_HOME"] = str(home)
     environment["PYTHONUTF8"] = "1"
+    # 关闭后台缓存整理，避免与用例内的显式 /discover 竞态。
+    environment["SENTINEL_ORCH_AGENT_CACHE_SECONDS"] = "3600"
     log_path = tmp_path / "daemon.log"
     with log_path.open("w", encoding="utf-8") as stream:
         process = subprocess.Popen(
@@ -261,3 +263,33 @@ def test_reregister_preserves_agent_started_at(daemon: Path) -> None:
     )
     assert status == 200
     assert body["agent"]["started_at"] == started_at
+
+
+def test_discover_recovers_live_cache_and_prunes_dead(daemon: Path) -> None:
+    cache_dir = daemon / "agents"
+    cache_dir.mkdir()
+    started_at = "2026-01-02T03:04:05.000000Z"
+    live = {
+        "session_id": "s1",
+        "session": "agentsentinel-test",
+        "ref": "r1",
+        "role": "dev",
+        "project": str(ROOT),
+        "started_at": started_at,
+        "mcp_pid": os.getpid(),
+        "claude_pid": os.getpid(),
+        "updated_at": started_at,
+    }
+    (cache_dir / "s1.json").write_text(json.dumps(live), encoding="utf-8")
+    dead = dict(live, session_id="s2", mcp_pid=999_999_999, claude_pid=999_999_999)
+    (cache_dir / "s2.json").write_text(json.dumps(dead), encoding="utf-8")
+
+    status, body = _api(daemon, "POST", "/discover", {})
+    assert status == 200
+    assert body["recovered"] == 1
+    assert body["pruned"] == 1
+    by_role = {item["role"]: item for item in body["agents"]}
+    assert by_role["dev"]["alive"] is True
+    assert by_role["dev"]["pid"] == os.getpid()
+    assert by_role["dev"]["started_at"] == started_at
+    assert not (cache_dir / "s2.json").exists()

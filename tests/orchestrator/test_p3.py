@@ -104,6 +104,7 @@ def daemon_factory(tmp_path: Path) -> Iterator[Any]:
         target.mkdir(parents=True, exist_ok=True)
         environment = os.environ.copy()
         environment["SENTINEL_ORCH_HOME"] = str(target)
+        environment["SENTINEL_ORCH_ALLOW_MANAGED_WORKERS"] = "1"
         environment["PYTHONUTF8"] = "1"
         if env:
             environment.update(env)
@@ -146,6 +147,7 @@ def _need(home: Path, *, key: str = "k1", to_role: str = "dev") -> tuple[int, di
             "intent": "implement",
             "pointer": "docs/local/交流区/交流区.md#p3",
             "idempotency_key": key,
+            "execution": "managed",
         },
     )
 
@@ -346,6 +348,7 @@ def test_claim_timeout_respects_ack(tmp_path: Path) -> None:
 def test_late_ack_during_claim_returns_409_and_no_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     db = tmp_path / "db.sqlite3"
     registry = Registry(db)
     store = TaskStore(db)
@@ -365,6 +368,7 @@ def test_late_ack_during_claim_returns_409_and_no_failed(
                 "intent": "implement",
                 "pointer": "p",
                 "idempotency_key": "late-ack",
+                "execution": "managed",
             }
         )
         assert code == 200

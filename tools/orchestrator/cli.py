@@ -260,6 +260,11 @@ def _parser() -> argparse.ArgumentParser:
     need.add_argument("--task-id", dest="task_id", default="")
     need.add_argument("--max-tokens", dest="max_tokens", type=int, default=0)
     need.add_argument("--max-minutes", dest="max_minutes", type=int, default=0)
+    need.add_argument(
+        "--managed",
+        action="store_true",
+        help="target 未注册时允许拉起托管 worker（需 SENTINEL_ORCH_ALLOW_MANAGED_WORKERS=1）",
+    )
 
     ack = subparsers.add_parser("ack", help="acknowledge a delivered task")
     ack.add_argument("--task-id", dest="task_id", required=True)
@@ -364,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
                     "max_tokens": int(args.max_tokens),
                     "max_minutes": int(args.max_minutes),
                 }
+            if args.managed:
+                need_payload["execution"] = "managed"
             status, body = _request(home, "POST", "/need", need_payload)
         elif args.command == "ack":
             status, body = _request(

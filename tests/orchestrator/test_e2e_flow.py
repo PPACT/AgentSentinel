@@ -81,6 +81,7 @@ def _start_daemon(home: Path, log_path: Path, **env: str) -> DaemonProcess:
     home.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment["SENTINEL_ORCH_HOME"] = str(home)
+    environment["SENTINEL_ORCH_ALLOW_MANAGED_WORKERS"] = "1"
     environment["PYTHONUTF8"] = "1"
     environment.update(env)
     with log_path.open("w", encoding="utf-8") as stream:
@@ -151,6 +152,7 @@ def test_doc_need_auto_starts_dev_and_no_residual(daemon: Path) -> None:
             "pointer": "docs/local/交流区/交流区.md#p4",
             "acceptance": ["tests pass"],
             "idempotency_key": "e2e-flow",
+            "execution": "managed",
         },
     )
     assert code == 200, body
@@ -241,6 +243,7 @@ def test_real_worker_end_to_end(tmp_path: Path) -> None:
                 "pointer": str(pointer.relative_to(ROOT)),
                 "acceptance": ["workspace/e2e-real-output.txt == P4_E2E"],
                 "idempotency_key": "e2e-real",
+                "execution": "managed",
             },
         )
         assert code == 200, body

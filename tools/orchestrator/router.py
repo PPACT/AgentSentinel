@@ -23,13 +23,16 @@ from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 
 BUSY_TIMEOUT_MS = 5000
 ACK_TIMEOUT_ENV = "SENTINEL_ORCH_ACK_TIMEOUT_SECONDS"
+EXTERNAL_ACK_TIMEOUT_ENV = "SENTINEL_ORCH_EXTERNAL_ACK_TIMEOUT_SECONDS"
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 LOST_SECONDS_ENV = "SENTINEL_ORCH_LOST_SECONDS"
 WATCHDOG_SECONDS_ENV = "SENTINEL_ORCH_WATCHDOG_SECONDS"
 ROLE_BUDGET_ENV = "SENTINEL_ORCH_ROLE_BUDGET_TOKENS"
 TASK_MAX_TOKENS_ENV = "SENTINEL_ORCH_TASK_MAX_TOKENS"
 TASK_MAX_MINUTES_ENV = "SENTINEL_ORCH_TASK_MAX_MINUTES"
+ALLOW_MANAGED_WORKERS_ENV = "SENTINEL_ORCH_ALLOW_MANAGED_WORKERS"
 DEFAULT_ACK_TIMEOUT_SECONDS = 120.0
+DEFAULT_EXTERNAL_ACK_TIMEOUT_SECONDS = 1800.0
 DEFAULT_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOST_SECONDS = 120.0
 DEFAULT_WATCHDOG_SECONDS = 30.0
@@ -48,6 +51,17 @@ WRITABLE_STATUSES = (
 STEP_STATUSES = ("pending", "done", "failed")
 MAX_DELIVERY_ATTEMPTS = 2
 _ROLE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+_SESSION_TOKEN = re.compile(r"\bsession=(\S+)")
+_REF_TOKEN = re.compile(r"\bref=(\S+)")
+
+
+def _command_identity(command: str) -> tuple[str, str]:
+    """从注册 command 中取 MCP session/ref，供发送方唤醒空闲窗口。"""
+    session = _SESSION_TOKEN.search(command)
+    ref = _REF_TOKEN.search(command)
+    return (session.group(1) if session else "", ref.group(1) if ref else "")
+
+
 _TASK_COLUMNS = (
     "task_id",
     "from_role",
@@ -56,6 +70,7 @@ _TASK_COLUMNS = (
     "pointer",
     "acceptance",
     "status",
+    "delivery",
     "idempotency_key",
     "max_tokens",
     "max_minutes",
@@ -95,6 +110,15 @@ class RoleBudgetExceeded(TaskError):
 
 def ack_timeout_seconds() -> float:
     return _positive_env(ACK_TIMEOUT_ENV, DEFAULT_ACK_TIMEOUT_SECONDS)
+
+
+def external_ack_timeout_seconds() -> float:
+    return _positive_env(EXTERNAL_ACK_TIMEOUT_ENV, DEFAULT_EXTERNAL_ACK_TIMEOUT_SECONDS)
+
+
+def allow_managed_workers() -> bool:
+    raw = os.environ.get(ALLOW_MANAGED_WORKERS_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def lost_timeout_seconds() -> float:
@@ -169,6 +193,7 @@ class Task:
     pointer: str
     acceptance: list[str]
     status: str
+    delivery: str
     idempotency_key: str
     max_tokens: int | None
     max_minutes: int | None
@@ -195,6 +220,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         pointer=str(row["pointer"]),
         acceptance=_json_list(raw_acceptance),
         status=str(row["status"]),
+        delivery=str(row["delivery"] or ""),
         idempotency_key=str(row["idempotency_key"]),
         max_tokens=_opt_int(row, "max_tokens"),
         max_minutes=_opt_int(row, "max_minutes"),
@@ -249,6 +275,7 @@ class TaskStore:
                 "pointer TEXT NOT NULL, "
                 "acceptance TEXT NOT NULL, "
                 "status TEXT NOT NULL, "
+                "delivery TEXT NOT NULL DEFAULT '', "
                 "idempotency_key TEXT NOT NULL UNIQUE, "
                 "max_tokens INTEGER, "
                 "max_minutes INTEGER, "
@@ -260,6 +287,11 @@ class TaskStore:
                 "artifacts TEXT NOT NULL DEFAULT '[]', "
                 "cost_tokens INTEGER NOT NULL DEFAULT 0)"
             )
+            task_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "delivery" not in task_columns:
+                connection.execute("ALTER TABLE tasks ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS messages ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -418,6 +450,7 @@ class TaskStore:
         idempotency_key: str,
         max_tokens: int | None,
         max_minutes: int | None,
+        delivery: str = "",
     ) -> tuple[Task, bool]:
         connection = self._connect()
         connection.execute("BEGIN IMMEDIATE")
@@ -447,6 +480,7 @@ class TaskStore:
                 connection.execute("ROLLBACK")
                 raise RoleBusy(f"role busy: {to_role} ({busy['task_id']})")
             now = _now()
+            normalized_delivery = delivery if delivery in {"external", "managed"} else ""
             connection.execute(
                 "INSERT INTO tasks(" + ", ".join(_TASK_COLUMNS) + ") "
                 "VALUES(" + ", ".join("?" for _ in _TASK_COLUMNS) + ")",
@@ -458,6 +492,7 @@ class TaskStore:
                     pointer,
                     json.dumps(acceptance, ensure_ascii=False),
                     "queued",
+                    normalized_delivery,
                     idempotency_key,
                     max_tokens,
                     max_minutes,
@@ -785,15 +820,19 @@ class TaskStore:
             raise TaskNotFound(task_id)
         return updated
 
-    def due_for_ack(self, cutoff: str) -> list[Task]:
+    def due_for_ack(self, cutoff: str, *, delivery: str | None = None) -> list[Task]:
         connection = self._connect()
         try:
-            rows = connection.execute(
+            query = (
                 "SELECT "
                 + ", ".join(_TASK_COLUMNS)
-                + " FROM tasks WHERE status='delivered' AND updated_at <= ?",
-                (cutoff,),
-            ).fetchall()
+                + " FROM tasks WHERE status='delivered' AND updated_at <= ?"
+            )
+            params: list[object] = [cutoff]
+            if delivery is not None:
+                query += " AND delivery=?"
+                params.append(delivery)
+            rows = connection.execute(query, tuple(params)).fetchall()
         finally:
             connection.close()
         return [_row_to_task(row) for row in rows]
@@ -1308,6 +1347,18 @@ class Router:
             if budget_limit > 0 and spent >= budget_limit:
                 raise RoleBudgetExceeded(f"role budget exceeded: {to_role} {spent}/{budget_limit}")
 
+        target = self.registry.get(to_role)
+        if target is not None and process_alive(target.pid):
+            delivery = "external" if not target.job_id else "managed"
+        else:
+            requested = str(payload.get("execution") or "").strip().lower()
+            if requested != "managed" or not allow_managed_workers():
+                return 409, {
+                    "error": f"no live agent for role: {to_role}",
+                    "reason": "no_live_agent",
+                }
+            delivery = "managed"
+
         task, created = self.store.create_or_get(
             task_id=task_id,
             from_role=from_role,
@@ -1318,9 +1369,26 @@ class Router:
             idempotency_key=idempotency_key,
             max_tokens=max_tokens,
             max_minutes=max_minutes,
+            delivery=delivery,
         )
         if not created:
-            return 200, {"task": task.to_dict(), "idempotent": True}
+            return 200, {
+                "task": task.to_dict(),
+                "idempotent": True,
+                "delivery": task.delivery,
+            }
+
+        if delivery == "external":
+            # 外部常驻会话：只落任务，不 stop、不 spawn；由目标 Stop Hook/工具领取。
+            delivered = self.store.mark_delivered(task.task_id)
+            session, ref = _command_identity(target.command if target is not None else "")
+            return 200, {
+                "task": delivered.to_dict(),
+                "idempotent": False,
+                "delivery": "external",
+                "target_session": session,
+                "target_ref": ref,
+            }
 
         try:
             self._stop_worker(to_role)
@@ -1330,7 +1398,11 @@ class Router:
             self._stop_worker(to_role)
             self.store.mark_failed(task.task_id, type(exc).__name__)
             raise
-        return 200, {"task": delivered.to_dict(), "idempotent": False}
+        return 200, {
+            "task": delivered.to_dict(),
+            "idempotent": False,
+            "delivery": "managed",
+        }
 
     def ack(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         task_id = _required_text(payload, "task_id")
@@ -1351,8 +1423,15 @@ class Router:
             task_id, role=role, artifacts=artifacts, cost_tokens=cost_tokens
         )
         worker = self.launcher.get(task.to_role)
-        if worker is not None and worker.mode == "real":
-            reclaim: dict[str, Any] = {
+        reclaim: dict[str, Any]
+        if task.delivery == "external":
+            reclaim = {
+                "role": task.to_role,
+                "deferred": True,
+                "note": "external agent; no worker reclaim",
+            }
+        elif worker is not None and worker.mode == "real":
+            reclaim = {
                 "role": task.to_role,
                 "deferred": True,
                 "note": "real worker exits naturally; usage captured on exit",
@@ -1415,8 +1494,33 @@ class Router:
 
     def check_timeouts(self, timeout_seconds: float) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
+        external_cutoff = _iso_before(external_ack_timeout_seconds())
+        for task in self.store.due_for_ack(external_cutoff, delivery="external"):
+            # 外部任务只转 timeout：绝不 spawn、绝不标 failed、绝不动外部进程。
+            claimed = self.store.claim_timeout(task.task_id, external_cutoff)
+            if claimed is None:
+                actions.append({"task_id": task.task_id, "action": "skipped"})
+                continue
+            current = self.store.get(task.task_id)
+            if current is None or current.status != STATUS_TIMEOUT_PENDING:
+                actions.append({"task_id": task.task_id, "action": "skipped"})
+                continue
+            try:
+                updated = self.store.mark_timeout(current.task_id)
+            except InvalidTransition:
+                actions.append({"task_id": task.task_id, "action": "skipped"})
+                continue
+            actions.append(
+                {
+                    "task_id": current.task_id,
+                    "action": "external_timeout",
+                    "attempts": updated.attempts,
+                }
+            )
         cutoff = _iso_before(timeout_seconds)
         for task in self.store.due_for_ack(cutoff):
+            if task.delivery == "external":
+                continue
             # 租约：仅 delivered 可 claim；ACK 先到则放弃，不碰进程。
             claimed = self.store.claim_timeout(task.task_id, cutoff)
             if claimed is None:
@@ -1605,6 +1709,15 @@ class Router:
                 actions.append({"role": record.role, "action": "agent_lost"})
         for task in self.store.list_tasks():
             if task.status in {"queued", "delivered", "running", STATUS_TIMEOUT_PENDING}:
+                if task.delivery == "external":
+                    if task.status == STATUS_TIMEOUT_PENDING:
+                        try:
+                            self.store.mark_timeout(task.task_id)
+                        except InvalidTransition:
+                            pass
+                        actions.append({"task_id": task.task_id, "action": "external_timeout"})
+                    # 外部 delivered/running 保留，等目标会话恢复后继续。
+                    continue
                 self.store.mark_failed(task.task_id, "daemon_restart")
                 actions.append({"task_id": task.task_id, "action": "task_failed"})
         return actions

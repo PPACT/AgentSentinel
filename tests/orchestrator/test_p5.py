@@ -173,6 +173,7 @@ def test_role_budget_rejects_new_need(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_task_budget_defaults_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SENTINEL_ORCH_TASK_MAX_TOKENS", "1234")
     monkeypatch.setenv("SENTINEL_ORCH_TASK_MAX_MINUTES", "7")
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     router, _, launcher = _router(tmp_path)
     try:
         code, body = router.need(
@@ -182,6 +183,7 @@ def test_task_budget_defaults_from_env(tmp_path: Path, monkeypatch: pytest.Monke
                 "intent": "x",
                 "pointer": "p",
                 "idempotency_key": "defaults",
+                "execution": "managed",
             }
         )
         assert code == 200
@@ -217,7 +219,8 @@ def test_minutes_budget_marks_exceeded(tmp_path: Path) -> None:
         launcher.stop_all()
 
 
-def test_observability_and_text_render(tmp_path: Path) -> None:
+def test_observability_and_text_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     router, _, launcher = _router(tmp_path)
     try:
         code, _ = router.need(
@@ -227,6 +230,7 @@ def test_observability_and_text_render(tmp_path: Path) -> None:
                 "intent": "x",
                 "pointer": "p",
                 "idempotency_key": "obs",
+                "execution": "managed",
             }
         )
         assert code == 200

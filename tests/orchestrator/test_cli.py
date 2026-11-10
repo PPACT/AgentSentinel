@@ -123,7 +123,8 @@ def test_daemon_exit_reclaims_workers(tmp_path: Path) -> None:
         _cleanup(home)
 
 
-def test_cli_task_workflow(tmp_path: Path) -> None:
+def test_cli_task_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     home = tmp_path / "orch"
     try:
         assert _run(home, "daemon", "start").returncode == 0
@@ -143,6 +144,7 @@ def test_cli_task_workflow(tmp_path: Path) -> None:
             "tests pass",
             "--idempotency-key",
             "cli-k",
+            "--managed",
         )
         assert need.returncode == 0, need.stderr
         task = _body(need)["task"]

@@ -129,7 +129,10 @@ def _router(tmp_path: Path) -> tuple[Router, Registry, TaskStore, Launcher]:
     return router, registry, store, launcher
 
 
-def test_watchdog_refreshes_live_worker_heartbeat(tmp_path: Path) -> None:
+def test_watchdog_refreshes_live_worker_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     router, registry, _, launcher = _router(tmp_path)
     try:
         code, _ = router.need(
@@ -139,6 +142,7 @@ def test_watchdog_refreshes_live_worker_heartbeat(tmp_path: Path) -> None:
                 "intent": "implement",
                 "pointer": "p",
                 "idempotency_key": "watch",
+                "execution": "managed",
             }
         )
         assert code == 200
@@ -155,7 +159,10 @@ def test_watchdog_refreshes_live_worker_heartbeat(tmp_path: Path) -> None:
         launcher.stop_all()
 
 
-def test_watchdog_fails_task_when_worker_exits(tmp_path: Path) -> None:
+def test_watchdog_fails_task_when_worker_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_ORCH_ALLOW_MANAGED_WORKERS", "1")
     router, registry, store, launcher = _router(tmp_path)
     try:
         code, body = router.need(
@@ -165,6 +172,7 @@ def test_watchdog_fails_task_when_worker_exits(tmp_path: Path) -> None:
                 "intent": "implement",
                 "pointer": "p",
                 "idempotency_key": "exit",
+                "execution": "managed",
             }
         )
         assert code == 200

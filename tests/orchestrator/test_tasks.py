@@ -94,11 +94,14 @@ def daemon_factory(
 ) -> Iterator[Any]:
     created: list[DaemonProcess] = []
 
-    def start(*, ack_timeout: float = 120.0) -> Path:
+    def start(*, ack_timeout: float = 120.0, external_ack_timeout: float | None = None) -> Path:
         home = tmp_path / f"orch-{len(created)}"
         environment = os.environ.copy()
         environment["SENTINEL_ORCH_HOME"] = str(home)
         environment["SENTINEL_ORCH_ACK_TIMEOUT_SECONDS"] = str(ack_timeout)
+        environment["SENTINEL_ORCH_ALLOW_MANAGED_WORKERS"] = "1"
+        if external_ack_timeout is not None:
+            environment["SENTINEL_ORCH_EXTERNAL_ACK_TIMEOUT_SECONDS"] = str(external_ack_timeout)
         environment["PYTHONUTF8"] = "1"
         log_path = tmp_path / f"daemon-{len(created)}.log"
         with log_path.open("w", encoding="utf-8") as stream:
@@ -146,6 +149,7 @@ def _need(
             "pointer": "docs/local/交流区/交流区.md#p2",
             "acceptance": ["tests pass"],
             "idempotency_key": key,
+            "execution": "managed",
         },
     )
 
@@ -351,3 +355,117 @@ def test_token_never_reaches_registry_or_logs(daemon_factory: Any, tmp_path: Pat
 
     for log_path in list((home / "logs").glob("*.log")) + list(tmp_path.glob("daemon-*.log")):
         assert token not in log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _register_external(
+    home: Path,
+    role: str = "dev",
+    command: str = "mcp_server session=agentsentinel-x ref=abc123",
+) -> None:
+    code, body = _api(
+        home,
+        "POST",
+        "/register",
+        {"role": role, "pid": os.getpid(), "project": str(ROOT), "command": command},
+    )
+    assert code == 200, body
+
+
+def test_need_delivers_to_registered_external_agent(daemon_factory: Any) -> None:
+    home = daemon_factory()
+    _register_external(home)
+
+    code, body = _api(
+        home,
+        "POST",
+        "/need",
+        {
+            "from_role": "doc",
+            "to_role": "dev",
+            "intent": "implement",
+            "pointer": "p",
+            "idempotency_key": "external-1",
+        },
+    )
+    assert code == 200, body
+    assert body["delivery"] == "external"
+    assert body["target_session"] == "agentsentinel-x"
+    assert body["target_ref"] == "abc123"
+    task = body["task"]
+    assert task["delivery"] == "external"
+    assert task["status"] == "delivered"
+
+    _, status = _api(home, "GET", "/status")
+    dev = next(item for item in status["agents"] if item["role"] == "dev")
+    assert dev["pid"] == os.getpid()
+    assert dev["status"] == "registered"
+    assert dev["alive"] is True
+
+    code, acked = _api(home, "POST", "/ack", {"task_id": task["task_id"], "role": "dev"})
+    assert code == 200, acked
+    assert acked["task"]["status"] == "running"
+    code, done = _api(home, "POST", "/completed", {"task_id": task["task_id"], "role": "dev"})
+    assert code == 200, done
+    assert done["task"]["status"] == "done"
+    _, status = _api(home, "GET", "/status")
+    dev = next(item for item in status["agents"] if item["role"] == "dev")
+    assert dev["pid"] == os.getpid()
+    assert dev["status"] == "registered"
+    assert dev["alive"] is True
+
+
+def test_need_rejects_unregistered_target(daemon_factory: Any) -> None:
+    home = daemon_factory()
+
+    code, body = _api(
+        home,
+        "POST",
+        "/need",
+        {
+            "from_role": "doc",
+            "to_role": "dev",
+            "intent": "implement",
+            "pointer": "p",
+            "idempotency_key": "no-agent",
+        },
+    )
+
+    assert code == 409, body
+    assert body["reason"] == "no_live_agent"
+    _, tasks = _api(home, "GET", "/tasks?role=dev")
+    assert tasks["tasks"] == []
+
+
+def test_external_timeout_marks_timeout_without_spawn(daemon_factory: Any) -> None:
+    home = daemon_factory(ack_timeout=0.1, external_ack_timeout=0.1)
+    _register_external(home)
+    code, body = _api(
+        home,
+        "POST",
+        "/need",
+        {
+            "from_role": "doc",
+            "to_role": "dev",
+            "intent": "implement",
+            "pointer": "p",
+            "idempotency_key": "external-timeout",
+        },
+    )
+    assert code == 200, body
+    task_id = body["task"]["task_id"]
+
+    deadline = time.monotonic() + 5
+    detail: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        _, detail = _api(home, "POST", "/task", {"task_id": task_id})
+        if detail["task"]["status"] == "timeout":
+            break
+        time.sleep(0.05)
+
+    assert detail["task"]["status"] == "timeout"
+    assert detail["task"]["status"] != "failed"
+    _, status = _api(home, "GET", "/status")
+    dev = next(item for item in status["agents"] if item["role"] == "dev")
+    assert dev["pid"] == os.getpid()
+    assert dev["alive"] is True
+    assert dev["status"] == "registered"

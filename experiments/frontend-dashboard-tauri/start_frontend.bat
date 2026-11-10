@@ -20,6 +20,15 @@ set "LOG=%LOGDIR%\frontend-dev.log"
 set "STATE=%LOG%.state"
 cd /d "%~dp0"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>nul
+set "LAUNCHLOG=%LOGDIR%\frontend-launch.log"
+
+rem Diagnostics only: separate file, safe to append even while the app holds frontend-dev.log.
+>>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat start args=%~1 cwd=%CD%
+>>"%LAUNCHLOG%" echo PATH=%PATH%
+>>"%LAUNCHLOG%" %SystemRoot%\System32\where.exe npm 2>&1
+>>"%LAUNCHLOG%" %SystemRoot%\System32\where.exe cargo 2>&1
+>>"%LAUNCHLOG%" %SystemRoot%\System32\tasklist.exe /FI "IMAGENAME eq agentsentinel-console.exe" 2>&1
+( %SystemRoot%\System32\netstat.exe -ano 2>&1 | %SystemRoot%\System32\findstr.exe /C:":1420 " /C:":8765 " ) >>"%LAUNCHLOG%" 2>&1
 
 %SystemRoot%\System32\tasklist.exe /FI "IMAGENAME eq agentsentinel-console.exe" 2>nul | %SystemRoot%\System32\find.exe /I "agentsentinel-console.exe" >nul
 if not errorlevel 1 (
@@ -67,6 +76,7 @@ rem Distinguish "never showed the app window" from "app ran and then exited".
 set "RESULT=failed"
 %SystemRoot%\System32\findstr.exe /C:"agentsentinel-console.exe" "%LOG%" >nul 2>nul && set "RESULT=exited"
 > "%STATE%" echo %RESULT%:%CODE%
+>>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat end code=%CODE% result=%RESULT%
 call :say "tauri dev ended with code %CODE% (%RESULT%)"
 exit /b %CODE%
 

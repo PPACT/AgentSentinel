@@ -15,8 +15,19 @@ bat = fso.GetAbsolutePathName(WScript.Arguments(0))
 logPath = fso.GetAbsolutePathName(fso.BuildPath(fso.GetParentFolderName(bat), "..\..\.claude\logs\frontend-dev.log"))
 statePath = logPath & ".state"
 
+LogLaunch "vbs start bat=" & bat
+
 ' window style 0 = hidden; True = wait for the dev process to exit.
+On Error Resume Next
 rc = shell.Run("cmd.exe /d /c call """ & bat & """ --hidden", 0, True)
+If Err.Number <> 0 Then
+  LogLaunch "vbs shell.Run error " & Err.Number & ": " & Err.Description
+  MsgBox "Launcher failed before the app started (error " & Err.Number & ")." & vbCrLf & _
+    Err.Description & vbCrLf & vbCrLf & "Log: " & logPath, vbExclamation, "AgentSentinel Console"
+  WScript.Quit 1
+End If
+On Error GoTo 0
+LogLaunch "vbs end rc=" & rc
 
 Select Case rc
   Case 0
@@ -100,3 +111,13 @@ Function StripAnsi(text)
   re.Pattern = Chr(27) & "\[[0-9;]*[A-Za-z]"
   StripAnsi = re.Replace(text, "")
 End Function
+
+Sub LogLaunch(message)
+  Dim path, f
+  path = fso.GetAbsolutePathName(fso.BuildPath(fso.GetParentFolderName(bat), "..\..\.claude\logs\frontend-launch.log"))
+  On Error Resume Next
+  Set f = fso.OpenTextFile(path, 8, True)
+  f.WriteLine Now & " " & message
+  f.Close
+  On Error GoTo 0
+End Sub

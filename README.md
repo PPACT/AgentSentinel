@@ -203,7 +203,7 @@ mypy>=1.8.0              # 静态类型检查
 2. **调用者身份校验**：`git_reset_to_baseline` 等回退指令，需经过严格的 Caller Identity 校验，仅限 Orchestrator 可调用。
 3. **审计追踪**：每一次推送、拦截、回退均以追加方式写入本地 JSONL 审计日志（`workspace/audit/push-log.jsonl`）；审计仅覆盖 push / revert / DENY，不承载状态流转。
 4. **Webhook 来源校验**：`POST /api/webhook/{source}` 先校验 `X-Hub-Signature-256`（HMAC-SHA256，常量时间比较），失败返回 `401`；验签通过后才进行 Fast/Slow Path 判定。GitHub 的 `comment` / `issue` / `pull_request` 载荷会归一为统一入口事件。
-5. **开发期 Hook 兜底**：`.claude/hooks/` 在开发会话中拦截强推、`reset --hard`、危险 `git clean` 组合与 `git add -A`，并在 `git push` 前扫描推送范围；命中交人工确认，扫描失败 fail-closed。
+5. **开发期 Hook 兜底**：`.claude/hooks/` 在开发会话中拦截强推、`reset --hard`、危险 `git clean` 组合与 `git add -A`，并在 `git push` 前扫描推送范围；命中交人工确认，扫描失败 fail-closed。会话日志上报 Hook 只使用 Stop 事件自带的最后一条助手消息，不读取项目外 transcript；字段缺失时不上报。
 
 ---
 

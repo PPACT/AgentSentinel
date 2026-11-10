@@ -175,6 +175,25 @@ def test_stop_reclaims_worker_and_child(daemon: Path) -> None:
     assert process_alive(child_pid) is False
 
 
+def test_stop_rejects_external_agent(daemon: Path) -> None:
+    status, _ = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "ext", "pid": os.getpid(), "command": "external"},
+    )
+    assert status == 200
+
+    status, body = _api(daemon, "POST", "/stop", {"role": "ext"})
+
+    assert status == 409
+    assert body["reason"] == "external_agent"
+    _, status_body = _api(daemon, "GET", "/status")
+    agent = next(item for item in status_body["agents"] if item["role"] == "ext")
+    assert agent["status"] == "registered"
+    assert agent["alive"] is True
+
+
 def test_shutdown_reclaims_all_workers(daemon: Path) -> None:
     status, started = _api(daemon, "POST", "/start", {"role": "dev", "dummy": True})
     assert status == 200

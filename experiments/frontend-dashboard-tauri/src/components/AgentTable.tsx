@@ -40,6 +40,7 @@ export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
             const row = formatAgent(agent);
             const role = agent.role ?? "";
             const pending = pendingRole === role;
+            const managed = Boolean(agent.job_id);
             return (
               <TableRow key={`${role}-${row.pid}`}>
                 <TableCell className="min-w-0 py-1 font-medium text-zinc-100">
@@ -67,14 +68,23 @@ export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
                 </TableCell>
                 <TableCell className="font-mono text-xs text-zinc-400">{row.currentTask}</TableCell>
                 <TableCell>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!role || pending}
-                    onClick={() => onStop(role)}
-                  >
-                    {pending ? "停止中…" : "停止"}
-                  </Button>
+                  {managed ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!role || pending || agent.alive === false}
+                      onClick={() => onStop(role)}
+                    >
+                      {pending ? "停止中…" : "停止"}
+                    </Button>
+                  ) : (
+                    <span
+                      className="whitespace-nowrap text-[10px] text-zinc-500"
+                      title="外部 Agent，由各自窗口管理；中控无法终止"
+                    >
+                      外部进程
+                    </span>
+                  )}
                 </TableCell>
               </TableRow>
             );

@@ -20,6 +20,7 @@ describe("AgentTable", () => {
             role: "dev",
             pid: 1234,
             pgid: 1234,
+            job_id: "job-1",
             status: "registered",
             alive: true,
             last_heartbeat: "2026-11-09T00:00:00Z",
@@ -43,7 +44,25 @@ describe("AgentTable", () => {
   });
 
   it("disables stop while pending", () => {
-    render(<AgentTable agents={[{ role: "dev" }]} pendingRole="dev" onStop={() => {}} />);
+    render(
+      <AgentTable
+        agents={[{ role: "dev", job_id: "job-1", alive: true }]}
+        pendingRole="dev"
+        onStop={() => {}}
+      />,
+    );
     expect(screen.getByRole("button", { name: "停止中…" })).toBeDisabled();
+  });
+
+  it("shows external process instead of stop for unmanaged agents", () => {
+    render(
+      <AgentTable
+        agents={[{ role: "dev", pid: 1234, alive: true }]}
+        pendingRole={null}
+        onStop={() => {}}
+      />,
+    );
+    expect(screen.getByText("外部进程")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
   });
 });

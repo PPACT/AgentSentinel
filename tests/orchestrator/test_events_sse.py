@@ -175,13 +175,13 @@ def _next_event(
     raise AssertionError(f"SSE event not received: {name}")
 
 
-def test_watch_redraws_once_on_register_and_stop(tmp_path: Path) -> None:
+def test_watch_redraws_once_on_start_and_stop(tmp_path: Path) -> None:
     home = tmp_path / "orch"
     process = _spawn(home, "--watch")
     try:
         _wait_info(home)
         time.sleep(0.4)
-        assert _api(home, "POST", "/register", {"role": "dev", "pid": os.getpid()})[0] == 200
+        assert _api(home, "POST", "/start", {"role": "dev", "dummy": True})[0] == 200
         time.sleep(0.6)
         assert _api(home, "POST", "/stop", {"role": "dev"})[0] == 200
         time.sleep(0.6)

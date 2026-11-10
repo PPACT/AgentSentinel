@@ -720,10 +720,22 @@ class Daemon:
         record = self.registry.get(role)
         if record is None:
             return 404, {"error": f"unknown role: {role}"}
+        if not record.job_id:
+            return 409, {
+                "error": f"external agent cannot be stopped: {role}",
+                "reason": "external_agent",
+                "agent": self._agent_dict(record),
+            }
         try:
             reclaim = self.launcher.stop(role)
         except KeyError:
-            reclaim = {"role": role, "note": "no live worker in launcher"}
+            if process_alive(record.pid):
+                return 409, {
+                    "error": f"agent is not managed by this daemon: {role}",
+                    "reason": "external_agent",
+                    "agent": self._agent_dict(record),
+                }
+            reclaim = {"role": role, "note": "worker already exited"}
         self.registry.set_status(role, "stopped")
         self._publish()
         return 200, {"stopped": True, "role": role, "reclaim": reclaim}

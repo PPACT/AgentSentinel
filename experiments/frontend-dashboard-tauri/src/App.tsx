@@ -35,8 +35,8 @@ export default function App() {
   const tasksTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logIdRef = useRef(0);
 
-  const appendLog = useCallback((level: LogLevel, text: string, at?: Date) => {
-    const entry = makeLogEntry(logIdRef.current++, level, text, at);
+  const appendLog = useCallback((level: LogLevel, text: string, at?: Date, role?: string) => {
+    const entry = makeLogEntry(logIdRef.current++, level, text, at, role);
     setLogs((prev) => appendBounded(prev, entry));
   }, []);
 
@@ -116,7 +116,7 @@ export default function App() {
         if (payload?.line) {
           const parsed = payload.ts ? new Date(payload.ts) : null;
           const at = parsed && !Number.isNaN(parsed.getTime()) ? parsed : undefined;
-          appendLog("info", logEventText(payload.role, payload.line), at);
+          appendLog("info", logEventText(payload.role, payload.line), at, payload.role);
         }
       },
       onState() {},
@@ -247,7 +247,7 @@ export default function App() {
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize="28" minSize="10" collapsible>
-          <ConsolePanel logs={logs} />
+          <ConsolePanel logs={logs} onClear={() => setLogs([])} />
         </ResizablePanel>
       </ResizablePanelGroup>
       <CommandPalette

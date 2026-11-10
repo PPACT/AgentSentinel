@@ -15,6 +15,19 @@ export interface Agent {
   alive?: boolean;
 }
 
+/** `/discover` 返回的未注册野生进程（只读展示）。 */
+export interface WildProcess {
+  pid?: number;
+  ppid?: number;
+  cwd?: string;
+  cmdline?: string;
+  create_time?: number;
+  source?: string;
+  root?: boolean;
+  child_pids?: number[];
+  bound_role?: string | null;
+}
+
 export interface Task {
   task_id?: string;
   from_role?: string;

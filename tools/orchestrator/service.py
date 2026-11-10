@@ -23,6 +23,7 @@ from types import FrameType
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from tools.orchestrator.drivers.cwd_process import CwdProcessDriver
 from tools.orchestrator.launcher import Launcher, process_alive
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import (
@@ -354,6 +355,7 @@ class Daemon:
             token=self.token,
             project=self.project,
         )
+        self.wild_driver = CwdProcessDriver()
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -529,7 +531,8 @@ class Daemon:
     def discover(self) -> dict[str, Any]:
         """手动检测：恢复存活会话缓存、清理死缓存，并重新探测已登记 agent 的存活。"""
         changed, recovered, pruned = self._reconcile_agent_cache()
-        for record in self.registry.list():
+        agents = self.registry.list()
+        for record in agents:
             alive = process_alive(record.pid)
             if alive and record.status in ("stopped", "lost"):
                 changed = self.registry.set_status(record.role, "registered") or changed
@@ -537,11 +540,19 @@ class Daemon:
                 changed = self.registry.set_status(record.role, "stopped") or changed
         if changed:
             self._publish()
+        agents = self.registry.list()
+        excluded_pids = {os.getpid()}
+        excluded_pids.update(record.pid for record in agents if record.status != "stopped")
+        wild = [
+            candidate.to_dict()
+            for candidate in self.wild_driver.discover(self.project, excluded_pids)
+        ]
         return {
             "discovered": True,
             "recovered": recovered,
             "pruned": pruned,
-            "agents": [self._agent_dict(record) for record in self.registry.list()],
+            "agents": [self._agent_dict(record) for record in agents],
+            "wild": wild,
         }
 
     def status(self) -> dict[str, Any]:

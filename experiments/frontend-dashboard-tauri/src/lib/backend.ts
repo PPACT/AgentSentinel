@@ -3,7 +3,7 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { Command, type Child } from "@tauri-apps/plugin-shell";
 
-import type { Agent, StatusSnapshot, TaskList } from "./types";
+import type { Agent, StatusSnapshot, TaskList, WildProcess } from "./types";
 
 /** 默认 daemon 未写 daemon.json 时的兜底地址（与 shell scope 一致）。 */
 const FALLBACK_BASE = "http://127.0.0.1:8765";
@@ -144,6 +144,7 @@ export interface DiscoverResult {
   recovered?: number;
   pruned?: number;
   agents?: Agent[];
+  wild?: WildProcess[];
 }
 
 /** 手动检测：让 daemon 重新探测已登记 agent 的进程存活。 */

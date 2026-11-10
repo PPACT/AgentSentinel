@@ -6,6 +6,7 @@ import { ConsolePanel } from "@/components/ConsolePanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
 import { TaskTable } from "@/components/TaskTable";
 import { TopBar } from "@/components/TopBar";
+import { WildTable } from "@/components/WildTable";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import {
@@ -22,7 +23,7 @@ import {
 import { errorMessage } from "@/lib/format";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
-import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task } from "@/lib/types";
+import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task, WildProcess } from "@/lib/types";
 
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
@@ -34,6 +35,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [wild, setWild] = useState<WildProcess[]>([]);
+  const [wildOpen, setWildOpen] = useState(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const logAbortRef = useRef<AbortController | null>(null);
@@ -216,12 +219,14 @@ export default function App() {
       const result = await discoverAgents();
       const found = Array.isArray(result.agents) ? result.agents : [];
       setAgents(found);
+      const wildProcesses = Array.isArray(result.wild) ? result.wild : [];
+      setWild(wildProcesses);
       const online = found.filter((agent) => agent.alive).length;
       const recovered = result.recovered ?? 0;
       const pruned = result.pruned ?? 0;
       appendLog(
         "info",
-        `检测 Agent：${found.length} 个，在线 ${online} 个；缓存恢复 ${recovered}，清理 ${pruned}`,
+        `检测 Agent：${found.length} 个，在线 ${online} 个；缓存恢复 ${recovered}，清理 ${pruned}，未注册进程 ${wildProcesses.length}`,
       );
       setError(null);
     } catch (err) {
@@ -269,6 +274,20 @@ export default function App() {
                     }}
                   />
                 </div>
+                {wild.length > 0 ? (
+                  <details
+                    className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40"
+                    open={wildOpen}
+                    onToggle={(event) => setWildOpen(event.currentTarget.open)}
+                  >
+                    <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-medium text-amber-300/90">
+                      未注册进程（{wild.length}）
+                    </summary>
+                    <div className="max-h-40 overflow-auto border-t border-zinc-800">
+                      <WildTable processes={wild} />
+                    </div>
+                  </details>
+                ) : null}
               </section>
             </ResizablePanel>
             <ResizableHandle withHandle />

@@ -12,6 +12,9 @@ pydantic-settings>=2.9.1
 python-dotenv>=1.0.1
 structlog>=25.4.0
 
+# ===== 编排服务嗅探层（tools/orchestrator，用户 2026-11-10 批准） =====
+psutil>=6.0
+
 # ===== 开发与质量检查（对应 AGENTS.md 红线） =====
 pytest>=8.0
 ruff>=0.3.0

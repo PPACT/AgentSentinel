@@ -218,6 +218,17 @@ def test_discover_reconciles_agent_liveness(daemon: Path) -> None:
     assert by_role["dead"]["status"] == "stopped"
 
 
+def test_discover_returns_wild_list_and_hides_daemon(daemon: Path) -> None:
+    status, body = _api(daemon, "POST", "/discover", {})
+    assert status == 200
+    wild = body.get("wild")
+    assert isinstance(wild, list)
+
+    _, status_body = _api(daemon, "GET", "/status")
+    daemon_pid = int(status_body["daemon"]["pid"])
+    assert daemon_pid not in {int(item["pid"]) for item in wild}
+
+
 def test_register_scopes_agents_to_daemon_project(daemon: Path) -> None:
     project = os.path.normcase(str(ROOT.resolve()))
     status, body = _api(

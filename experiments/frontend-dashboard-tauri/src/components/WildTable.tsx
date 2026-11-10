@@ -1,0 +1,64 @@
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import type { WildProcess } from "@/lib/types";
+
+interface WildTableProps {
+  processes: WildProcess[];
+}
+
+const COLUMNS = ["pid", "cwd", "cmdline", "子进程"];
+
+/** 未注册进程只读列表：仅展示进程树根，子进程折叠为数量。 */
+export function WildTable({ processes }: WildTableProps) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          {COLUMNS.map((column) => (
+            <TableHead key={column}>{column}</TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {processes.length === 0 ? (
+          <TableRow>
+            <TableCell colSpan={COLUMNS.length} className="py-4 text-center text-zinc-500">
+              未发现未注册进程
+            </TableCell>
+          </TableRow>
+        ) : (
+          processes.map((process) => {
+            const pid = process.pid ?? "—";
+            const cwd = process.cwd ?? "";
+            const cmdline = process.cmdline ?? "";
+            const children = process.child_pids?.length ?? 0;
+            return (
+              <TableRow key={`${pid}-${process.create_time ?? 0}`}>
+                <TableCell className="font-mono text-zinc-300">{pid}</TableCell>
+                <TableCell
+                  className="max-w-[10rem] truncate font-mono text-xs text-zinc-400"
+                  title={cwd}
+                >
+                  {cwd || "—"}
+                </TableCell>
+                <TableCell
+                  className="max-w-[22rem] truncate font-mono text-xs text-zinc-300"
+                  title={cmdline}
+                >
+                  {cmdline || "—"}
+                </TableCell>
+                <TableCell className="font-mono text-xs text-zinc-400">{children}</TableCell>
+              </TableRow>
+            );
+          })
+        )}
+      </TableBody>
+    </Table>
+  );
+}

@@ -428,13 +428,16 @@ class Daemon:
                 f"project mismatch: daemon={self.project} agent={_normalize_project(reported_project)}"
             )
         now = utc_now()
+        existing = self.registry.get(role)
+        requested_started_at = _str(payload.get("started_at")).strip()
+        started_at = requested_started_at or (existing.started_at if existing is not None else now)
         record = AgentRecord(
             role=role,
             pid=_int(payload.get("pid")),
             pgid=_int(payload.get("pgid")),
             job_id=_str(payload.get("job_id")),
             status=_str(payload.get("status")) or "registered",
-            started_at=_str(payload.get("started_at")) or now,
+            started_at=started_at,
             last_heartbeat=now,
             command=_str(payload.get("command")),
             updated_at=now,

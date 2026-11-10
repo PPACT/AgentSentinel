@@ -239,3 +239,25 @@ def test_register_scopes_agents_to_daemon_project(daemon: Path) -> None:
     status, body = _api(daemon, "GET", "/status")
     assert status == 200
     assert body["daemon"]["project"] == project
+
+
+def test_reregister_preserves_agent_started_at(daemon: Path) -> None:
+    started_at = "2026-01-02T03:04:05.000000Z"
+    status, body = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "dev", "pid": os.getpid(), "started_at": started_at},
+    )
+    assert status == 200
+    assert body["agent"]["started_at"] == started_at
+
+    # 心跳/自动注册重复上报但不带 started_at：保留首次值，不随 now 漂移。
+    status, body = _api(
+        daemon,
+        "POST",
+        "/register",
+        {"role": "dev", "pid": os.getpid()},
+    )
+    assert status == 200
+    assert body["agent"]["started_at"] == started_at

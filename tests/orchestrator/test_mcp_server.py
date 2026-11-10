@@ -164,6 +164,7 @@ def test_tool_request_register_uses_mcp_server_pid() -> None:
     assert payload["status"] == "registered"
     assert payload["command"] == "mcp_server session=agentsentinel-xx ref=abc123"
     assert payload["project"] == str(mcp_server.project_root())
+    assert payload["started_at"] == mcp_server.PROCESS_STARTED_AT
 
 
 def test_register_is_idempotent_and_resolvable(daemon_home: Path) -> None:

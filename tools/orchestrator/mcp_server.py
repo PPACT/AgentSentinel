@@ -14,6 +14,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ DEFAULT_HOME = PROJECT_ROOT / ".claude" / "orchestrator"
 REQUEST_TIMEOUT_SECONDS = 30.0
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
+PROCESS_STARTED_AT = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 _heartbeat_lock = threading.Lock()
 _heartbeat_stop: threading.Event | None = None
 _heartbeat_payload: dict[str, Any] | None = None
@@ -164,6 +166,7 @@ def registration_payload(role: str, session: str = "", ref: str = "") -> dict[st
         "status": "registered",
         "command": f"mcp_server session={session} ref={ref}",
         "project": str(project_root()),
+        "started_at": PROCESS_STARTED_AT,
     }
 
 

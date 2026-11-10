@@ -17,11 +17,14 @@ import signal
 import sys
 import threading
 import time
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 from tools.orchestrator.drivers.cwd_process import CwdProcessDriver
 from tools.orchestrator.launcher import Launcher, process_alive
@@ -55,6 +58,9 @@ REPORT_LINE_MAX = 4000
 AGENT_CACHE_INTERVAL_ENV = "SENTINEL_ORCH_AGENT_CACHE_SECONDS"
 DEFAULT_AGENT_CACHE_SECONDS = 30.0
 AGENT_CACHE_DIR = "agents"
+PENDING_DIR = "pending"
+PENDING_CLEANUP_THRESHOLD = 100
+PID_CREATE_TIME_TOLERANCE = 0.01
 
 
 def agent_cache_seconds() -> float:
@@ -338,6 +344,14 @@ def _str(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _unlink(path: Path) -> bool:
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 class Daemon:
     def __init__(self, home: Path, host: str = DEFAULT_HOST, port: int = 0) -> None:
         self.home = home
@@ -370,6 +384,7 @@ class Daemon:
         self._condition = threading.Condition()
         self._subscribers: list[queue.Queue[dict[str, Any]]] = []
         self.router.startup_recovery()
+        self.reconcile_pending_agents()
 
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
@@ -528,9 +543,109 @@ class Daemon:
             changed = True
         return changed, recovered, pruned
 
+    def reconcile_pending_agents(self) -> tuple[bool, int, int]:
+        """home/pending/<session>.json：按 PID + create_time 惰性发现 Agent。"""
+        pending_dir = self.home / PENDING_DIR
+        if not pending_dir.is_dir():
+            return False, 0, 0
+        files = sorted(pending_dir.glob("*.json"))
+        if not files:
+            return False, 0, 0
+        force_full = len(files) > PENDING_CLEANUP_THRESHOLD
+        changed = False
+        registered = 0
+        pruned = 0
+        for path in files:
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pruned += int(_unlink(path))
+                continue
+            data = parsed if isinstance(parsed, dict) else None
+            role = _str(data.get("role")).casefold() if data else ""
+            pid = _int(data.get("pid")) if data else 0
+            cwd = _str(data.get("cwd")) if data else ""
+            raw_create = data.get("pid_create_time") if data else None
+            if (
+                data is None
+                or not role
+                or _ROLE_PATTERN.fullmatch(role) is None
+                or pid <= 0
+                or not cwd
+                or not isinstance(raw_create, (int, float))
+            ):
+                pruned += int(_unlink(path))
+                continue
+            if _normalize_project(cwd) != self.project:
+                # 共享 home 时其它项目的 PID File 留给对应 daemon。
+                continue
+            try:
+                actual_create = psutil.Process(pid).create_time()
+            except (psutil.Error, OSError):
+                pruned += int(_unlink(path))
+                continue
+            if abs(float(raw_create) - actual_create) > PID_CREATE_TIME_TOLERANCE:
+                pruned += int(_unlink(path))
+                continue
+            existing = self.registry.get(role)
+            if existing is not None and existing.pid == pid and existing.status != "stopped":
+                continue
+            now = utc_now()
+            started_at = (
+                existing.started_at
+                if existing is not None and existing.pid == pid
+                else datetime.fromtimestamp(actual_create, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            )
+            self.registry.upsert(
+                AgentRecord(
+                    role=role,
+                    pid=pid,
+                    pgid=pid,
+                    job_id="",
+                    status="registered",
+                    started_at=started_at,
+                    last_heartbeat=now,
+                    command=f"pidfile {path.stem}",
+                    updated_at=now,
+                    project=self.project,
+                )
+            )
+            registered += 1
+            changed = True
+        if force_full:
+            pruned += self._dedupe_pending(files)
+        return changed, registered, pruned
+
+    def _dedupe_pending(self, files: list[Path]) -> int:
+        """超过阈值时全量清理：同一 role 只保留 mtime 最新的 PID File。"""
+        newest: dict[str, tuple[float, Path]] = {}
+        pruned = 0
+        for path in files:
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+                data = parsed if isinstance(parsed, dict) else None
+                mtime = path.stat().st_mtime
+            except (OSError, json.JSONDecodeError):
+                continue
+            role = _str(data.get("role")).casefold() if data else ""
+            if not role:
+                continue
+            current = newest.get(role)
+            if current is None or mtime > current[0]:
+                if current is not None:
+                    pruned += int(_unlink(current[1]))
+                newest[role] = (mtime, path)
+            else:
+                pruned += int(_unlink(path))
+        return pruned
+
     def discover(self) -> dict[str, Any]:
         """手动检测：恢复存活会话缓存、清理死缓存，并重新探测已登记 agent 的存活。"""
         changed, recovered, pruned = self._reconcile_agent_cache()
+        pending_changed, pending_registered, pending_pruned = self.reconcile_pending_agents()
+        changed = pending_changed or changed
+        recovered += pending_registered
+        pruned += pending_pruned
         agents = self.registry.list()
         for record in agents:
             alive = process_alive(record.pid)
@@ -551,6 +666,8 @@ class Daemon:
             "discovered": True,
             "recovered": recovered,
             "pruned": pruned,
+            "pending_registered": pending_registered,
+            "pending_pruned": pending_pruned,
             "agents": [self._agent_dict(record) for record in agents],
             "wild": wild,
         }
@@ -698,6 +815,7 @@ class Daemon:
                 if now - self._last_agent_cache >= agent_cache_seconds():
                     self._last_agent_cache = now
                     changed = self._reconcile_agent_cache()[0] or changed
+                    changed = self.reconcile_pending_agents()[0] or changed
                 if changed:
                     self._publish()
             except Exception:  # noqa: BLE001, S112 - 监控线程不因单次异常退出

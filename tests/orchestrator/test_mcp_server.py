@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 import pytest
 from tools.orchestrator import mcp_server
 from tools.orchestrator.launcher import hidden_creationflags
@@ -260,6 +261,7 @@ def test_register_offline_schedules_retry(cache_env: Path, monkeypatch: pytest.M
     assert cached is not None
     assert cached["role"] == "dev"
     assert list((cache_env / "agents").glob("*.json"))
+    assert (cache_env / "pending" / "test-session-1.json").exists()
 
 
 def test_offline_registration_retries_until_success(
@@ -390,6 +392,53 @@ def test_offline_registration_recovers_when_daemon_starts(
                 process.kill()
 
 
+def test_pending_pidfile_is_discovered_by_late_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "pidfile-orch"
+    monkeypatch.setenv("SENTINEL_ORCH_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "pidfile-session")
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+    mcp_server.write_pending_registration({"role": "dev"})
+
+    environment = os.environ.copy()
+    environment["SENTINEL_ORCH_HOME"] = str(home)
+    environment["PYTHONUTF8"] = "1"
+    log_path = tmp_path / "daemon.log"
+    with log_path.open("w", encoding="utf-8") as stream:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "tools.orchestrator.service",
+                "--serve",
+                "--port",
+                "0",
+                "--home",
+                str(home),
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            creationflags=hidden_creationflags(),
+        )
+    try:
+        _wait_daemon(home)
+        _, body = mcp_server.daemon_request("GET", "/status", None)
+        agents = body.get("agents", [])
+        assert any(
+            agent.get("role") == "dev" and agent.get("pid") == os.getpid() for agent in agents
+        )
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+
 def test_unknown_method_returns_jsonrpc_error() -> None:
     response = _call({"jsonrpc": "2.0", "id": 9, "method": "nope"})
     assert response["error"]["code"] == -32601
@@ -462,6 +511,19 @@ def test_registration_heartbeat_repeats(cache_env: Path, monkeypatch: pytest.Mon
     assert calls[0]["role"] == "dev"
 
 
+def test_registration_pidfile_roundtrip(cache_env: Path) -> None:
+    payload = mcp_server.registration_payload("dev", "session-a", "ref-a")
+    mcp_server.save_registration(payload)
+
+    path = cache_env / "pending" / "test-session-1.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert set(data) == {"pid", "pid_create_time", "role", "cwd"}
+    assert data["pid"] == os.getpid()
+    assert data["role"] == "dev"
+    assert data["cwd"] == str(mcp_server.project_root())
+    assert abs(float(data["pid_create_time"]) - psutil.Process(os.getpid()).create_time()) < 0.01
+
+
 def test_registration_cache_roundtrip(cache_env: Path) -> None:
     payload = mcp_server.registration_payload("dev", "session-a", "ref-a")
     mcp_server.save_registration(payload)
@@ -498,18 +560,20 @@ def test_registration_cache_retries_busy_replace(
 ) -> None:
     payload = mcp_server.registration_payload("dev", "session-d", "ref-d")
     real_replace = os.replace
-    calls = {"count": 0}
+    attempts: dict[str, int] = {}
 
     def flaky_replace(src: Any, dst: Any) -> None:
-        calls["count"] += 1
-        if calls["count"] < 3:
+        key = str(dst)
+        attempts[key] = attempts.get(key, 0) + 1
+        if attempts[key] < 3:
             raise PermissionError("cache file is busy")
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", flaky_replace)
     mcp_server.save_registration(payload)
 
-    assert calls["count"] == 3
+    assert sorted(attempts.values()) == [3, 3]
+    assert not list((cache_env / "pending").glob("*.tmp"))
     assert mcp_server.load_cached_registration() is not None
 
 

@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
+
 SERVER_NAME = "sentinel"
 SUPPORTED_PROTOCOL = "2024-11-05"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +33,7 @@ HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
 PROCESS_STARTED_AT = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 CACHE_DIR_NAME = "agents"
+PENDING_DIR_NAME = "pending"
 _heartbeat_lock = threading.Lock()
 _heartbeat_stop: threading.Event | None = None
 _heartbeat_payload: dict[str, Any] | None = None
@@ -234,7 +237,47 @@ def _replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
             time.sleep(0.02)
 
 
+def _pending_file() -> Path:
+    sid = session_id() or f"mcp-{os.getpid()}"
+    return orchestrator_home() / PENDING_DIR_NAME / f"{_cache_key(sid)}.json"
+
+
+def write_pending_registration(payload: dict[str, Any]) -> None:
+    """无条件落盘 PID File；daemon 是否在线都不影响，供其惰性发现。"""
+    role = str(payload.get("role", "")).strip().casefold()
+    if not role or re.fullmatch(r"[a-z0-9_-]+", role) is None:
+        return
+    try:
+        create_time = psutil.Process(os.getpid()).create_time()
+    except (psutil.Error, OSError):
+        return
+    data = {
+        "pid": os.getpid(),
+        "pid_create_time": create_time,
+        "role": role,
+        "cwd": str(project_root()),
+    }
+    path = _pending_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    except OSError:
+        return
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2))
+        _replace_with_retry(tmp_path, path)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+
 def save_registration(payload: dict[str, Any]) -> None:
+    write_pending_registration(payload)
     path = _cache_file()
     if path is None:
         return
@@ -318,11 +361,11 @@ def auto_register() -> threading.Event | None:
     ref = str(cached.get("ref", "")) if cached is not None else ""
     payload = registration_payload(role, session, ref)
     try:
-        status, _ = daemon_request("POST", "/register", payload)
+        daemon_request("POST", "/register", payload)
     except (OSError, urllib.error.URLError):
-        status = 0
-    if 200 <= status < 300:
-        save_registration(payload)
+        pass
+    # 无论 daemon 是否在线都落盘：PID File 供中控启动后惰性发现。
+    save_registration(payload)
     return start_registration_heartbeat(payload)
 
 

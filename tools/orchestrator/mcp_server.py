@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -218,6 +219,18 @@ def load_cached_registration() -> dict[str, Any] | None:
     return dict(data)
 
 
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """Windows 上 daemon 正在读缓存时 replace 可能报共享冲突，短暂重试。"""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.02)
+
+
 def save_registration(payload: dict[str, Any]) -> None:
     path = _cache_file()
     if path is None:
@@ -243,7 +256,7 @@ def save_registration(payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(data, ensure_ascii=False, indent=2))
-        os.replace(tmp_path, path)
+        _replace_with_retry(tmp_path, path)
     except OSError:
         try:
             tmp_path.unlink(missing_ok=True)

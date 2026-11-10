@@ -353,6 +353,26 @@ def test_registration_cache_concurrent_writes(cache_env: Path) -> None:
     assert not list((cache_env / "agents").glob("*.tmp"))
 
 
+def test_registration_cache_retries_busy_replace(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = mcp_server.registration_payload("dev", "session-d", "ref-d")
+    real_replace = os.replace
+    calls = {"count": 0}
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise PermissionError("cache file is busy")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    mcp_server.save_registration(payload)
+
+    assert calls["count"] == 3
+    assert mcp_server.load_cached_registration() is not None
+
+
 def test_auto_register_falls_back_to_cached_role(
     cache_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

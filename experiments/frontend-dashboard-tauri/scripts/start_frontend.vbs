@@ -46,6 +46,8 @@ Select Case rc
     MsgBox "npm was not found in PATH. Install Node.js or open a terminal where npm is available.", vbExclamation, "AgentSentinel Console"
   Case 5
     MsgBox "cargo was not found. Install Rust (rustup) or add %USERPROFILE%\.cargo\bin to PATH.", vbExclamation, "AgentSentinel Console"
+  Case 6
+    MsgBox "Could not create the run log under .claude\logs. Check write permission or disk space.", vbExclamation, "AgentSentinel Console"
   Case 0
     If Left(state, 7) <> "exited:" Then
       detail = Trim(StripAnsi(ReadTail(logPath, 1400)))

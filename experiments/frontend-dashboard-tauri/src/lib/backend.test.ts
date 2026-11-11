@@ -19,13 +19,14 @@ vi.mock("@tauri-apps/plugin-shell", () => ({ Command: { create: mocks.create } }
 describe("ensureDaemon", () => {
   it("dedupes concurrent starts (StrictMode double mount)", async () => {
     vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
-    let healthChecks = 0;
+    let started = false;
     mocks.fetch.mockImplementation(async () => {
-      healthChecks += 1;
-      if (healthChecks === 1) throw new Error("daemon down");
+      if (!started) throw new Error("daemon down");
       return { ok: true };
     });
-    const spawn = vi.fn(async () => undefined);
+    const spawn = vi.fn(async () => {
+      started = true;
+    });
     mocks.create.mockReturnValue({ spawn });
 
     const { ensureDaemon } = await import("./backend");
@@ -36,5 +37,19 @@ describe("ensureDaemon", () => {
     expect(mocks.create.mock.calls[0]?.[2]).toMatchObject({
       env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
     });
+  });
+
+  it("reuses a daemon answering on 8765 when daemon.json is stale", async () => {
+    vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
+    mocks.create.mockClear();
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url.includes(":8765/")) return { ok: true };
+      throw new Error("stale daemon.json");
+    });
+
+    const { ensureDaemon } = await import("./backend");
+    await ensureDaemon();
+
+    expect(mocks.create).not.toHaveBeenCalled();
   });
 });

@@ -207,3 +207,10 @@ class CwdProcessDriver:
             self._cache_at = now
             self._cache_value = candidates
         return list(candidates)
+
+    def clear_cache(self) -> None:
+        """清理/结束进程后强制下次重新扫描。"""
+        with self._lock:
+            self._cache_key = None
+            self._cache_at = 0.0
+            self._cache_value = []

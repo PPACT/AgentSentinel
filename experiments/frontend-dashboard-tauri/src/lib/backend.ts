@@ -57,9 +57,20 @@ async function healthy(base: string): Promise<boolean> {
   }
 }
 
+/**
+ * 返回当前真正在服务的 daemon 地址；daemon.json 陈旧时回退探测 8765。
+ * 拉起前必须用这个结果判断，避免把已有 daemon 当成未启动。
+ */
+async function activeDaemonBase(): Promise<string | null> {
+  const configured = await daemonBase();
+  if (await healthy(configured)) return configured;
+  if (configured !== FALLBACK_BASE && (await healthy(FALLBACK_BASE))) return FALLBACK_BASE;
+  return null;
+}
+
 /** 已在线则复用；否则用项目默认 home 在 8765 拉起 daemon。 */
 async function startDaemonOnce(): Promise<void> {
-  if (await healthy(await daemonBase())) return;
+  if (await activeDaemonBase()) return;
   const root = projectRoot();
   const home = await orchestratorHome();
   const command = Command.create(
@@ -70,7 +81,7 @@ async function startDaemonOnce(): Promise<void> {
   daemonChild = await command.spawn();
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (await healthy(await daemonBase())) return;
+    if (await activeDaemonBase()) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`daemon 启动超时（home=${home}）`);
@@ -164,6 +175,18 @@ export async function stopRole(role: string): Promise<void> {
   });
 }
 
+/** 强制清理未注册的 node/python 残留进程；create_time 用于防止 PID 复用误杀。 */
+export function cleanupWildProcess(
+  pid: number,
+  createTime: number,
+): Promise<{ cleaned?: boolean; pid?: number; killed?: number[] }> {
+  return requestJSON("/wild/cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pid, create_time: createTime }),
+  });
+}
+
 export async function eventStreamUrl(): Promise<string> {
   return `${await daemonBase()}/events`;
 }
@@ -176,4 +199,22 @@ export async function logStreamUrl(): Promise<string> {
 export async function streamFetch(url: string, init: RequestInit): Promise<Response> {
   const headers = { ...(await tokenHeader()), ...(init.headers as Record<string, string> | undefined) };
   return tauriFetch(url, { ...init, headers });
+}
+
+/** 发起一轮聊天，返回可直接读取的 SSE 响应流。 */
+export async function startChatStream(options: {
+  prompt: string;
+  sessionId?: string | null;
+  signal: AbortSignal;
+}): Promise<Response> {
+  const body: Record<string, string> = { prompt: options.prompt };
+  if (options.sessionId) body.session_id = options.sessionId;
+  const response = await streamFetch(`${await daemonBase()}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(body),
+    signal: options.signal,
+  });
+  if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);
+  return response;
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AgentTable } from "@/components/AgentTable";
+import { ChatDialog } from "@/components/ChatDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
@@ -10,6 +11,7 @@ import { WildTable } from "@/components/WildTable";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import {
+  cleanupWildProcess,
   discoverAgents,
   ensureDaemon,
   eventStreamUrl,
@@ -33,8 +35,10 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [cleaningPid, setCleaningPid] = useState<number | null>(null);
   const [wild, setWild] = useState<WildProcess[]>([]);
   const [wildOpen, setWildOpen] = useState(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -236,9 +240,34 @@ export default function App() {
     }
   }, [appendLog]);
 
+  const handleCleanupWild = useCallback(
+    async (process: WildProcess) => {
+      if (process.pid === undefined || process.create_time === undefined) return;
+      setCleaningPid(process.pid);
+      try {
+        const result = await cleanupWildProcess(process.pid, process.create_time);
+        const killed = Array.isArray(result.killed) ? result.killed : [];
+        appendLog("info", `强制清理 pid=${process.pid}：已结束 ${killed.join(", ") || "0"} 个进程`);
+        setError(null);
+        await handleDiscover();
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setCleaningPid(null);
+      }
+    },
+    [appendLog, handleDiscover],
+  );
+
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
-      <TopBar daemon={daemon} connection={connection} onOpenCommand={() => setPaletteOpen(true)} />
+      <TopBar
+        daemon={daemon}
+        connection={connection}
+        onOpenCommand={() => setPaletteOpen(true)}
+        onOpenChat={() => setChatOpen(true)}
+      />
+      <ChatDialog open={chatOpen} onOpenChange={setChatOpen} />
       {error ? (
         <div className="border-b border-red-500/30 bg-red-500/10 px-5 py-2 text-sm text-red-300">
           {error}
@@ -284,7 +313,11 @@ export default function App() {
                       未注册进程（{wild.length}）
                     </summary>
                     <div className="max-h-40 overflow-auto border-t border-zinc-800">
-                      <WildTable processes={wild} />
+                      <WildTable
+                        processes={wild}
+                        onCleanup={handleCleanupWild}
+                        busyPid={cleaningPid}
+                      />
                     </div>
                   </details>
                 ) : null}

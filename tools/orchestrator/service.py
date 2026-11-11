@@ -14,9 +14,11 @@ import queue
 import re
 import secrets
 import signal
+import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,8 +28,14 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
-from tools.orchestrator.drivers.cwd_process import CwdProcessDriver
-from tools.orchestrator.launcher import Launcher, process_alive
+from tools.orchestrator.chat import PROMPT_MAX_CHARS, SESSION_PATTERN, ChatManager
+from tools.orchestrator.drivers.cwd_process import CwdProcessDriver, _normalize_path, _within
+from tools.orchestrator.launcher import (
+    Launcher,
+    kill_process_tree,
+    process_alive,
+    sweep_leftover_real_workers,
+)
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import (
     InvalidTransition,
@@ -58,6 +66,153 @@ REPORT_LINE_MAX = 4000
 AGENT_CACHE_INTERVAL_ENV = "SENTINEL_ORCH_AGENT_CACHE_SECONDS"
 DEFAULT_AGENT_CACHE_SECONDS = 30.0
 AGENT_CACHE_DIR = "agents"
+INSTANCE_LOCK_NAME = "daemon.lock"
+SWEEP_WORKERS_ENV = "SENTINEL_ORCH_SWEEP_WORKERS"
+WILD_CLEANUP_ALLOWED_EXES = frozenset({"node.exe", "python.exe", "pythonw.exe"})
+
+_DEMO_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AgentSentinel Chat PoC</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.6 Inter, system-ui, sans-serif; background: #09090b; color: #e4e4e7; }
+  header { padding: 10px 16px; border-bottom: 1px solid #27272a; display: flex; gap: 12px; align-items: center; }
+  header strong { color: #38bdf8; }
+  #session { color: #a1a1aa; font-family: ui-monospace, monospace; font-size: 12px; }
+  main { padding: 16px; display: flex; flex-direction: column; gap: 8px; height: calc(100vh - 170px); overflow-y: auto; }
+  .msg { max-width: 860px; padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
+  .user { align-self: flex-end; background: #1e3a5f; }
+  .assistant { background: #18181b; border: 1px solid #27272a; }
+  .thinking { background: #141417; border-left: 3px solid #52525b; color: #a1a1aa; font-size: 12px; }
+  .tool { background: #132a1f; border-left: 3px solid #22c55e; color: #86efac; font-family: ui-monospace, monospace; font-size: 12px; }
+  .meta { color: #71717a; font-size: 12px; }
+  .error { background: #3f1d1d; color: #fca5a5; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 12px 16px; background: #0c0c0f; border-top: 1px solid #27272a; display: flex; gap: 8px; }
+  textarea { flex: 1; resize: none; height: 54px; background: #18181b; color: inherit; border: 1px solid #3f3f46; border-radius: 8px; padding: 8px; font: inherit; }
+  button { padding: 0 18px; border-radius: 8px; border: 1px solid #0ea5e9; background: #0c4a6e; color: #e0f2fe; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+</style>
+</head>
+<body>
+<header>
+  <strong>AgentSentinel Chat PoC</strong>
+  <span id="session">session: (新会话)</span>
+  <span class="meta">仅本机调试；每轮重启 claude -p</span>
+</header>
+<main id="messages"></main>
+<footer>
+  <textarea id="prompt" placeholder="输入内容，Ctrl+Enter 发送"></textarea>
+  <button id="send">发送</button>
+</footer>
+<script>
+const TOKEN = __TOKEN__;
+const messages = document.getElementById("messages");
+const promptBox = document.getElementById("prompt");
+const sendButton = document.getElementById("send");
+const sessionEl = document.getElementById("session");
+let sessionId = null;
+let busy = false;
+
+function add(kind, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + kind;
+  div.textContent = text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function renderEvent(raw) {
+  let event;
+  try { event = JSON.parse(raw); } catch { add("meta", raw); return; }
+  if (event.type === "system") {
+    add("meta", "初始化 session=" + event.session_id + " model=" + (event.model || "?"));
+    return;
+  }
+  if (event.type === "assistant") {
+    for (const block of (event.message && event.message.content) || []) {
+      if (block.type === "text") add("assistant", block.text);
+      else if (block.type === "thinking") add("thinking", "💭 " + (block.thinking || "（思考中）"));
+      else if (block.type === "tool_use") add("tool", "⚙️ " + block.name + " " + JSON.stringify(block.input || {}).slice(0, 200));
+    }
+    return;
+  }
+  if (event.type === "user") {
+    for (const block of (event.message && event.message.content) || []) {
+      if (block.type === "tool_result") add("tool", "✅ 工具返回");
+    }
+    return;
+  }
+  if (event.type === "result") {
+    add("meta", "本轮结束 subtype=" + event.subtype + " cost=$" + (event.total_cost_usd || 0).toFixed(4));
+  }
+}
+
+async function send() {
+  const prompt = promptBox.value.trim();
+  if (!prompt || busy) return;
+  add("user", prompt);
+  promptBox.value = "";
+  busy = true;
+  sendButton.disabled = true;
+  try {
+    const payload = { prompt: prompt };
+    if (sessionId) payload.session_id = sessionId;
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      add("error", "HTTP " + response.status + " " + (await response.text()));
+      return;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\\n\\n")) >= 0) {
+        const frame = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        let event = "message";
+        let data = "";
+        for (const line of frame.split("\\n")) {
+          if (line.startsWith("event: ")) event = line.slice(7);
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (event === "message") renderEvent(data);
+        else if (event === "end") {
+          const summary = JSON.parse(data);
+          sessionId = summary.session_id;
+          sessionEl.textContent = "session: " + sessionId;
+          add("meta", "summary resumed=" + summary.resumed + " cost=$" + (summary.cost_usd || 0).toFixed(4));
+        }
+      }
+    }
+  } catch (error) {
+    add("error", String(error));
+  } finally {
+    busy = false;
+    sendButton.disabled = false;
+  }
+}
+
+sendButton.addEventListener("click", send);
+promptBox.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    send();
+  }
+});
+</script>
+</body>
+</html>
+"""
 AGENT_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PENDING_DIR = "pending"
 PENDING_CLEANUP_THRESHOLD = 100
@@ -321,6 +476,105 @@ def write_daemon_info(home: Path, info: dict[str, Any]) -> None:
     os.replace(temp, path)
 
 
+def _read_daemon_info(home: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _port_in_use(host: str, port: int, timeout: float = 0.3) -> bool:
+    """固定端口启动前的占用检测；端口 0（临时端口）不检查。"""
+    if port <= 0:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _current_process_identity() -> tuple[int, float]:
+    pid = os.getpid()
+    try:
+        created = float(psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        created = 0.0
+    return pid, created
+
+
+def _lock_holder_alive(path: Path) -> bool:
+    """锁文件记录 pid + create_time；PID 被复用（create_time 不同）视为残留。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    pid = data.get("pid")
+    created = data.get("create_time")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    if isinstance(created, bool) or not isinstance(created, (int, float)) or created <= 0:
+        return False
+    try:
+        process = psutil.Process(pid)
+        return bool(
+            abs(process.create_time() - float(created)) <= 0.05
+            and process.is_running()
+            and process.status() != psutil.STATUS_ZOMBIE
+        )
+    except (psutil.Error, OSError):
+        return False
+
+
+def _acquire_instance_lock(home: Path) -> bool:
+    """同一 home 只允许一个 daemon；残留锁按 pid + create_time 判定后回收。"""
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / INSTANCE_LOCK_NAME
+    pid, created = _current_process_identity()
+    payload = json.dumps({"pid": pid, "create_time": created})
+    for _ in range(3):
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _lock_holder_alive(path):
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            continue
+        try:
+            os.write(handle, payload.encode("ascii"))
+        finally:
+            os.close(handle)
+        return True
+    return False
+
+
+def _release_instance_lock(home: Path) -> None:
+    path = home / INSTANCE_LOCK_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict) or data.get("pid") != os.getpid():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def _should_sweep_workers() -> bool:
+    """pytest 进程内禁用真实清扫，避免测试误杀宿主机进程。"""
+    if os.environ.get(SWEEP_WORKERS_ENV, "1").strip() == "0":
+        return False
+    return not os.environ.get("PYTEST_CURRENT_TEST")
+
+
 def _role(payload: dict[str, Any]) -> str:
     value = payload.get("role")
     if not isinstance(value, str) or not value.strip():
@@ -388,6 +642,7 @@ class Daemon:
             project=self.project,
         )
         self.wild_driver = CwdProcessDriver()
+        self.chat = ChatManager()
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -694,6 +949,76 @@ class Daemon:
             "wild": wild,
         }
 
+    def cleanup_wild(
+        self,
+        payload: dict[str, Any],
+        *,
+        process_factory: Callable[[int], Any] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """强制清理未注册的 node/python 残留进程（需 create_time 防 PID 复用）。"""
+        pid = _int(payload.get("pid"))
+        if pid <= 0:
+            return 400, {"error": "pid is required"}
+        raw_create = payload.get("create_time")
+        if isinstance(raw_create, bool) or not isinstance(raw_create, (int, float)):
+            return 400, {"error": "create_time is required", "reason": "missing_create_time"}
+        create_time = float(raw_create)
+        if create_time <= 0:
+            return 400, {"error": "create_time is required", "reason": "missing_create_time"}
+
+        factory = process_factory or psutil.Process
+        protected = {record.pid for record in self.registry.list() if record.pid > 0}
+        protected.add(os.getpid())
+        ancestor = os.getpid()
+        seen: set[int] = set()
+        while ancestor > 0 and ancestor not in seen:
+            seen.add(ancestor)
+            protected.add(ancestor)
+            try:
+                ancestor = int(factory(ancestor).ppid())
+            except (psutil.Error, OSError):
+                break
+        if pid in protected:
+            return 409, {"error": "process is protected", "reason": "protected_process"}
+
+        try:
+            process = factory(pid)
+            name = str(process.name()).casefold()
+        except psutil.NoSuchProcess:
+            return 404, {"error": "process not found", "reason": "not_found"}
+        except (psutil.Error, OSError) as exc:
+            return 500, {"error": f"cannot inspect process: {exc}"}
+        if name not in WILD_CLEANUP_ALLOWED_EXES:
+            return 400, {"error": f"process not cleanable: {name}", "reason": "not_cleanable"}
+        try:
+            actual_create = float(process.create_time())
+        except (psutil.Error, OSError) as exc:
+            return 500, {"error": f"cannot inspect process: {exc}"}
+        if abs(actual_create - create_time) > 0.05:
+            return 409, {"error": "process identity changed", "reason": "stale_process"}
+        try:
+            cwd = str(process.cwd())
+        except (psutil.Error, OSError):
+            cwd = ""
+        if not _within(cwd, _normalize_path(self.project)):
+            return 403, {"error": "process is outside the project", "reason": "outside_project"}
+
+        killed = kill_process_tree(pid, create_time, process_factory=factory)
+        self.wild_driver.clear_cache()
+        if not killed:
+            return 409, {"error": "process already exited", "reason": "stale_process"}
+        return 200, {"cleaned": True, "pid": pid, "killed": killed}
+
+    def _sweep_leftover_workers(self) -> None:
+        try:
+            excluded = {record.pid for record in self.registry.list() if record.pid > 0}
+            killed = sweep_leftover_real_workers(Path(self.project), excluded_pids=excluded)
+        except (psutil.Error, OSError, RuntimeError) as exc:
+            print(f"leftover worker sweep skipped: {exc}", file=sys.stderr, flush=True)
+            return
+        if killed:
+            print(f"leftover claude -p workers reclaimed: {killed}", file=sys.stderr, flush=True)
+
     def status(self) -> dict[str, Any]:
         port = self.port
         if self.server is not None:
@@ -861,6 +1186,29 @@ class Daemon:
         dashboard: bool = True,
         watch: bool = False,
         show_heartbeat: bool = False,
+        sweep_workers: bool = False,
+    ) -> None:
+        if not _acquire_instance_lock(self.home):
+            raise OSError(f"orchestrator already running for {self.home}")
+        try:
+            if _port_in_use(self.host, self.port):
+                raise OSError(f"orchestrator port {self.port} already in use")
+            if sweep_workers:
+                self._sweep_leftover_workers()
+            self._serve_forever(
+                dashboard=dashboard,
+                watch=watch,
+                show_heartbeat=show_heartbeat,
+            )
+        finally:
+            _release_instance_lock(self.home)
+
+    def _serve_forever(
+        self,
+        *,
+        dashboard: bool,
+        watch: bool,
+        show_heartbeat: bool,
     ) -> None:
         server = _Server((self.host, self.port), _Handler)
         server.daemon = self
@@ -912,6 +1260,7 @@ class Daemon:
             if watch_thread is not None:
                 watch_thread.join(timeout=5)
             self._wait_subscribers(timeout=2.0)
+            self.chat.stop_all()
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -979,6 +1328,50 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (ConnectionResetError, BrokenPipeError):
             # 客户端已断开（常见于前端取消/刷新），不是 daemon 错误。
+            return
+
+    def _stream_chat(self, payload: dict[str, Any]) -> None:
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            self._send(400, {"error": "prompt is required"})
+            return
+        if len(prompt) > PROMPT_MAX_CHARS:
+            self._send(400, {"error": f"prompt too long (>{PROMPT_MAX_CHARS})"})
+            return
+        session_id = payload.get("session_id")
+        if session_id is not None:
+            if not isinstance(session_id, str) or re.fullmatch(SESSION_PATTERN, session_id) is None:
+                self._send(400, {"error": "invalid session_id"})
+                return
+            if self.daemon.chat.is_busy(session_id):
+                self._send(409, {"error": "session busy", "reason": "chat_busy"})
+                return
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except (ConnectionResetError, BrokenPipeError):
+            return
+
+        def emit(event: str, data: str) -> bool:
+            return self._write_bytes(f"event: {event}\ndata: {data}\n\n".encode())
+
+        summary = self.daemon.chat.stream_turn(prompt.strip(), session_id, emit)
+        emit("end", json.dumps(summary, ensure_ascii=False))
+
+    def _send_demo_page(self, token: str) -> None:
+        body = _DEMO_PAGE.replace("__TOKEN__", json.dumps(token)).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, BrokenPipeError):
             return
 
     def _write_bytes(self, data: bytes) -> bool:
@@ -1166,6 +1559,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         path = urlparse(self.path).path
+        if method == "GET" and path == "/chat/demo":
+            query = parse_qs(urlparse(self.path).query)
+            supplied = (query.get("token") or [""])[0]
+            if not hmac.compare_digest(supplied, self.daemon.token):
+                self._send(401, {"error": "unauthorized"})
+                return
+            self._send_demo_page(supplied)
+            return
         if not self._authorized(path):
             self._send(401, {"error": "unauthorized"})
             return
@@ -1188,6 +1589,26 @@ class _Handler(BaseHTTPRequestHandler):
 
         if method == "POST" and path == "/discover":
             self._send(200, self.daemon.discover())
+            return
+
+        if method == "POST" and path == "/wild/cleanup":
+            try:
+                status, body = self.daemon.cleanup_wild(payload)
+            except (OSError, RuntimeError) as exc:
+                status, body = 500, {"error": str(exc)}
+            self._send(status, body)
+            return
+
+        if method == "POST" and path == "/chat":
+            self._stream_chat(payload)
+            return
+
+        if method == "POST" and path == "/chat/stop":
+            session_id = payload.get("session_id")
+            if not isinstance(session_id, str) or not self.daemon.chat.stop(session_id):
+                self._send(404, {"error": "no active chat"})
+            else:
+                self._send(200, {"stopped": True, "session_id": session_id})
             return
 
         if method == "GET" and path == "/health":
@@ -1384,6 +1805,7 @@ def main(argv: list[str] | None = None) -> int:
             dashboard=not args.no_dashboard,
             watch=args.watch,
             show_heartbeat=args.show_heartbeat,
+            sweep_workers=_should_sweep_workers(),
         )
     except OSError as exc:
         print(f"orchestrator failed to start: {exc}", file=sys.stderr, flush=True)

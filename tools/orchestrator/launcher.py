@@ -16,10 +16,15 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterable
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
+
+from tools.orchestrator.drivers.cwd_process import ProcessInfo, _psutil_snapshot
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DUMMY_WORKER = Path(__file__).with_name("dummy_worker.py")
@@ -190,7 +195,14 @@ def process_state(pid: int) -> dict[str, Any]:
     _require_windows()
     handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        return {"pid": pid, "exists": False, "error": ctypes.get_last_error()}
+        # 进程已退出时 OpenProcess 会失败；显式给 alive=false，避免调用方 KeyError。
+        return {
+            "pid": pid,
+            "exists": False,
+            "alive": False,
+            "exit_code": None,
+            "error": ctypes.get_last_error(),
+        }
     try:
         code = wintypes.DWORD()
         ok = _kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
@@ -208,6 +220,106 @@ def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     return bool(process_state(pid).get("alive"))
+
+
+WORKER_PROMPT_MARKER = "Active orchestration task:"
+_SWEEP_STOP_TIMEOUT_SECONDS = 3.0
+_SWEEP_CREATE_TIME_TOLERANCE = 0.05
+
+
+def _same_path(left: str, right: str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+    except (OSError, ValueError):
+        return False
+
+
+def is_leftover_real_worker(info: ProcessInfo, project_root: Path) -> bool:
+    """仅认本项目启动器签发的真实 worker，避免误杀用户终端里的 claude -p。"""
+    if not _same_path(info.cwd, str(project_root)):
+        return False
+    if WORKER_PROMPT_MARKER.casefold() not in info.cmdline_text.casefold():
+        return False
+    tokens = [token.casefold() for token in info.cmdline]
+    if not tokens:
+        return False
+    executable = os.path.basename(tokens[0]).casefold()
+    if not executable.startswith("claude"):
+        return False
+    if "-p" not in tokens and "--print" not in tokens:
+        return False
+    return "--append-system-prompt" in tokens
+
+
+def find_leftover_real_workers(
+    project_root: Path,
+    *,
+    snapshot: Callable[[], list[ProcessInfo]] | None = None,
+    excluded_pids: Iterable[int] = (),
+) -> list[ProcessInfo]:
+    list_processes = snapshot if snapshot is not None else _psutil_snapshot
+    excluded = {pid for pid in excluded_pids if pid > 0}
+    excluded.add(os.getpid())
+    return [
+        info
+        for info in list_processes()
+        if info.pid not in excluded and is_leftover_real_worker(info, project_root)
+    ]
+
+
+def kill_process_tree(
+    pid: int,
+    create_time: float | None = None,
+    *,
+    process_factory: Callable[[int], Any] | None = None,
+) -> list[int]:
+    """按 create_time 复核后结束进程树；先子后父，返回实际 kill 的 pid。"""
+    if pid <= 0:
+        return []
+    factory = process_factory or psutil.Process
+    try:
+        process = factory(pid)
+        if create_time is not None and abs(process.create_time() - create_time) > (
+            _SWEEP_CREATE_TIME_TOLERANCE
+        ):
+            return []
+        children = process.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
+    except (psutil.Error, OSError):
+        return []
+    targets = [*children, process]
+    killed: list[int] = []
+    for target in targets:
+        try:
+            target.terminate()
+        except (psutil.Error, OSError):
+            continue
+        killed.append(int(target.pid))
+    _, alive = psutil.wait_procs(targets, timeout=_SWEEP_STOP_TIMEOUT_SECONDS)
+    for target in alive:
+        try:
+            target.kill()
+        except (psutil.Error, OSError):
+            continue
+    return killed
+
+
+def sweep_leftover_real_workers(
+    project_root: Path,
+    *,
+    snapshot: Callable[[], list[ProcessInfo]] | None = None,
+    killer: Callable[[int, float | None], list[int]] | None = None,
+    excluded_pids: Iterable[int] = (),
+) -> list[int]:
+    """daemon 启动时清扫上次崩溃遗留的 ``claude -p`` worker。"""
+    kill = killer if killer is not None else kill_process_tree
+    killed: list[int] = []
+    for info in find_leftover_real_workers(
+        project_root, snapshot=snapshot, excluded_pids=excluded_pids
+    ):
+        killed.extend(kill(info.pid, info.create_time))
+    return sorted(set(killed))
 
 
 def create_job() -> int:

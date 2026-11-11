@@ -6,9 +6,10 @@ interface TopBarProps {
   daemon?: DaemonInfo;
   connection: ConnectionState;
   onOpenCommand: () => void;
+  onOpenChat: () => void;
 }
 
-export function TopBar({ daemon, connection, onOpenCommand }: TopBarProps) {
+export function TopBar({ daemon, connection, onOpenCommand, onOpenChat }: TopBarProps) {
   const open = connection === "open";
   return (
     <header className="flex items-center justify-between gap-4 border-b border-zinc-800 bg-zinc-900/70 px-5 py-3">
@@ -27,6 +28,9 @@ export function TopBar({ daemon, connection, onOpenCommand }: TopBarProps) {
           <span className={`size-1.5 rounded-full ${open ? "bg-emerald-400" : "bg-amber-400"}`} />
           {connectionLabel(connection)}
         </span>
+        <Button variant="outline" size="sm" className="font-mono text-xs" onClick={onOpenChat}>
+          对话
+        </Button>
         <Button variant="outline" size="sm" className="font-mono text-xs" onClick={onOpenCommand}>
           Ctrl+K 命令
         </Button>

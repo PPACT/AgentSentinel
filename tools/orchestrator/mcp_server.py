@@ -21,6 +21,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ DEFAULT_HOME = PROJECT_ROOT / ".claude" / "orchestrator"
 REQUEST_TIMEOUT_SECONDS = 30.0
 HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
 DEFAULT_HEARTBEAT_SECONDS = 15.0
+PARENT_CHECK_SECONDS_ENV = "SENTINEL_ORCH_PARENT_CHECK_SECONDS"
+DEFAULT_PARENT_CHECK_SECONDS = 2.0
 PROCESS_STARTED_AT = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 CACHE_DIR_NAME = "agents"
 PENDING_DIR_NAME = "pending"
@@ -186,6 +189,82 @@ def log_exception(context: str) -> None:
 def _signal_handler(signum: int, _frame: Any) -> None:
     log_event(f"signal {signum}")
     raise SystemExit(0)
+
+
+def parent_check_seconds() -> float:
+    raw = os.environ.get(PARENT_CHECK_SECONDS_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return DEFAULT_PARENT_CHECK_SECONDS
+        if value > 0:
+            return value
+    return DEFAULT_PARENT_CHECK_SECONDS
+
+
+def parent_alive(
+    pid: int,
+    create_time: float | None,
+    *,
+    process_factory: Callable[[int], Any] | None = None,
+) -> bool:
+    """父进程是否仍存活；PID 被系统复用时按 create_time 判死。
+
+    读不到信息时返回 True：宁可多活一轮，也不误杀自己。
+    """
+    if pid <= 0:
+        return True
+    factory = process_factory or psutil.Process
+    try:
+        process = factory(pid)
+        if create_time is not None and abs(float(process.create_time()) - create_time) > 0.05:
+            return False
+        return bool(process.is_running()) and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.Error, OSError):
+        return True
+
+
+def watch_parent(
+    pid: int,
+    create_time: float | None,
+    *,
+    alive: Callable[[int, float | None], bool] = parent_alive,
+    sleep: Callable[[float], None] = time.sleep,
+    exit_process: Callable[[int], None] = os._exit,
+    max_cycles: int | None = None,
+) -> None:
+    """父进程消失立即退出。
+
+    必须在独立线程里用 ``os._exit``：``sys.exit`` 只会结束当前线程，
+    主线程仍阻塞在 stdin 上，进程会变成孤儿。
+    """
+    cycles = 0
+    while max_cycles is None or cycles < max_cycles:
+        sleep(parent_check_seconds())
+        cycles += 1
+        if not alive(pid, create_time):
+            log_event(f"parent {pid} gone; exiting")
+            exit_process(0)
+            return
+
+
+def start_parent_watchdog() -> None:
+    pid = os.getppid()
+    if pid <= 0:
+        return
+    try:
+        create_time: float | None = float(psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        create_time = None
+    threading.Thread(
+        target=watch_parent,
+        args=(pid, create_time),
+        daemon=True,
+        name="orchestrator-parent-watch",
+    ).start()
 
 
 def _configure_stdio() -> None:
@@ -628,30 +707,35 @@ def main() -> int:
         log_exception("auto_register")
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
+    start_parent_watchdog()
     log_event("stdin loop start")
-    for line in sys.stdin:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            message = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(message, dict):
-            continue
-        log_event(f"recv method={message.get('method')!r} id={message.get('id')!r}")
-        try:
-            response = handle_message(message)
-        except Exception:  # noqa: BLE001 - 单条消息异常不应拖垮 MCP server
-            log_exception(f"handle_message {message.get('method')}")
-            response = {
-                "jsonrpc": "2.0",
-                "id": message.get("id"),
-                "error": {"code": -32603, "message": "internal error"},
-            }
-        if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+    try:
+        for line in sys.stdin:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                message = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            log_event(f"recv method={message.get('method')!r} id={message.get('id')!r}")
+            try:
+                response = handle_message(message)
+            except Exception:  # noqa: BLE001 - 单条消息异常不应拖垮 MCP server
+                log_exception(f"handle_message {message.get('method')}")
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {"code": -32603, "message": "internal error"},
+                }
+            if response is not None:
+                sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+    except (OSError, ValueError):
+        log_event("stdin closed; exiting")
+        return 0
     log_event("stdin EOF; exiting")
     return 0
 

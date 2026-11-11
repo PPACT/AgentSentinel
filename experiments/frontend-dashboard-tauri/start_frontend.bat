@@ -6,6 +6,7 @@ rem closes immediately and no black window stays tied to the app.
 rem Use `start_frontend.bat --console` to keep this console for debugging.
 if /i "%~1"=="--hidden" goto run
 if /i "%~1"=="--console" goto run
+if /i "%~1"=="--watch" goto run
 start "" /b "%SystemRoot%\System32\wscript.exe" //nologo "%~dp0scripts\start_frontend.vbs" "%~f0"
 exit /b 0
 
@@ -20,6 +21,7 @@ set "LAUNCHLOG=%LOGDIR%\frontend-launch.log"
 set "CURRENT=%LOGDIR%\frontend-dev.current"
 cd /d "%~dp0"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>nul
+if /i "%~1"=="--watch" goto watch
 
 rem Diagnostics only: separate file, safe to append even while an old run holds its log.
 >>"%LAUNCHLOG%" echo [%DATE% %TIME%] bat start args=%~1 cwd=%CD%
@@ -72,6 +74,8 @@ if not errorlevel 1 (
 )
 
 call :say "starting dev window (tauri dev, hot reload)..."
+>>"%LAUNCHLOG%" echo [%DATE% %TIME%] frontend npm dev starting
+start "" /b "%SystemRoot%\System32\cmd.exe" /d /c call "%~f0" --watch
 if /i "%~1"=="--console" (
   call npm run tauri dev
 ) else (
@@ -93,3 +97,17 @@ exit /b %CODE%
 echo [AgentSentinel] %~1
 >>"%LOG%" echo [%DATE% %TIME%] %~1
 exit /b 0
+
+:watch
+rem 启动计时：只记录“app 进程出现”这一条，与 npm start 行配对，
+rem 用于区分前端编译慢还是 daemon/运行时卡住。最多等 120 秒。
+for /l %%I in (1,1,120) do (
+  %SystemRoot%\System32\tasklist.exe /FI "IMAGENAME eq agentsentinel-console.exe" 2>nul | %SystemRoot%\System32\find.exe /I "agentsentinel-console.exe" >nul
+  if not errorlevel 1 (
+    >>"%LAUNCHLOG%" echo [%DATE% %TIME%] frontend app process up
+    exit /b 0
+  )
+  %SystemRoot%\System32\ping.exe -n 2 127.0.0.1 >nul
+)
+>>"%LAUNCHLOG%" echo [%DATE% %TIME%] frontend app process not seen within 120s
+exit /b 1

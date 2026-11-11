@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tools.orchestrator import service
 from tools.orchestrator.launcher import hidden_creationflags, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
@@ -366,3 +368,37 @@ def test_discover_skips_other_project_cache(daemon: Path) -> None:
     assert body["pruned"] == 0
     assert path.exists()
     assert body["agents"] == []
+
+
+def test_instance_lock_blocks_second_daemon(tmp_path: Path) -> None:
+    home = tmp_path / "orch"
+
+    assert service._acquire_instance_lock(home)
+    try:
+        assert not service._acquire_instance_lock(home)
+    finally:
+        service._release_instance_lock(home)
+
+    assert service._acquire_instance_lock(home)
+    service._release_instance_lock(home)
+
+
+def test_instance_lock_reclaims_stale_pid(tmp_path: Path) -> None:
+    home = tmp_path / "orch"
+    home.mkdir()
+    (home / service.INSTANCE_LOCK_NAME).write_text("2147483646", encoding="utf-8")
+
+    assert service._acquire_instance_lock(home)
+    service._release_instance_lock(home)
+
+
+def test_port_in_use_detects_listener() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = int(listener.getsockname()[1])
+    try:
+        assert service._port_in_use("127.0.0.1", port)
+    finally:
+        listener.close()
+    assert not service._port_in_use("127.0.0.1", port)

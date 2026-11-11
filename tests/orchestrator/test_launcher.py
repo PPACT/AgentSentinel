@@ -6,9 +6,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from tools.orchestrator import launcher as launcher_module
+from tools.orchestrator.drivers.cwd_process import ProcessInfo
 from tools.orchestrator.launcher import Launcher, process_alive
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object")
@@ -78,3 +80,69 @@ def test_stop_falls_back_to_taskkill(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert process_alive(worker.child_pid) is False
     finally:
         launcher.stop_all()
+
+
+def _process_info(pid: int, cwd: Path, cmdline: list[str], create_time: float = 1.0) -> Any:
+    return ProcessInfo(
+        pid=pid,
+        ppid=1,
+        cwd=str(cwd),
+        cmdline=tuple(cmdline),
+        create_time=create_time,
+    )
+
+
+def _real_worker_cmdline() -> list[str]:
+    return [
+        r"C:\Program Files\nodejs\claude.exe",
+        "-p",
+        "Work on orchestration task t-1.",
+        "--append-system-prompt",
+        "Active orchestration task: t-1",
+    ]
+
+
+def test_is_leftover_real_worker_matches_project_worker() -> None:
+    info = _process_info(111, launcher_module.PROJECT_ROOT, _real_worker_cmdline())
+
+    assert launcher_module.is_leftover_real_worker(info, launcher_module.PROJECT_ROOT)
+
+
+def test_is_leftover_real_worker_ignores_other_processes(tmp_path: Path) -> None:
+    worker_cmd = _real_worker_cmdline()
+    not_worker = [r"C:\Program Files\nodejs\node.exe", "server.js"]
+
+    assert not launcher_module.is_leftover_real_worker(
+        _process_info(222, tmp_path, worker_cmd), launcher_module.PROJECT_ROOT
+    )
+    assert not launcher_module.is_leftover_real_worker(
+        _process_info(333, launcher_module.PROJECT_ROOT, not_worker),
+        launcher_module.PROJECT_ROOT,
+    )
+    assert not launcher_module.is_leftover_real_worker(
+        _process_info(444, launcher_module.PROJECT_ROOT, ["claude.exe", "-p", "manual"]),
+        launcher_module.PROJECT_ROOT,
+    )
+
+
+def test_sweep_leftover_real_workers_skips_alive_agents() -> None:
+    snapshot = [
+        _process_info(111, launcher_module.PROJECT_ROOT, _real_worker_cmdline()),
+        _process_info(222, launcher_module.PROJECT_ROOT, _real_worker_cmdline()),
+        _process_info(333, launcher_module.PROJECT_ROOT, ["notepad.exe"]),
+    ]
+    killed: list[tuple[int, float]] = []
+
+    def fake_killer(pid: int, created: float | None) -> list[int]:
+        killed.append((pid, created or 0.0))
+        return [pid]
+
+    result = launcher_module.sweep_leftover_real_workers(
+        launcher_module.PROJECT_ROOT,
+        snapshot=lambda: snapshot,
+        killer=fake_killer,
+        excluded_pids={222},
+    )
+
+    assert result == [111]
+    assert killed == [(111, 1.0)]

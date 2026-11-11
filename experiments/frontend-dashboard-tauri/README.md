@@ -48,7 +48,8 @@ npm run tauri dev
 - 若默认 daemon 未运行，应用用同一 home 在 `8765` 拉起；registry 中已有的 dev/doc 记录会随之显示
   （`alive` 由 pid 是否存活决定）。
 - 顶栏与 Agent 行展示 daemon/agent 所属 `project`（末级目录名，悬停看完整路径）；「检测 Agent」
-  按钮调用 `POST /discover` 重新探测存活，并恢复/清理角色缓存，Console 显示「缓存恢复 N / 清理 M」。
+  按钮调用 `POST /discover` 重新探测存活，并恢复/清理角色缓存，Console 显示「缓存恢复 N / 清理 M」，
+  Agents 下方展示只读「未注册进程」列表（`wild`，P2 绑定未实现）。
   跨项目注册会被 daemon 以 409 拒绝。
 - 页面显示「暂无 agent」只表示该 registry 目前确实没有记录；需要时可手动注册 demo：
 

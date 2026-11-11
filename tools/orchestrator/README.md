@@ -70,7 +70,11 @@ scripts\start_orchestrator.cmd -Action stop
 
 ## 端点与 MCP 工具
 
-HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/events` `/logs/stream` `/shutdown`。
+HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/status` `/start` `/stop` `/need` `/ack` `/completed` `/heartbeat` `/task` `/tasks` `/step` `/effect` `/events` `/logs/stream` `/discover` `/shutdown`。
+
+`POST /discover`：重新探测已登记 agent 的进程存活、恢复/清理角色缓存，并扫描项目内未注册进程；返回 `{discovered, recovered, pruned, pending_registered, pending_pruned, agents, wild}`。`wild` 为进程树根列表（`pid/ppid/cwd/cmdline/create_time/source/root/child_pids/bound_role`），按 cwd 过滤、排除 daemon/已注册/基础设施子树，`cmdline` 截断 300 字符并掩码密钥，2s 缓存；**只读展示，P2 绑定未实现**。
+
+`POST /stop`：仅对 `job_id` 非空的 daemon 托管 worker 生效；外部 Agent 返回 409 `external_agent`，不改状态、不杀进程。
 
 `GET /logs/stream?tail=100[&role=<role>]`（SSE）：回放 `logs/*.log` 的最后 `tail` 行并持续跟随新增行（新角色日志约 2s 内纳入）；帧为 `id` + `event: log` + `data: {"role","line","ts"}`，20s `: ping`。不传 `role` 时推送全部日志。
 
@@ -78,7 +82,7 @@ HTTP（Bearer token，`/health` 除外）：`/health` `/register` `/resolve` `/s
 
 MCP（`.mcp.json` 中的 `sentinel` server）：`orchestrator_register/status/resolve/need/ack/completed/heartbeat/task/tasks`。新会话启动后加载。
 
-`orchestrator_register` 参数为 `role` / `session` / `ref`：MCP server 用自身 `pid`/`pgid` 注册，`command` 记录为 `mcp_server session=<...> ref=<...>`，重复调用幂等更新；daemon 离线时返回 `isError:true` 的结构化错误，不抛异常、不重试、不轮询。新窗口按角色提示词静默调用一次即可。
+`orchestrator_register` 参数为 `role` / `session` / `ref`：MCP server 用自身 `pid`/`pgid` 注册，`command` 记录为 `mcp_server session=<...> ref=<...>`，重复调用幂等更新；daemon 离线/5xx 时结果 `pending`，仍写会话缓存与 PID File，由 15s 心跳后台重试；4xx 按失败返回、不重试。
 
 ## 用量、预算与观测
 

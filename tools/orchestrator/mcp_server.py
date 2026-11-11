@@ -188,6 +188,18 @@ def _signal_handler(signum: int, _frame: Any) -> None:
     raise SystemExit(0)
 
 
+def _configure_stdio() -> None:
+    """MCP 走 UTF-8；Windows 默认 cp936 会把 UTF-8 参数解成孤立代理字符。"""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def heartbeat_interval_seconds() -> float:
     raw = os.environ.get(HEARTBEAT_SECONDS_ENV, "").strip()
     try:
@@ -607,6 +619,7 @@ def _reply(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    _configure_stdio()
     atexit.register(lambda: log_event("atexit"))
     log_event(f"start session={session_id()!r} role_env={os.environ.get('SENTINEL_ROLE', '')!r}")
     try:

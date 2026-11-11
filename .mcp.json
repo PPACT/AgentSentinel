@@ -2,7 +2,11 @@
   "mcpServers": {
     "sentinel": {
       "command": "uv",
-      "args": ["run", "python", "tools/orchestrator/mcp_server.py"]
+      "args": ["run", "python", "tools/orchestrator/mcp_server.py"],
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
     }
   }
 }

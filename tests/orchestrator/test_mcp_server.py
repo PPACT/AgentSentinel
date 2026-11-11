@@ -10,8 +10,9 @@ import threading
 import time
 import urllib.error
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 import pytest
@@ -437,6 +438,79 @@ def test_pending_pidfile_is_discovered_by_late_daemon(
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 process.kill()
+
+
+def test_stdio_accepts_utf8_tool_arguments(tmp_path: Path) -> None:
+    class _Recorder(BaseHTTPRequestHandler):
+        bodies: ClassVar[list[dict[str, Any]]] = []
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            type(self).bodies.append(json.loads(raw or b"{}"))
+            body = json.dumps({"agent": {"role": "dev"}}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    _Recorder.bodies = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        home = tmp_path / "orch"
+        home.mkdir()
+        (home / "daemon.json").write_text(
+            json.dumps({"host": "127.0.0.1", "port": int(server.server_address[1])}),
+            encoding="utf-8",
+        )
+        (home / "token").write_text("fixture-token", encoding="utf-8")
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "orchestrator_register",
+                    "arguments": {"role": "dev", "session": "会话-测试", "ref": "中文"},
+                },
+            },
+        ]
+        stdin = "\n".join(json.dumps(item, ensure_ascii=False) for item in requests) + "\n"
+        environment = os.environ.copy()
+        environment["SENTINEL_ORCH_HOME"] = str(home)
+        environment["PYTHONIOENCODING"] = "cp936"
+        environment.pop("SENTINEL_ROLE", None)
+        environment.pop("CLAUDE_CODE_SESSION_ID", None)
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "orchestrator" / "mcp_server.py")],
+            input=stdin.encode("utf-8"),
+            capture_output=True,
+            check=False,
+            timeout=60,
+            cwd=ROOT,
+            env=environment,
+            creationflags=hidden_creationflags(),
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+        responses = [
+            json.loads(line)
+            for line in completed.stdout.decode("utf-8", "replace").splitlines()
+            if line.strip()
+        ]
+        assert [response["id"] for response in responses] == [1, 2]
+        assert _Recorder.bodies
+        assert _Recorder.bodies[0]["session"] == "会话-测试"
+        assert _Recorder.bodies[0]["ref"] == "中文"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_unknown_method_returns_jsonrpc_error() -> None:

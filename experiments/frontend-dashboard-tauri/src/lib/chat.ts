@@ -10,9 +10,16 @@ export type ChatBlock =
   | { kind: "meta"; text: string }
   | { kind: "error"; text: string };
 
+export interface ChatEntry {
+  id: number;
+  block: ChatBlock;
+}
+
 export interface ChatTurnSummary {
   session_id?: string;
   resumed?: boolean;
+  forked?: boolean;
+  inherited_from?: string | null;
   result?: string;
   cost_usd?: number | null;
   disconnected?: boolean;
@@ -30,6 +37,35 @@ function contentBlocks(event: Record<string, unknown>): Array<Record<string, unk
   return content.map(asRecord).filter((block): block is Record<string, unknown> => block !== null);
 }
 
+/** 把工具参数压成一行人类可读摘要，避免把原始 JSON 铺在界面上。 */
+export function describeToolInput(name: string, input: unknown): string {
+  const tool = name.toLowerCase();
+  const record = asRecord(input);
+  if (record) {
+    const file = record.file_path ?? record.path;
+    if (tool === "read" && typeof file === "string") return `读取 ${file}`;
+    if ((tool === "edit" || tool === "write" || tool === "multiedit") && typeof file === "string") {
+      return file;
+    }
+    const pattern = record.pattern ?? record.query;
+    if (typeof pattern === "string") {
+      const scope = typeof record.path === "string" ? ` · ${record.path}` : "";
+      return `${pattern}${scope}`;
+    }
+    const command = record.command;
+    if (typeof command === "string") return command.slice(0, 120);
+    const url = record.url;
+    if (typeof url === "string") return url;
+    const first = Object.values(record).find((value) => typeof value === "string");
+    if (typeof first === "string") return first.slice(0, 120);
+  }
+  try {
+    return JSON.stringify(input ?? {}).slice(0, 160);
+  } catch {
+    return "";
+  }
+}
+
 /** 把 claude stream-json 事件映射为 UI 块；不按顶层 type 直接分类。 */
 export function mapChatEvent(event: unknown): ChatBlock[] {
   const record = asRecord(event);
@@ -37,9 +73,7 @@ export function mapChatEvent(event: unknown): ChatBlock[] {
   const type = record.type;
 
   if (type === "system") {
-    const session = typeof record.session_id === "string" ? record.session_id : "";
-    const model = typeof record.model === "string" ? record.model : "";
-    return [{ kind: "meta", text: `会话初始化 ${session}${model ? ` · ${model}` : ""}` }];
+    return [];
   }
 
   if (type === "assistant") {
@@ -53,27 +87,18 @@ export function mapChatEvent(event: unknown): ChatBlock[] {
         if (text) blocks.push({ kind: "text", text });
       } else if (block.type === "tool_use") {
         const name = typeof block.name === "string" ? block.name : "tool";
-        const input = JSON.stringify(block.input ?? {}).slice(0, 240);
-        blocks.push({ kind: "tool", name, input });
+        blocks.push({ kind: "tool", name, input: describeToolInput(name, block.input) });
       }
     }
     return blocks;
   }
 
   if (type === "user") {
-    const blocks: ChatBlock[] = [];
-    for (const block of contentBlocks(record)) {
-      if (block.type === "tool_result") {
-        blocks.push({ kind: "tool_result", text: "工具返回" });
-      }
-    }
-    return blocks;
+    return [];
   }
 
   if (type === "result") {
-    const subtype = typeof record.subtype === "string" ? record.subtype : "";
-    const cost = typeof record.total_cost_usd === "number" ? record.total_cost_usd : 0;
-    return [{ kind: "meta", text: `本轮结束 ${subtype} · $${cost.toFixed(4)}` }];
+    return [{ kind: "meta", text: "本轮完成" }];
   }
 
   return [];

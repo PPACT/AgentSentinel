@@ -14,18 +14,34 @@ interface AgentTableProps {
   agents: Agent[];
   pendingRole: string | null;
   onStop: (role: string) => void;
+  onSelect?: (role: string) => void;
+  selectedRole?: string | null;
 }
 
-const COLUMNS = ["role", "pid", "pgid", "status", "alive", "last_heartbeat", "current_task_id", "操作"];
+const COLUMNS = ["Agent", "状态", "操作"];
 
-export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
+const STATUS_LABEL: Record<string, string> = {
+  registered: "在线",
+  running: "运行",
+  stopped: "已停止",
+  lost: "失联",
+  pending: "待注册",
+};
+
+export function AgentTable({
+  agents,
+  pendingRole,
+  onStop,
+  onSelect,
+  selectedRole,
+}: AgentTableProps) {
   return (
-    <Table>
+    <Table className="w-full table-fixed">
       <TableHeader>
         <TableRow>
-          {COLUMNS.map((column) => (
-            <TableHead key={column}>{column}</TableHead>
-          ))}
+          <TableHead className="w-[46%] px-2 text-[10px]">Agent</TableHead>
+          <TableHead className="w-[32%] px-2 text-[10px]">状态</TableHead>
+          <TableHead className="w-[22%] px-2 text-right text-[10px]">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -41,48 +57,86 @@ export function AgentTable({ agents, pendingRole, onStop }: AgentTableProps) {
             const role = agent.role ?? "";
             const pending = pendingRole === role;
             const managed = Boolean(agent.job_id);
+            const details = [
+              `role=${row.role}`,
+              `status=${row.status}`,
+              `pid=${row.pid}`,
+              `pgid=${row.pgid}`,
+              `alive=${row.alive}`,
+              `heartbeat=${localTimestamp(agent.last_heartbeat)}`,
+              `task=${row.currentTask}`,
+              `project=${row.project}`,
+            ].join("\n");
+            const statusLabel = STATUS_LABEL[row.status] ?? row.status;
+            const selected = selectedRole === role && Boolean(role);
             return (
-              <TableRow key={`${role}-${row.pid}`}>
-                <TableCell className="min-w-0 py-1 font-medium text-zinc-100">
-                  <div className="truncate">{row.role}</div>
+              <TableRow
+                key={`${role}-${row.pid}`}
+                className={
+                  onSelect
+                    ? `cursor-pointer ${
+                        selected ? "bg-zinc-800/50" : "hover:bg-zinc-800/30"
+                      }`
+                    : undefined
+                }
+                tabIndex={onSelect && role ? 0 : undefined}
+                onClick={onSelect && role ? () => onSelect(role) : undefined}
+                onKeyDown={
+                  onSelect && role
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onSelect(role);
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <TableCell
+                  className={`min-w-0 border-l-2 px-2 py-1.5 ${
+                    selected ? "border-sky-500" : "border-transparent"
+                  }`}
+                  title={details}
+                >
+                  <div className="truncate font-medium text-zinc-100">{row.role}</div>
                   {row.project !== "—" ? (
-                    <div
-                      className="max-w-[9rem] truncate font-mono text-[10px] text-zinc-500"
-                      title={row.project}
-                    >
+                    <div className="truncate font-mono text-[10px] text-zinc-600">
                       {shortProject(row.project)}
                     </div>
                   ) : null}
                 </TableCell>
-                <TableCell className="font-mono text-zinc-300">{row.pid}</TableCell>
-                <TableCell className="font-mono text-zinc-300">{row.pgid}</TableCell>
-                <TableCell className="font-mono text-zinc-300">{row.status}</TableCell>
-                <TableCell className={agent.alive ? "text-emerald-400" : "text-zinc-500"}>
-                  {row.alive}
+                <TableCell className="px-2 py-1.5" title={details}>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${
+                        agent.alive ? "bg-emerald-400" : "bg-zinc-600"
+                      }`}
+                    />
+                    <span className="truncate font-mono text-[11px] text-zinc-300">
+                      {statusLabel}
+                    </span>
+                  </div>
                 </TableCell>
-                <TableCell
-                  className="truncate font-mono text-xs text-zinc-400"
-                  title={localTimestamp(agent.last_heartbeat)}
-                >
-                  {localTimestamp(agent.last_heartbeat)}
-                </TableCell>
-                <TableCell className="font-mono text-xs text-zinc-400">{row.currentTask}</TableCell>
-                <TableCell>
+                <TableCell className="px-2 py-1.5 text-right">
                   {managed ? (
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-6 px-1.5 text-[10px]"
                       disabled={!role || pending || agent.alive === false}
-                      onClick={() => onStop(role)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onStop(role);
+                      }}
                     >
                       {pending ? "停止中…" : "停止"}
                     </Button>
                   ) : (
                     <span
-                      className="whitespace-nowrap text-[10px] text-zinc-500"
+                      className="whitespace-nowrap text-[10px] text-zinc-600"
                       title="外部 Agent，由各自窗口管理；中控无法终止"
                     >
-                      外部进程
+                      外部
                     </span>
                   )}
                 </TableCell>

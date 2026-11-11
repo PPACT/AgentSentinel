@@ -402,3 +402,60 @@ def test_port_in_use_detects_listener() -> None:
     finally:
         listener.close()
     assert not service._port_in_use("127.0.0.1", port)
+
+
+def test_external_session_picks_live_newest(tmp_path: Path) -> None:
+    daemon = service.Daemon(tmp_path / "orch")
+    cache = daemon.home / "agents"
+    cache.mkdir(parents=True)
+    project = str(daemon.project)
+    common = {"project": project, "mcp_pid": os.getpid()}
+    (cache / "old.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "role": "dev",
+                "session_id": "live-old",
+                "updated_at": "2026-11-11T00:00:00.000000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cache / "new.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "role": "dev",
+                "session_id": "live-new",
+                "updated_at": "2026-11-11T01:00:00.000000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cache / "dead.json").write_text(
+        json.dumps(
+            {
+                "project": project,
+                "role": "dev",
+                "mcp_pid": 2147483646,
+                "session_id": "dead-session",
+                "updated_at": "2026-11-11T02:00:00.000000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cache / "doc.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "role": "doc",
+                "session_id": "doc-session",
+                "updated_at": "2026-11-11T00:30:00.000000Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert daemon.external_session("dev") == "live-new"
+    assert daemon.external_session("doc") == "doc-session"
+    assert daemon.external_session("unknown") is None

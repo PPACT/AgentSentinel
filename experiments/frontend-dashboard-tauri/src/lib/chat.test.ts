@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { consumeChatStream, mapChatEvent, mapChatFrame } from "./chat";
+import { consumeChatStream, describeToolInput, mapChatEvent, mapChatFrame } from "./chat";
 
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -26,20 +26,27 @@ describe("mapChatEvent", () => {
     });
 
     expect(blocks.map((block) => block.kind)).toEqual(["thinking", "tool", "text"]);
-    expect(blocks[1]).toEqual({ kind: "tool", name: "Read", input: '{"file_path":"a.py"}' });
+    expect(blocks[1]).toEqual({ kind: "tool", name: "Read", input: "读取 a.py" });
     expect(blocks[2]).toEqual({ kind: "text", text: "答案" });
   });
 
-  it("maps tool_result, system and result events", () => {
+  it("summarizes tool inputs for low-noise display", () => {
+    expect(describeToolInput("Read", { file_path: "src/App.tsx" })).toBe("读取 src/App.tsx");
+    expect(describeToolInput("Grep", { pattern: "useEffect", path: "src" })).toBe("useEffect · src");
+    expect(describeToolInput("Bash", { command: "npm test" })).toBe("npm test");
+    expect(describeToolInput("Write", { file_path: "a.txt", content: "x" })).toBe("a.txt");
+  });
+
+  it("hides tool_result/system and reduces result to one line", () => {
     expect(
       mapChatEvent({
         type: "user",
         message: { content: [{ type: "tool_result", content: "ok" }] },
       }),
-    ).toEqual([{ kind: "tool_result", text: "工具返回" }]);
-    expect(mapChatEvent({ type: "system", session_id: "s1", model: "m" })[0].kind).toBe("meta");
+    ).toEqual([]);
+    expect(mapChatEvent({ type: "system", session_id: "s1", model: "m" })).toEqual([]);
     expect(mapChatEvent({ type: "result", subtype: "success", total_cost_usd: 0.01 })).toEqual([
-      { kind: "meta", text: "本轮结束 success · $0.0100" },
+      { kind: "meta", text: "本轮完成" },
     ]);
     expect(mapChatEvent({ type: "unknown" })).toEqual([]);
   });

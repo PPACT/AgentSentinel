@@ -1,3 +1,4 @@
+import { ChevronDown } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -14,6 +15,7 @@ import {
 interface ConsolePanelProps {
   logs: LogEntry[];
   onClear?: () => void;
+  onCollapse?: () => void;
 }
 
 const LEVEL_CLASS: Record<LogLevel, string> = {
@@ -29,7 +31,7 @@ const LEVEL_LABEL: Record<LogLevel, string> = {
 };
 
 /** 底部 Console：后端日志流 + 客户端事件；支持角色过滤、搜索与暂停自动滚动。 */
-export function ConsolePanel({ logs, onClear }: ConsolePanelProps) {
+export function ConsolePanel({ logs, onClear, onCollapse }: ConsolePanelProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [role, setRole] = useState("");
   const [query, setQuery] = useState("");
@@ -108,6 +110,18 @@ export function ConsolePanel({ logs, onClear }: ConsolePanelProps) {
           {onClear ? (
             <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={onClear}>
               清空
+            </Button>
+          ) : null}
+          {onCollapse ? (
+            <Button
+              aria-label="收起 Console"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-1.5 text-zinc-400"
+              title="收起 Console"
+              onClick={onCollapse}
+            >
+              <ChevronDown className="size-3.5" />
             </Button>
           ) : null}
         </div>

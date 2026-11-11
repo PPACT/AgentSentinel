@@ -201,18 +201,16 @@ export async function streamFetch(url: string, init: RequestInit): Promise<Respo
   return tauriFetch(url, { ...init, headers });
 }
 
-/** 发起一轮聊天，返回可直接读取的 SSE 响应流。 */
+/** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */
 export async function startChatStream(options: {
+  role: string;
   prompt: string;
-  sessionId?: string | null;
   signal: AbortSignal;
 }): Promise<Response> {
-  const body: Record<string, string> = { prompt: options.prompt };
-  if (options.sessionId) body.session_id = options.sessionId;
   const response = await streamFetch(`${await daemonBase()}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ role: options.role, prompt: options.prompt }),
     signal: options.signal,
   });
   if (!response.ok) throw new ApiError(response.status, `HTTP ${response.status}`);

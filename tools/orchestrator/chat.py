@@ -71,8 +71,8 @@ def chat_budget_usd() -> str:
     return os.environ.get(BUDGET_ENV, "").strip() or DEFAULT_BUDGET_USD
 
 
-def chat_command(prompt: str, session_id: str, *, resume: bool) -> list[str]:
-    """首轮用 ``--session-id`` 建会话，后续 ``--resume`` 续接同一会话。"""
+def chat_command(prompt: str, session_id: str, *, resume: bool, fork: bool = False) -> list[str]:
+    """首轮 ``--session-id`` 建会话；续轮 ``--resume``；接管外部会话时额外 fork。"""
     command = [
         "claude",
         "-p",
@@ -87,6 +87,8 @@ def chat_command(prompt: str, session_id: str, *, resume: bool) -> list[str]:
     ]
     if resume:
         command.extend(["--resume", session_id])
+        if fork:
+            command.append("--fork-session")
     else:
         command.extend(["--session-id", session_id])
     return command
@@ -129,8 +131,16 @@ def _assistant_text(event: dict[str, Any]) -> list[str]:
     ]
 
 
+class ChatBusy(RuntimeError):
+    """同一角色已有活跃轮次。"""
+
+    def __init__(self, role: str) -> None:
+        super().__init__(f"chat busy: {role}")
+        self.role = role
+
+
 class ChatManager:
-    """按 session 串行的一轮对话；同时最多一个活跃进程。"""
+    """按角色维护 session 与活跃进程；同角色串行，不同角色可并行。"""
 
     def __init__(
         self,
@@ -142,6 +152,7 @@ class ChatManager:
         assign: Callable[[int, int], bool] = assign_process,
         close: Callable[[int], None] = close_job,
         timeout_seconds: float | None = None,
+        external_session: Callable[[str], str | None] | None = None,
     ) -> None:
         self.log_path = log_path or dev_log_path()
         self._sanitizer = sanitizer or RegexSanitizer()
@@ -150,18 +161,23 @@ class ChatManager:
         self._assign = assign
         self._close = close
         self._timeout = timeout_seconds if timeout_seconds is not None else chat_timeout_seconds()
+        self._external_session = external_session
         self._lock = threading.Lock()
         self._active: dict[str, ChatProcess] = {}
+        self._inflight: set[str] = set()
+        self._sessions: dict[str, str] = {}
 
-    def is_busy(self, session_id: str | None) -> bool:
-        if not session_id:
-            return False
+    def is_busy(self, role: str) -> bool:
         with self._lock:
-            return session_id in self._active
+            return role in self._inflight
 
-    def stop(self, session_id: str) -> bool:
+    def session_for(self, role: str) -> str | None:
         with self._lock:
-            process = self._active.get(session_id)
+            return self._sessions.get(role)
+
+    def stop(self, role: str) -> bool:
+        with self._lock:
+            process = self._active.get(role)
         if process is None:
             return False
         try:
@@ -181,14 +197,28 @@ class ChatManager:
 
     def stream_turn(
         self,
+        role: str,
         prompt: str,
-        session_id: str | None,
         emit: Callable[[str, str], bool],
     ) -> dict[str, Any]:
-        """流式跑完一轮；emit 返回 False 表示客户端断开，进程将被终止。"""
-        sid = session_id or str(uuid.uuid4())
-        resume = bool(session_id)
-        command = chat_command(prompt, sid, resume=resume)
+        """流式跑完某一角色的一轮；同角色串行，不同角色互不影响。"""
+        with self._lock:
+            if role in self._inflight:
+                raise ChatBusy(role)
+            self._inflight.add(role)
+            existing = self._sessions.get(role)
+        external = None
+        if existing is None and self._external_session is not None:
+            external = self._external_session(role)
+        if existing is not None:
+            sid, resume, fork, inherited_from = existing, True, False, None
+        elif external:
+            # 接管外部终端上下文：复制到新 session，原会话不被改写。
+            sid, resume, fork, inherited_from = external, True, True, external
+        else:
+            sid, resume, fork, inherited_from = str(uuid.uuid4()), False, False, None
+        final_sid = sid
+        command = chat_command(prompt, sid, resume=resume, fork=fork)
         job = self._job_factory()
         texts: list[str] = []
         result_event: dict[str, Any] | None = None
@@ -197,7 +227,7 @@ class ChatManager:
         try:
             process = self._spawn(command, chat_environment())
             with self._lock:
-                self._active[sid] = process
+                self._active[role] = process
             if not self._assign(job, process.pid):
                 raise OSError("AssignProcessToJobObject failed")
             watchdog = threading.Timer(self._timeout, process.kill)
@@ -216,6 +246,9 @@ class ChatManager:
                         parsed = None
                     if isinstance(parsed, dict):
                         event = parsed
+                        observed = event.get("session_id")
+                        if isinstance(observed, str) and observed:
+                            final_sid = observed
                         if event.get("type") == "assistant":
                             texts.extend(_assistant_text(event))
                         elif event.get("type") == "result":
@@ -228,13 +261,17 @@ class ChatManager:
                             pass
                         break
                 process.wait(timeout=10)
+                if result_event is not None:
+                    with self._lock:
+                        self._sessions[role] = final_sid
             finally:
                 watchdog.cancel()
         except OSError as exc:
             error = str(exc)
         finally:
             with self._lock:
-                self._active.pop(sid, None)
+                self._active.pop(role, None)
+                self._inflight.discard(role)
             try:
                 self._close(job)
             except OSError:
@@ -246,10 +283,13 @@ class ChatManager:
         if not result_text and texts:
             result_text = texts[-1]
         cost = result_event.get("total_cost_usd") if result_event else None
-        self._append_dev_log(prompt, result_text, sid, error=error, disconnected=disconnected)
+        self._append_dev_log(role, prompt, result_text, final_sid, error=error, disconnected=disconnected)
         return {
-            "session_id": sid,
+            "role": role,
+            "session_id": final_sid,
             "resumed": resume,
+            "forked": fork,
+            "inherited_from": inherited_from,
             "result": result_text,
             "cost_usd": cost,
             "disconnected": disconnected,
@@ -259,6 +299,7 @@ class ChatManager:
 
     def _append_dev_log(
         self,
+        role: str,
         prompt: str,
         result: str,
         session_id: str,
@@ -270,7 +311,7 @@ class ChatManager:
         result_text = self._redact(result or error or ("[客户端断开]" if disconnected else ""))
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         entry = (
-            f"### [{stamp}] 角色: chat\n\n"
+            f"### [{stamp}] 角色: {role}\n\n"
             f"**🗣️ 用户要求**: {prompt_text}\n\n"
             f"**📦 执行结果**: {result_text}\n\n"
             f"**📄 会话**: {session_id}\n\n"

@@ -13,6 +13,7 @@ export interface Agent {
   cost_budget?: number | null;
   project?: string;
   alive?: boolean;
+  external_session_id?: string | null;
 }
 
 /** `/discover` 返回的未注册野生进程（只读展示）。 */

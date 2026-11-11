@@ -14,24 +14,30 @@ interface TaskTableProps {
   onSelect?: (task: Task) => void;
 }
 
-/** 右侧 Tasks 栏较窄：合并收发角色、压缩列宽，窄于此宽度改为横向滚动。 */
+/** 侧栏宽度有限：只保留四个核心列，意图/完整 ID 放进 tooltip。 */
 const COLUMNS = [
-  { key: "task_id", label: "任务", width: "w-[30%]" },
-  { key: "flow", label: "流转", width: "w-[17%]" },
-  { key: "intent", label: "意图", width: "w-[23%]" },
-  { key: "status", label: "状态", width: "w-[12%]" },
-  { key: "updated_at", label: "更新时间", width: "w-[18%]" },
+  { key: "task_id", label: "任务", width: "w-[38%]", align: "text-left" },
+  { key: "flow", label: "流转", width: "w-[24%]", align: "text-left" },
+  { key: "status", label: "状态", width: "w-[20%]", align: "text-left" },
+  { key: "updated_at", label: "更新", width: "w-[18%]", align: "text-right" },
 ] as const;
+
+function timeOnly(value?: string): string {
+  const short = shortTimestamp(value);
+  const index = short.lastIndexOf(" ");
+  const time = index >= 0 ? short.slice(index + 1) : short;
+  return time.slice(0, 5);
+}
 
 export function TaskTable({ tasks, onSelect }: TaskTableProps) {
   return (
-    <Table className="min-w-[520px] table-fixed">
+    <Table className="w-full table-fixed">
       <TableHeader>
         <TableRow>
           {COLUMNS.map((column) => (
             <TableHead
               key={column.key}
-              className={`${column.width} text-[11px] font-medium text-zinc-400`}
+              className={`${column.width} px-2 text-[10px] font-medium text-zinc-400 ${column.align}`}
             >
               {column.label}
             </TableHead>
@@ -48,6 +54,12 @@ export function TaskTable({ tasks, onSelect }: TaskTableProps) {
         ) : (
           tasks.map((task) => {
             const row = formatTask(task);
+            const details = [
+              `task_id=${row.taskId}`,
+              `intent=${row.intent}`,
+              `acceptance=${(task.acceptance ?? []).join(" | ") || "-"}`,
+              `updated_at=${localTimestamp(task.updated_at)}`,
+            ].join("\n");
             return (
               <TableRow
                 key={`${row.taskId}-${row.updatedAt}`}
@@ -64,27 +76,19 @@ export function TaskTable({ tasks, onSelect }: TaskTableProps) {
                       }
                     : undefined
                 }
+                title={details}
               >
-                <TableCell className="truncate font-mono text-xs text-zinc-200" title={row.taskId}>
+                <TableCell className="truncate px-2 py-1.5 font-mono text-[11px] text-zinc-200">
                   {row.taskId}
                 </TableCell>
-                <TableCell
-                  className="truncate font-mono text-xs text-zinc-300"
-                  title={`${row.fromRole} → ${row.toRole}`}
-                >
+                <TableCell className="truncate px-2 py-1.5 font-mono text-[11px] text-zinc-300">
                   {row.fromRole} → {row.toRole}
                 </TableCell>
-                <TableCell className="truncate font-mono text-xs text-zinc-400" title={row.intent}>
-                  {row.intent}
-                </TableCell>
-                <TableCell className="truncate font-mono text-xs text-zinc-300" title={row.status}>
+                <TableCell className="truncate px-2 py-1.5 font-mono text-[11px] text-zinc-300">
                   {row.status}
                 </TableCell>
-                <TableCell
-                  className="truncate font-mono text-xs text-zinc-400"
-                  title={localTimestamp(task.updated_at)}
-                >
-                  {shortTimestamp(task.updated_at)}
+                <TableCell className="truncate px-2 py-1.5 text-right font-mono text-[10px] text-zinc-500">
+                  {timeOnly(task.updated_at)}
                 </TableCell>
               </TableRow>
             );

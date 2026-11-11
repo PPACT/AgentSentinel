@@ -28,7 +28,9 @@ describe("TaskTable", () => {
     );
     expect(screen.getByText("T-1")).toBeInTheDocument();
     expect(screen.getByText("doc → dev")).toBeInTheDocument();
-    expect(screen.getByText("implement")).toBeInTheDocument();
+    expect(screen.getByText("running")).toBeInTheDocument();
+    const row = screen.getByText("T-1").closest("tr");
+    expect(row?.getAttribute("title")).toContain("intent=implement");
   });
 
   it("shows empty state", () => {

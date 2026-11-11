@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
-from tools.orchestrator.chat import PROMPT_MAX_CHARS, SESSION_PATTERN, ChatManager
+from tools.orchestrator.chat import PROMPT_MAX_CHARS, ChatBusy, ChatManager
 from tools.orchestrator.drivers.cwd_process import CwdProcessDriver, _normalize_path, _within
 from tools.orchestrator.launcher import (
     Launcher,
@@ -98,8 +98,9 @@ _DEMO_PAGE = """<!doctype html>
 <body>
 <header>
   <strong>AgentSentinel Chat PoC</strong>
-  <span id="session">session: (新会话)</span>
-  <span class="meta">仅本机调试；每轮重启 claude -p</span>
+  <label class="meta">role <input id="role" value="dev" style="width:5rem;background:#18181b;color:#e4e4e7;border:1px solid #3f3f46;border-radius:4px;padding:1px 6px;font-family:ui-monospace,monospace"></label>
+  <span id="session" class="meta">session: -</span>
+  <span class="meta">每轮按角色复用 session</span>
 </header>
 <main id="messages"></main>
 <footer>
@@ -112,7 +113,7 @@ const messages = document.getElementById("messages");
 const promptBox = document.getElementById("prompt");
 const sendButton = document.getElementById("send");
 const sessionEl = document.getElementById("session");
-let sessionId = null;
+const roleInput = document.getElementById("role");
 let busy = false;
 
 function add(kind, text) {
@@ -157,8 +158,7 @@ async function send() {
   busy = true;
   sendButton.disabled = true;
   try {
-    const payload = { prompt: prompt };
-    if (sessionId) payload.session_id = sessionId;
+    const payload = { role: (roleInput.value.trim() || "dev"), prompt: prompt };
     const response = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
@@ -188,9 +188,8 @@ async function send() {
         if (event === "message") renderEvent(data);
         else if (event === "end") {
           const summary = JSON.parse(data);
-          sessionId = summary.session_id;
-          sessionEl.textContent = "session: " + sessionId;
-          add("meta", "summary resumed=" + summary.resumed + " cost=$" + (summary.cost_usd || 0).toFixed(4));
+          sessionEl.textContent = "session: " + (summary.session_id || "-") + " (role " + (summary.role || "?") + ")";
+          add("meta", "summary role=" + summary.role + " resumed=" + summary.resumed + " cost=$" + (summary.cost_usd || 0).toFixed(4));
         }
       }
     }
@@ -642,7 +641,7 @@ class Daemon:
             project=self.project,
         )
         self.wild_driver = CwdProcessDriver()
-        self.chat = ChatManager()
+        self.chat = ChatManager(external_session=self.external_session)
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -662,7 +661,42 @@ class Daemon:
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
         data["alive"] = process_alive(record.pid)
+        data["external_session_id"] = self.external_session(record.role)
         return data
+
+    def external_session(self, role: str) -> str | None:
+        """读取该角色最新且仍存活的 MCP 缓存，返回其真实 Claude session id。"""
+        cache_dir = self.home / AGENT_CACHE_DIR
+        if not cache_dir.is_dir():
+            return None
+        best: tuple[str, str] | None = None
+        for path in cache_dir.glob("*.json"):
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if _str(parsed.get("role")).strip().casefold() != role.casefold():
+                continue
+            project = _str(parsed.get("project")).strip()
+            if project and _normalize_project(project) != self.project:
+                continue
+            mcp_pid = _int(parsed.get("mcp_pid"))
+            if mcp_pid <= 0 or not process_alive(mcp_pid):
+                continue
+            session_id = _str(parsed.get("session_id")).strip()
+            if re.fullmatch(r"[A-Za-z0-9-]{8,64}", session_id) is None:
+                continue
+            updated = _str(parsed.get("updated_at")).strip()
+            if not updated:
+                try:
+                    updated = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+                except OSError:
+                    updated = ""
+            if best is None or updated > best[0]:
+                best = (updated, session_id)
+        return best[1] if best is not None else None
 
     @property
     def revision(self) -> int:
@@ -1331,6 +1365,11 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
     def _stream_chat(self, payload: dict[str, Any]) -> None:
+        try:
+            role = _role(payload)
+        except ValueError as exc:
+            self._send(400, {"error": str(exc)})
+            return
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             self._send(400, {"error": "prompt is required"})
@@ -1338,14 +1377,9 @@ class _Handler(BaseHTTPRequestHandler):
         if len(prompt) > PROMPT_MAX_CHARS:
             self._send(400, {"error": f"prompt too long (>{PROMPT_MAX_CHARS})"})
             return
-        session_id = payload.get("session_id")
-        if session_id is not None:
-            if not isinstance(session_id, str) or re.fullmatch(SESSION_PATTERN, session_id) is None:
-                self._send(400, {"error": "invalid session_id"})
-                return
-            if self.daemon.chat.is_busy(session_id):
-                self._send(409, {"error": "session busy", "reason": "chat_busy"})
-                return
+        if self.daemon.chat.is_busy(role):
+            self._send(409, {"error": "role busy", "reason": "chat_busy", "role": role})
+            return
         self.close_connection = True
         try:
             self.send_response(200)
@@ -1359,7 +1393,10 @@ class _Handler(BaseHTTPRequestHandler):
         def emit(event: str, data: str) -> bool:
             return self._write_bytes(f"event: {event}\ndata: {data}\n\n".encode())
 
-        summary = self.daemon.chat.stream_turn(prompt.strip(), session_id, emit)
+        try:
+            summary = self.daemon.chat.stream_turn(role, prompt.strip(), emit)
+        except ChatBusy:
+            summary = {"role": role, "error": "chat_busy", "reason": "chat_busy"}
         emit("end", json.dumps(summary, ensure_ascii=False))
 
     def _send_demo_page(self, token: str) -> None:
@@ -1604,11 +1641,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if method == "POST" and path == "/chat/stop":
-            session_id = payload.get("session_id")
-            if not isinstance(session_id, str) or not self.daemon.chat.stop(session_id):
-                self._send(404, {"error": "no active chat"})
+            try:
+                role = _role(payload)
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            if not self.daemon.chat.stop(role):
+                self._send(404, {"error": "no active chat", "role": role})
             else:
-                self._send(200, {"stopped": True, "session_id": session_id})
+                self._send(200, {"stopped": True, "role": role})
             return
 
         if method == "GET" and path == "/health":

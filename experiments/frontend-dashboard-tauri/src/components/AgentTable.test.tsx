@@ -33,7 +33,10 @@ describe("AgentTable", () => {
     );
     expect(screen.getByText("dev")).toBeInTheDocument();
     expect(screen.getByText("在线")).toBeInTheDocument();
-    expect(screen.getByText("T-1")).toBeInTheDocument();
+    const row = screen.getByText("dev").closest("tr");
+    expect(row?.getAttribute("title") ?? row?.querySelector("[title]")?.getAttribute("title")).toContain(
+      "T-1",
+    );
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
     expect(onStop).toHaveBeenCalledWith("dev");
   });
@@ -62,7 +65,28 @@ describe("AgentTable", () => {
         onStop={() => {}}
       />,
     );
-    expect(screen.getByText("外部进程")).toBeInTheDocument();
+    expect(screen.getByText("外部")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+  });
+
+  it("selects a role by click and stop does not change selection", () => {
+    const onSelect = vi.fn();
+    const onStop = vi.fn();
+    render(
+      <AgentTable
+        agents={[{ role: "dev", pid: 1, job_id: "job-1", alive: true }]}
+        pendingRole={null}
+        onStop={onStop}
+        onSelect={onSelect}
+        selectedRole="dev"
+      />,
+    );
+
+    fireEvent.click(screen.getByText("dev"));
+    expect(onSelect).toHaveBeenCalledWith("dev");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(onStop).toHaveBeenCalledWith("dev");
+    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 });

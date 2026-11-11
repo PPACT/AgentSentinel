@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronUp, Terminal } from "lucide-react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 
-import { AgentTable } from "@/components/AgentTable";
-import { ChatDialog } from "@/components/ChatDialog";
+import { AgentsPanel } from "@/components/AgentsPanel";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
-import { TaskTable } from "@/components/TaskTable";
+import { TasksPanel } from "@/components/TasksPanel";
 import { TopBar } from "@/components/TopBar";
-import { WildTable } from "@/components/WildTable";
-import { Button } from "@/components/ui/button";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import {
   cleanupWildProcess,
   discoverAgents,
@@ -26,6 +31,13 @@ import { errorMessage } from "@/lib/format";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task, WildProcess } from "@/lib/types";
+import { useMediaQuery } from "@/lib/useMediaQuery";
+import { useChatSessions } from "@/lib/useChatSessions";
+
+// Markdown/高亮体积较大，聊天面板独立分包；主界面先渲染，面板异步加载。
+const ChatPanel = lazy(() =>
+  import("@/components/ChatPanel").then((module) => ({ default: module.ChatPanel })),
+);
 
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
@@ -35,13 +47,24 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [selectedRole, setSelectedRole] = useState<string | null>(null);
+  const { histories: chatHistories, busy: chatBusy, inherited: chatInherited, send: sendChat, stop: stopChat } =
+    useChatSessions();
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
   const [wild, setWild] = useState<WildProcess[]>([]);
   const [wildOpen, setWildOpen] = useState(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [tasksWidth, setTasksWidth] = useState(340);
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [consoleHeight, setConsoleHeight] = useState(240);
+  const [agentsDrawer, setAgentsDrawer] = useState(false);
+  const [tasksDrawer, setTasksDrawer] = useState(false);
+  const narrowTasks = useMediaQuery("(max-width: 1199px)");
+  const narrowAgents = useMediaQuery("(max-width: 899px)");
+  const taskDrag = useRef<{ startX: number; startWidth: number } | null>(null);
+  const consoleDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const logAbortRef = useRef<AbortController | null>(null);
   const tasksTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -259,88 +282,196 @@ export default function App() {
     [appendLog, handleDiscover],
   );
 
+  const onTasksResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    taskDrag.current = { startX: event.clientX, startWidth: tasksWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onTasksResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!taskDrag.current) return;
+    const delta = taskDrag.current.startX - event.clientX;
+    setTasksWidth(Math.min(400, Math.max(300, taskDrag.current.startWidth + delta)));
+  };
+  const onTasksResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    taskDrag.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const onConsoleResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    consoleDrag.current = { startY: event.clientY, startHeight: consoleHeight };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onConsoleResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!consoleDrag.current) return;
+    const delta = consoleDrag.current.startY - event.clientY;
+    const max = Math.max(220, window.innerHeight * 0.6);
+    setConsoleHeight(Math.min(max, Math.max(140, consoleDrag.current.startHeight + delta)));
+  };
+  const onConsoleResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    consoleDrag.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const agentsPane = (
+    <AgentsPanel
+      agents={agents}
+      pendingRole={pendingRole}
+      onStop={(role) => {
+        void handleStop(role);
+      }}
+      selectedRole={selectedRole}
+      onSelectRole={setSelectedRole}
+      wild={wild}
+      wildOpen={wildOpen}
+      onToggleWild={setWildOpen}
+      discovering={discovering}
+      onDiscover={() => {
+        void handleDiscover();
+      }}
+      onCleanupWild={handleCleanupWild}
+      cleaningPid={cleaningPid}
+    />
+  );
+  const tasksPane = <TasksPanel tasks={tasks} onSelect={setSelectedTask} />;
+
+  const selectedEntries = selectedRole ? (chatHistories[selectedRole] ?? []) : [];
+  const selectedAgent = agents.find((agent) => agent.role === selectedRole);
+  const inheritedFrom = selectedRole ? chatInherited[selectedRole] : undefined;
+  const inheritHint = !selectedRole
+    ? null
+    : inheritedFrom
+      ? `已继承 ${selectedRole} 终端上下文，当前为独立会话分支`
+      : selectedEntries.length === 0 && selectedAgent?.external_session_id
+        ? `首次发送将继承 ${selectedRole} 终端上下文（独立分支）`
+        : null;
+
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
       <TopBar
         daemon={daemon}
         connection={connection}
         onOpenCommand={() => setPaletteOpen(true)}
-        onOpenChat={() => setChatOpen(true)}
+        showAgentsToggle={narrowAgents}
+        onToggleAgents={() => setAgentsDrawer((value) => !value)}
+        showTasksToggle={narrowTasks}
+        onToggleTasks={() => setTasksDrawer((value) => !value)}
       />
-      <ChatDialog open={chatOpen} onOpenChange={setChatOpen} />
       {error ? (
         <div className="border-b border-red-500/30 bg-red-500/10 px-5 py-2 text-sm text-red-300">
           {error}
         </div>
       ) : null}
-      <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
-        <ResizablePanel defaultSize="72" minSize="30">
-          <ResizablePanelGroup orientation="horizontal" className="min-h-0">
-            <ResizablePanel defaultSize="60" minSize="30">
-              <section className="flex h-full min-h-0 flex-col p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider text-sky-400">
-                    Agents
-                  </h2>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    disabled={discovering}
-                    onClick={() => {
-                      void handleDiscover();
-                    }}
-                  >
-                    {discovering ? "检测中…" : "检测 Agent"}
-                  </Button>
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-zinc-800">
-                  <AgentTable
-                    agents={agents}
-                    pendingRole={pendingRole}
-                    onStop={(role) => {
-                      void handleStop(role);
-                    }}
-                  />
-                </div>
-                {wild.length > 0 ? (
-                  <details
-                    className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40"
-                    open={wildOpen}
-                    onToggle={(event) => setWildOpen(event.currentTarget.open)}
-                  >
-                    <summary className="cursor-pointer select-none px-3 py-1.5 text-xs font-medium text-amber-300/90">
-                      未注册进程（{wild.length}）
-                    </summary>
-                    <div className="max-h-40 overflow-auto border-t border-zinc-800">
-                      <WildTable
-                        processes={wild}
-                        onCleanup={handleCleanupWild}
-                        busyPid={cleaningPid}
-                      />
-                    </div>
-                  </details>
-                ) : null}
-              </section>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-            <ResizablePanel defaultSize="40" minSize="25">
-              <section className="flex h-full min-h-0 flex-col p-3">
-                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-sky-400">
-                  Tasks
-                </h2>
-                <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-zinc-800">
-                  <TaskTable tasks={tasks} onSelect={setSelectedTask} />
-                </div>
-              </section>
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize="28" minSize="10" collapsible>
-          <ConsolePanel logs={logs} onClear={() => setLogs([])} />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+
+      <div className="flex min-h-0 flex-1">
+        {narrowAgents ? null : (
+          <aside className="w-60 shrink-0 border-r border-zinc-800 bg-zinc-950">
+            {agentsPane}
+          </aside>
+        )}
+
+        <main className="min-w-0 flex-1">
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+                加载对话面板…
+              </div>
+            }
+          >
+            <ChatPanel
+              role={selectedRole}
+              entries={selectedEntries}
+              busy={selectedRole ? (chatBusy[selectedRole] ?? false) : false}
+              inheritHint={inheritHint}
+              onSend={(prompt) => {
+                if (selectedRole) void sendChat(selectedRole, prompt);
+              }}
+              onStop={() => {
+                if (selectedRole) stopChat(selectedRole);
+              }}
+            />
+          </Suspense>
+        </main>
+
+        {narrowTasks ? null : (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              className="w-1 shrink-0 cursor-col-resize bg-zinc-800/60 transition-colors hover:bg-sky-700/60"
+              onPointerDown={onTasksResizeStart}
+              onPointerMove={onTasksResizeMove}
+              onPointerUp={onTasksResizeEnd}
+              onPointerCancel={onTasksResizeEnd}
+            />
+            <aside
+              style={{ width: tasksWidth }}
+              className="shrink-0 border-l border-zinc-800 bg-zinc-950"
+            >
+              {tasksPane}
+            </aside>
+          </>
+        )}
+      </div>
+
+      <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/60">
+        {consoleOpen ? (
+          <div style={{ height: consoleHeight }} className="relative flex min-h-0 flex-col">
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              className="absolute -top-1 z-10 h-2 w-full cursor-row-resize"
+              onPointerDown={onConsoleResizeStart}
+              onPointerMove={onConsoleResizeMove}
+              onPointerUp={onConsoleResizeEnd}
+              onPointerCancel={onConsoleResizeEnd}
+            />
+            <ConsolePanel
+              logs={logs}
+              onClear={() => setLogs([])}
+              onCollapse={() => setConsoleOpen(false)}
+            />
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="flex h-8 w-full items-center gap-2 px-3 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-800/40"
+            onClick={() => setConsoleOpen(true)}
+          >
+            <Terminal className="size-3.5" />
+            Console
+            <span className="font-mono text-zinc-600">{logs.length}</span>
+            <ChevronUp className="ml-auto size-3.5" />
+          </button>
+        )}
+      </div>
+
+      {narrowAgents && agentsDrawer ? (
+        <div className="fixed inset-0 z-40">
+          <button
+            type="button"
+            aria-label="关闭 Agents"
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setAgentsDrawer(false)}
+          />
+          <aside className="absolute inset-y-0 left-0 z-10 w-64 border-r border-zinc-800 bg-zinc-950 shadow-2xl">
+            {agentsPane}
+          </aside>
+        </div>
+      ) : null}
+
+      {narrowTasks && tasksDrawer ? (
+        <div className="fixed inset-0 z-40">
+          <button
+            type="button"
+            aria-label="关闭 Tasks"
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setTasksDrawer(false)}
+          />
+          <aside className="absolute inset-y-0 right-0 z-10 w-[340px] border-l border-zinc-800 bg-zinc-950 shadow-2xl">
+            {tasksPane}
+          </aside>
+        </div>
+      ) : null}
+
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}

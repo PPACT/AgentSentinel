@@ -18,7 +18,6 @@ export interface ChatEntry {
 export interface ChatTurnSummary {
   session_id?: string;
   resumed?: boolean;
-  forked?: boolean;
   inherited_from?: string | null;
   result?: string;
   cost_usd?: number | null;

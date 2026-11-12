@@ -49,6 +49,7 @@ from tools.orchestrator.router import (
     lost_timeout_seconds,
     watchdog_seconds,
 )
+from tools.orchestrator.transcript import read_history
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -1607,6 +1608,37 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized(path):
             self._send(401, {"error": "unauthorized"})
             return
+        if method == "GET" and path == "/sessions/history":
+            query = parse_qs(urlparse(self.path).query)
+            raw_role = (query.get("role") or [""])[0]
+            try:
+                role = _role({"role": raw_role})
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            try:
+                limit = int((query.get("limit") or ["200"])[0])
+            except ValueError:
+                limit = 200
+            session = self.daemon.external_session(role)
+            if not session:
+                self._send(404, {"error": "no terminal session", "role": role})
+                return
+            history = read_history(self.daemon.project, session, limit=limit)
+            if history is None:
+                self._send(404, {"error": "transcript not found", "role": role})
+                return
+            self._send(
+                200,
+                {
+                    "role": role,
+                    "session_id": session,
+                    "source": "terminal",
+                    **history,
+                },
+            )
+            return
+
         if method == "GET" and path == "/events":
             self._stream_events()
             return

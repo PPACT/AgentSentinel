@@ -65,14 +65,12 @@ def _command_session(command: list[str]) -> str:
 def test_chat_command_uses_session_id_then_resume() -> None:
     first = chat_command("hi", "1111-2222", resume=False)
     second = chat_command("again", "1111-2222", resume=True)
-    fork = chat_command("takeover", "1111-2222", resume=True, fork=True)
 
     assert first[first.index("--session-id") + 1] == "1111-2222"
     assert "--resume" not in first
     assert second[second.index("--resume") + 1] == "1111-2222"
     assert "--session-id" not in second
     assert "--fork-session" not in second
-    assert "--fork-session" in fork
     assert "--output-format" in first and "stream-json" in first
     assert "--verbose" in first
 
@@ -83,9 +81,7 @@ def _manager(tmp_path: Path, **kwargs: Any) -> tuple[ChatManager, list[list[str]
 
     def spawn(command: list[str], _environment: dict[str, str]) -> _FakeProcess:
         commands.append(command)
-        requested = _command_session(command)
-        session = "forked-session" if "--fork-session" in command else requested
-        return _FakeProcess(_events(session_id=session))
+        return _FakeProcess(_events(session_id=_command_session(command)))
 
     def assign(job: int, _pid: int) -> bool:
         jobs.append(job)
@@ -153,28 +149,25 @@ def test_roles_get_isolated_sessions(tmp_path: Path) -> None:
     assert dev["session_id"] in commands[2]
 
 
-def test_first_turn_forks_external_session(tmp_path: Path) -> None:
+def test_first_turn_resumes_external_session(tmp_path: Path) -> None:
     manager, commands, _jobs = _manager(
         tmp_path,
         external_session=lambda role: "external-session" if role == "dev" else None,
     )
 
     first = manager.stream_turn("dev", "继承终端上下文", lambda _event, _data: True)
-    assert first["forked"] is True
     assert first["inherited_from"] == "external-session"
-    assert first["session_id"] == "forked-session"
+    assert first["session_id"] == "external-session"
     assert "--resume" in commands[0] and "external-session" in commands[0]
-    assert "--fork-session" in commands[0]
+    assert "--fork-session" not in commands[0]
 
     second = manager.stream_turn("dev", "继续", lambda _event, _data: True)
-    assert second["forked"] is False
     assert second["inherited_from"] is None
-    assert second["session_id"] == "forked-session"
-    assert "--fork-session" not in commands[1]
-    assert "forked-session" in commands[1]
+    assert second["session_id"] == "external-session"
+    assert "external-session" in commands[1]
 
     doc = manager.stream_turn("doc", "新会话", lambda _event, _data: True)
-    assert doc["forked"] is False
+    assert doc["inherited_from"] is None
     assert "--session-id" in commands[2]
 
 

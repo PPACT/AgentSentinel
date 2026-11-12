@@ -4,6 +4,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { Command, type Child } from "@tauri-apps/plugin-shell";
 
 import type { Agent, StatusSnapshot, TaskList, WildProcess } from "./types";
+import type { ChatBlock } from "./chat";
 
 /** 默认 daemon 未写 daemon.json 时的兜底地址（与 shell scope 一致）。 */
 const FALLBACK_BASE = "http://127.0.0.1:8765";
@@ -199,6 +200,23 @@ export async function logStreamUrl(): Promise<string> {
 export async function streamFetch(url: string, init: RequestInit): Promise<Response> {
   const headers = { ...(await tokenHeader()), ...(init.headers as Record<string, string> | undefined) };
   return tauriFetch(url, { ...init, headers });
+}
+
+export interface SessionHistoryResponse {
+  role: string;
+  session_id: string;
+  source: "terminal";
+  messages: Array<{ role: string; blocks: ChatBlock[]; timestamp?: string | null }>;
+  truncated: boolean;
+  context_tokens: number;
+  bytes: number;
+}
+
+/** 只读读取终端会话的本地 transcript（daemon 解析，零 token）。 */
+export function getSessionHistory(role: string, limit = 200): Promise<SessionHistoryResponse> {
+  return requestJSON<SessionHistoryResponse>(
+    `/sessions/history?role=${encodeURIComponent(role)}&limit=${limit}`,
+  );
 }
 
 /** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */

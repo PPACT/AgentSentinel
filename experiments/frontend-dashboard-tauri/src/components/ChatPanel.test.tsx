@@ -86,6 +86,15 @@ describe("ChatPanel", () => {
     expect(screen.getByText("已继承 dev 终端上下文，当前为独立会话分支")).toBeInTheDocument();
   });
 
+  it("shows terminal history badge and context warning", () => {
+    renderPanel({
+      terminalHistory: true,
+      contextWarning: "终端上下文约 195k tokens；继续对话按输入计费",
+    });
+    expect(screen.getByText("终端历史（只读）")).toBeInTheDocument();
+    expect(screen.getByText(/195k tokens/)).toBeInTheDocument();
+  });
+
   it("calls onStop", () => {
     const { onStop } = renderPanel({ busy: true });
     fireEvent.click(screen.getByTitle("停止本轮"));

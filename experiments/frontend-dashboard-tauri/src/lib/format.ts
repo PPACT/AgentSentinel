@@ -101,3 +101,10 @@ export function isDaemonDown(error: unknown): boolean {
     ? (error as { status?: unknown }).status === 503
     : false;
 }
+
+export function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(Math.round(value));
+}

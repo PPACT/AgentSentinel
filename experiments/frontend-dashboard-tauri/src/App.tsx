@@ -27,12 +27,13 @@ import {
   stopRole,
   streamFetch,
 } from "@/lib/backend";
-import { errorMessage } from "@/lib/format";
+import { errorMessage, formatTokenCount } from "@/lib/format";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task, WildProcess } from "@/lib/types";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 import { useChatSessions } from "@/lib/useChatSessions";
+import { useTerminalHistory } from "@/lib/useTerminalHistory";
 
 // Markdown/高亮体积较大，聊天面板独立分包；主界面先渲染，面板异步加载。
 const ChatPanel = lazy(() =>
@@ -50,6 +51,7 @@ export default function App() {
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const { histories: chatHistories, busy: chatBusy, inherited: chatInherited, send: sendChat, stop: stopChat } =
     useChatSessions();
+  const terminalHistory = useTerminalHistory(selectedRole);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -334,15 +336,27 @@ export default function App() {
   const tasksPane = <TasksPanel tasks={tasks} onSelect={setSelectedTask} />;
 
   const selectedEntries = selectedRole ? (chatHistories[selectedRole] ?? []) : [];
+  const terminalData = selectedRole ? terminalHistory.data[selectedRole] : undefined;
+  const terminalEntries = terminalData?.entries ?? [];
+  const allEntries = [...terminalEntries, ...selectedEntries];
+  const terminalLoading = selectedRole ? Boolean(terminalHistory.loading[selectedRole]) : false;
   const selectedAgent = agents.find((agent) => agent.role === selectedRole);
   const inheritedFrom = selectedRole ? chatInherited[selectedRole] : undefined;
+  const contextWarning =
+    terminalData && terminalData.contextTokens > 0
+      ? `终端上下文约 ${formatTokenCount(terminalData.contextTokens)} tokens；继续对话按输入计费（缓存命中亦有成本）`
+      : null;
   const inheritHint = !selectedRole
     ? null
     : inheritedFrom
-      ? `已继承 ${selectedRole} 终端上下文，当前为独立会话分支`
-      : selectedEntries.length === 0 && selectedAgent?.external_session_id
-        ? `首次发送将继承 ${selectedRole} 终端上下文（独立分支）`
-        : null;
+      ? `已共享 ${selectedRole} 终端会话，当前为同一上下文`
+      : terminalLoading
+        ? `正在读取 ${selectedRole} 终端历史…`
+        : terminalEntries.length > 0
+          ? `已载入 ${selectedRole} 终端历史（只读）；首次发送将共享该会话继续对话`
+          : selectedAgent?.external_session_id
+            ? `首次发送将共享 ${selectedRole} 终端会话`
+            : null;
 
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
@@ -378,9 +392,11 @@ export default function App() {
           >
             <ChatPanel
               role={selectedRole}
-              entries={selectedEntries}
+              entries={allEntries}
               busy={selectedRole ? (chatBusy[selectedRole] ?? false) : false}
               inheritHint={inheritHint}
+              contextWarning={contextWarning}
+              terminalHistory={terminalEntries.length > 0}
               onSend={(prompt) => {
                 if (selectedRole) void sendChat(selectedRole, prompt);
               }}

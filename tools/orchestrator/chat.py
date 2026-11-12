@@ -71,8 +71,8 @@ def chat_budget_usd() -> str:
     return os.environ.get(BUDGET_ENV, "").strip() or DEFAULT_BUDGET_USD
 
 
-def chat_command(prompt: str, session_id: str, *, resume: bool, fork: bool = False) -> list[str]:
-    """首轮 ``--session-id`` 建会话；续轮 ``--resume``；接管外部会话时额外 fork。"""
+def chat_command(prompt: str, session_id: str, *, resume: bool) -> list[str]:
+    """首轮 ``--session-id`` 建会话，后续/接管外部会话时 ``--resume``。"""
     command = [
         "claude",
         "-p",
@@ -87,8 +87,6 @@ def chat_command(prompt: str, session_id: str, *, resume: bool, fork: bool = Fal
     ]
     if resume:
         command.extend(["--resume", session_id])
-        if fork:
-            command.append("--fork-session")
     else:
         command.extend(["--session-id", session_id])
     return command
@@ -211,14 +209,14 @@ class ChatManager:
         if existing is None and self._external_session is not None:
             external = self._external_session(role)
         if existing is not None:
-            sid, resume, fork, inherited_from = existing, True, False, None
+            sid, resume, inherited_from = existing, True, None
         elif external:
-            # 接管外部终端上下文：复制到新 session，原会话不被改写。
-            sid, resume, fork, inherited_from = external, True, True, external
+            # 接管外部终端会话：直接共享同一 session，依赖 CLI 的 prompt cache 降本。
+            sid, resume, inherited_from = external, True, external
         else:
-            sid, resume, fork, inherited_from = str(uuid.uuid4()), False, False, None
+            sid, resume, inherited_from = str(uuid.uuid4()), False, None
         final_sid = sid
-        command = chat_command(prompt, sid, resume=resume, fork=fork)
+        command = chat_command(prompt, sid, resume=resume)
         job = self._job_factory()
         texts: list[str] = []
         result_event: dict[str, Any] | None = None
@@ -288,7 +286,6 @@ class ChatManager:
             "role": role,
             "session_id": final_sid,
             "resumed": resume,
-            "forked": fork,
             "inherited_from": inherited_from,
             "result": result_text,
             "cost_usd": cost,

@@ -13,6 +13,8 @@ interface ChatPanelProps {
   entries: ChatEntry[];
   busy: boolean;
   inheritHint?: string | null;
+  contextWarning?: string | null;
+  terminalHistory?: boolean;
   onSend: (prompt: string) => void;
   onStop: () => void;
 }
@@ -98,7 +100,16 @@ function BlockView({ block }: { block: ChatBlock }) {
  * 受控聊天面板：历史由 App 按 role 维护，这里只负责输入与渲染。
  * 发送只由用户事件触发，不做任何自动请求。
  */
-export function ChatPanel({ role, entries, busy, inheritHint, onSend, onStop }: ChatPanelProps) {
+export function ChatPanel({
+  role,
+  entries,
+  busy,
+  inheritHint,
+  contextWarning,
+  terminalHistory = false,
+  onSend,
+  onStop,
+}: ChatPanelProps) {
   const [input, setInput] = useState("");
   const composingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -124,6 +135,11 @@ export function ChatPanel({ role, entries, busy, inheritHint, onSend, onStop }: 
             {role ? (
               <span className="rounded border border-sky-900/70 bg-sky-950/40 px-1.5 py-0.5 font-mono text-[10px] text-sky-400">
                 {role}
+              </span>
+            ) : null}
+            {terminalHistory ? (
+              <span className="rounded border border-zinc-700/70 px-1.5 py-0.5 text-[9px] text-zinc-500">
+                终端历史（只读）
               </span>
             ) : null}
           </div>
@@ -158,6 +174,9 @@ export function ChatPanel({ role, entries, busy, inheritHint, onSend, onStop }: 
       </div>
 
       <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
+        {contextWarning ? (
+          <div className="mb-2 text-[10px] text-amber-400/80">{contextWarning}</div>
+        ) : null}
         <div
           className={`overflow-hidden rounded-md border bg-zinc-900/70 ${
             role ? "border-zinc-700/80 focus-within:border-sky-700/80" : "border-zinc-800/60"

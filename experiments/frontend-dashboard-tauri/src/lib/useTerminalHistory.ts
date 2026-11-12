@@ -41,7 +41,11 @@ export function useTerminalHistory(role: string | null): TerminalHistoryState {
       .then((response) => {
         let nextId = 0;
         const entries: ChatEntry[] = response.messages.flatMap((message) =>
-          message.blocks.map((block) => ({ id: nextId++, block })),
+          message.blocks.map((block) => ({
+            id: nextId++,
+            block,
+            timestamp: message.timestamp ?? null,
+          })),
         );
         setData((previous) => ({
           ...previous,

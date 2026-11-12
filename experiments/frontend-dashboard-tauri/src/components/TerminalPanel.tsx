@@ -20,6 +20,7 @@ const STATE_LABEL: Record<PtyState, string> = {
 export function TerminalPanel() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<PtyState>("connecting");
+  const [info, setInfo] = useState<{ command: string; sessionId: string } | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -75,7 +76,8 @@ export function TerminalPanel() {
     const connect = async () => {
       try {
         setState("connecting");
-        await startPty();
+        const status = await startPty();
+        setInfo({ command: status.command, sessionId: status.session_id });
         const response = await streamFetch(await ptyStreamUrl(), {
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
@@ -126,7 +128,14 @@ export function TerminalPanel() {
           }`}
         />
         <span className="text-zinc-300">Terminal</span>
-        <span className="font-mono text-zinc-600">PowerShell · PTY</span>
+        <span className="font-mono text-zinc-600">
+          {info ? `${info.command} · PTY` : "claude · PTY"}
+        </span>
+        {info?.sessionId ? (
+          <span className="truncate font-mono text-[10px] text-zinc-700" title={info.sessionId}>
+            session {info.sessionId.slice(0, 8)}
+          </span>
+        ) : null}
         <span className="ml-auto font-mono text-zinc-600">{STATE_LABEL[state]}</span>
       </div>
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-2 py-1" />

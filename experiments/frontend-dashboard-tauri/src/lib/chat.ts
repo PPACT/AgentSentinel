@@ -13,6 +13,7 @@ export type ChatBlock =
 export interface ChatEntry {
   id: number;
   block: ChatBlock;
+  timestamp?: string | null;
 }
 
 export interface ChatTurnSummary {

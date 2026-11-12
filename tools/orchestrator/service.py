@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import secrets
+import shlex
 import signal
 import socket
 import sys
@@ -570,6 +571,19 @@ def _release_instance_lock(home: Path) -> None:
         return
 
 
+def _pty_environment() -> dict[str, str]:
+    """PTY 里必须是独立的 claude 会话，不能继承外层 Claude Code 的子会话标记。"""
+    env = os.environ.copy()
+    for key in list(env):
+        if (
+            key in {"CLAUDECODE", "CLAUDE_PID"}
+            or key.startswith("CLAUDE_CODE_")
+            and key != "CLAUDE_CODE_GIT_BASH_PATH"
+        ):
+            env.pop(key, None)
+    return env
+
+
 def _should_sweep_workers() -> bool:
     """pytest 进程内禁用真实清扫，避免测试误杀宿主机进程。"""
     if os.environ.get(SWEEP_WORKERS_ENV, "1").strip() == "0":
@@ -645,7 +659,14 @@ class Daemon:
         )
         self.wild_driver = CwdProcessDriver()
         self.chat = ChatManager(external_session=self.external_session)
-        self.pty = PtyManager(cwd=self.project)
+        pty_override = os.environ.get("SENTINEL_PTY_COMMAND", "").strip()
+        pty_command = tuple(shlex.split(pty_override)) if pty_override else None
+        self.pty = PtyManager(
+            cwd=self.project,
+            command=pty_command,
+            session_id=os.environ.get("SENTINEL_PTY_SESSION_ID", "").strip() or None,
+            env=_pty_environment(),
+        )
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()

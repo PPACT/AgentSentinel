@@ -10,7 +10,9 @@ import os
 import queue
 import threading
 import time
+import uuid
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 from winpty import PtyProcess  # type: ignore[import-untyped]  # 无 stubs
@@ -22,7 +24,10 @@ READ_CHUNK = 8192
 MAX_BACKLOG_BYTES = 512 * 1024
 INPUT_MAX_CHARS = 16 * 1024
 SSE_PING_SECONDS = 20.0
-DEFAULT_COMMAND = ("powershell.exe", "-NoLogo", "-NoProfile")
+
+
+def claude_command(session_id: str) -> list[str]:
+    return ["claude", "--session-id", session_id]
 
 
 class PtyManager:
@@ -33,11 +38,17 @@ class PtyManager:
         *,
         cwd: str,
         command: tuple[str, ...] | None = None,
+        session_id: str | None = None,
+        command_factory: Callable[[str], list[str]] | None = None,
         env: dict[str, str] | None = None,
         dimensions: tuple[int, int] = DEFAULT_DIMENSIONS,
     ) -> None:
         self.cwd = cwd
-        self.command = list(command or DEFAULT_COMMAND)
+        self._command_override = list(command) if command else None
+        self._command_factory = command_factory or claude_command
+        self._fixed_session = session_id.strip() if session_id and session_id.strip() else None
+        self._command: list[str] = []
+        self.session_id = ""
         self.env = env
         self.rows, self.cols = dimensions
         self._lock = threading.Lock()
@@ -65,7 +76,8 @@ class PtyManager:
             "exit_status": self._exit_status,
             "backlog_bytes": self._backlog_bytes,
             "subscribers": len(self._subscribers),
-            "command": self.command[0],
+            "command": self._command[0] if self._command else "claude",
+            "session_id": self.session_id,
         }
 
     def start(self) -> dict[str, Any]:
@@ -73,11 +85,13 @@ class PtyManager:
             if self._running and self._process is not None and self._process.isalive():
                 return self._status_locked()
             self._cleanup_locked()
+            session = self._fixed_session or str(uuid.uuid4())
+            command = self._command_override or self._command_factory(session)
             job = create_job()
             process: PtyProcess | None = None
             try:
                 process = PtyProcess.spawn(
-                    self.command,
+                    command,
                     cwd=self.cwd,
                     env=self.env or os.environ.copy(),
                     dimensions=(self.rows, self.cols),
@@ -92,6 +106,8 @@ class PtyManager:
             self._process = process
             self._job = job
             self._pid = int(process.pid)
+            self._command = command
+            self.session_id = session
             self._running = True
             self._exit_status = None
             self._reader = threading.Thread(target=self._read_loop, daemon=True)

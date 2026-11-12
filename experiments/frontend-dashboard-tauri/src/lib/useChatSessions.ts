@@ -26,11 +26,12 @@ export function useChatSessions(): ChatSessionsState {
 
   const append = useCallback((role: string, blocks: ChatBlock[]) => {
     if (blocks.length === 0) return;
+    const timestamp = new Date().toISOString();
     setHistories((previous) => ({
       ...previous,
       [role]: [
         ...(previous[role] ?? []),
-        ...blocks.map((block) => ({ id: nextId.current++, block })),
+        ...blocks.map((block) => ({ id: nextId.current++, block, timestamp })),
       ],
     }));
   }, []);

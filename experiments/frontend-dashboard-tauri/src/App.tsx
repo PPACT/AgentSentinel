@@ -1,4 +1,4 @@
-import { ChevronUp, Terminal } from "lucide-react";
+import { ChevronUp, ListChecks, MessageSquare, Terminal } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -12,6 +12,7 @@ import {
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
+import { ProgressPanel } from "@/components/ProgressPanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
 import { TasksPanel } from "@/components/TasksPanel";
 import { TopBar } from "@/components/TopBar";
@@ -51,7 +52,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [centerTab, setCenterTab] = useState<"chat" | "terminal">("chat");
+  const [centerTab, setCenterTab] = useState<"chat" | "progress" | "terminal">("chat");
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const { histories: chatHistories, busy: chatBusy, inherited: chatInherited, send: sendChat, stop: stopChat } =
     useChatSessions();
@@ -387,23 +388,39 @@ export default function App() {
         )}
 
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-8 shrink-0 items-center gap-1 border-x border-b border-zinc-800 bg-zinc-950 px-2">
-            {(["chat", "terminal"] as const).map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                onClick={() => setCenterTab(tab)}
-                className={`h-6 rounded px-2 text-[11px] transition-colors ${
-                  centerTab === tab
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-300"
-                }`}
-              >
-                {tab === "chat" ? "对话" : "终端"}
-              </button>
-            ))}
-            <span className="ml-auto text-[10px] text-zinc-600">
-              {centerTab === "terminal" ? "PTY 常驻 · 原始 ANSI" : "JSONL 旁路 · 零 token"}
+          <div className="flex h-9 shrink-0 items-center gap-1 border-x border-b border-zinc-800 bg-zinc-950 px-2">
+            {(
+              [
+                { key: "chat", label: "对话", icon: MessageSquare },
+                { key: "progress", label: "进度记录", icon: ListChecks },
+                { key: "terminal", label: "原生终端", icon: Terminal },
+              ] as const
+            ).map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={centerTab === tab.key}
+                  onClick={() => setCenterTab(tab.key)}
+                  className={`flex h-7 items-center gap-1.5 rounded px-3 text-[11px] transition-colors ${
+                    centerTab === tab.key
+                      ? "bg-zinc-800 text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  <Icon className="size-3.5" />
+                  {tab.label}
+                </button>
+              );
+            })}
+            <span className="ml-auto pr-1 font-mono text-[10px] text-zinc-600">
+              {centerTab === "terminal"
+                ? "PTY 常驻 · 原始 ANSI"
+                : centerTab === "progress"
+                  ? "工具时间轴 · 零 token"
+                  : "JSONL 旁路 · 零 token"}
             </span>
           </div>
           <div className="min-h-0 flex-1">
@@ -430,6 +447,8 @@ export default function App() {
                   }}
                 />
               </Suspense>
+            ) : centerTab === "progress" ? (
+              <ProgressPanel role={selectedRole} entries={allEntries} />
             ) : (
               <Suspense
                 fallback={

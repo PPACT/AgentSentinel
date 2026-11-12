@@ -228,6 +228,7 @@ export interface PtyStatus {
   backlog_bytes: number;
   subscribers: number;
   command: string;
+  session_id: string;
 }
 
 export function startPty(): Promise<PtyStatus> {

@@ -39,11 +39,49 @@ describe("ChatPanel", () => {
     renderPanel({ entries: ENTRIES });
 
     expect(screen.getByText("dev")).toBeInTheDocument();
-    expect(screen.getByText("Agent 正在思考…")).toBeInTheDocument();
-    expect(screen.getByText("Read")).toBeInTheDocument();
     expect(screen.queryByText("内部推理")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Agent 正在思考/)).not.toBeInTheDocument();
+    expect(screen.getByText("执行了 1 个工具调用")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("执行了 1 个工具调用"));
+    expect(screen.getByText("Read")).toBeInTheDocument();
     expect(screen.getByText("最终回答").tagName).toBe("STRONG");
     expect(document.querySelector("pre code")).not.toBeNull();
+  });
+
+  it("groups bash calls into one expandable status row", () => {
+    renderPanel({
+      entries: [
+        { id: 1, block: { kind: "tool", name: "Bash", input: "npm test" } },
+        { id: 2, block: { kind: "thinking", text: "中间思考" } },
+        { id: 3, block: { kind: "tool", name: "Bash", input: "ruff check ." } },
+        { id: 4, block: { kind: "tool", name: "Bash", input: "git status" } },
+      ],
+    });
+
+    expect(screen.getByText("执行了 3 条系统命令")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("执行了 3 条系统命令"));
+    expect(screen.getByText("npm test")).toBeInTheDocument();
+    expect(screen.getByText("ruff check .")).toBeInTheDocument();
+  });
+
+  it("keeps only the final text of a turn", () => {
+    renderPanel({
+      entries: [
+        { id: 1, block: { kind: "user", text: "问题" } },
+        { id: 2, block: { kind: "text", text: "中间回答" } },
+        { id: 3, block: { kind: "tool", name: "Bash", input: "npm test" } },
+        { id: 4, block: { kind: "text", text: "**最终回答**" } },
+      ],
+    });
+
+    expect(screen.getByText("问题")).toBeInTheDocument();
+    expect(screen.queryByText("中间回答")).not.toBeInTheDocument();
+    expect(screen.getByText("最终回答").tagName).toBe("STRONG");
+  });
+
+  it("shows a silent thinking pulse while busy", () => {
+    renderPanel({ busy: true });
+    expect(screen.getByText("思考中")).toBeInTheDocument();
   });
 
   it("disables input and asks for a role when none is selected", () => {
@@ -86,13 +124,14 @@ describe("ChatPanel", () => {
     expect(screen.getByText("已继承 dev 终端上下文，当前为独立会话分支")).toBeInTheDocument();
   });
 
-  it("shows terminal history badge and context warning", () => {
+  it("shows terminal history badge and a hoverable context dot", () => {
     renderPanel({
       terminalHistory: true,
       contextWarning: "终端上下文约 195k tokens；继续对话按输入计费",
     });
     expect(screen.getByText("终端历史（只读）")).toBeInTheDocument();
-    expect(screen.getByText(/195k tokens/)).toBeInTheDocument();
+    const dot = screen.getByLabelText("上下文用量");
+    expect(dot).toHaveAttribute("title", expect.stringContaining("195k tokens"));
   });
 
   it("calls onStop", () => {

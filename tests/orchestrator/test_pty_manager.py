@@ -8,20 +8,26 @@ import time
 from pathlib import Path
 
 import pytest
-from tools.orchestrator.pty_manager import PtyManager
+from tools.orchestrator.pty_manager import PtyManager, claude_command
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="ConPTY on Windows")
 
 ROOT = Path(__file__).resolve().parents[2]
+SHELL = ("powershell.exe", "-NoLogo", "-NoProfile")
+
+
+def test_claude_command_pins_session() -> None:
+    assert claude_command("1111-2222") == ["claude", "--session-id", "1111-2222"]
 
 
 def test_shell_echo_resize_and_stop() -> None:
-    manager = PtyManager(cwd=str(ROOT))
+    manager = PtyManager(cwd=str(ROOT), command=SHELL)
     subscriber = None
     try:
         status = manager.start()
         assert status["running"] is True
         assert status["pid"] > 0
+        assert status["session_id"]
 
         subscriber, _backlog = manager.subscribe()
         assert manager.write("echo PTY_SMOKE\r") is True
@@ -47,6 +53,6 @@ def test_shell_echo_resize_and_stop() -> None:
 
 
 def test_write_without_process_returns_false(tmp_path: Path) -> None:
-    manager = PtyManager(cwd=str(tmp_path))
+    manager = PtyManager(cwd=str(tmp_path), command=SHELL)
     assert manager.write("dir\r") is False
     assert manager.status()["running"] is False

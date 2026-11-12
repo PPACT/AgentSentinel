@@ -87,11 +87,17 @@ def _blocks(role: str, content: Any) -> list[dict[str, Any]]:
         kind = block.get("type")
         if kind == "text" and isinstance(block.get("text"), str) and block["text"].strip():
             blocks.append({"kind": "text", "text": block["text"]})
-        elif kind == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"].strip():
+        elif (
+            kind == "thinking"
+            and isinstance(block.get("thinking"), str)
+            and block["thinking"].strip()
+        ):
             blocks.append({"kind": "thinking", "text": block["thinking"]})
         elif kind == "tool_use" and role == "assistant":
             name = str(block.get("name", "tool"))
-            blocks.append({"kind": "tool", "name": name, "input": _tool_summary(name, block.get("input"))})
+            blocks.append(
+                {"kind": "tool", "name": name, "input": _tool_summary(name, block.get("input"))}
+            )
         # tool_result 在历史视图中省略，避免大段原始输出。
     return blocks
 
@@ -142,7 +148,11 @@ def read_history(
             if isinstance(usage, dict):
                 tokens = sum(
                     int(usage.get(key) or 0)
-                    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                    for key in (
+                        "input_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    )
                 )
                 context_tokens = max(context_tokens, tokens)
         messages.append(

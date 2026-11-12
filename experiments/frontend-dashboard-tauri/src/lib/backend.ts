@@ -219,6 +219,45 @@ export function getSessionHistory(role: string, limit = 200): Promise<SessionHis
   );
 }
 
+export interface PtyStatus {
+  running: boolean;
+  pid: number;
+  cols: number;
+  rows: number;
+  exit_status: number | null;
+  backlog_bytes: number;
+  subscribers: number;
+  command: string;
+}
+
+export function startPty(): Promise<PtyStatus> {
+  return requestJSON<PtyStatus>("/pty/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
+export function sendPtyInput(data: string): Promise<void> {
+  return requestJSON<unknown>("/pty/input", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  }).then(() => undefined);
+}
+
+export function resizePty(cols: number, rows: number): Promise<PtyStatus> {
+  return requestJSON<PtyStatus>("/pty/resize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cols, rows }),
+  });
+}
+
+export async function ptyStreamUrl(): Promise<string> {
+  return `${await daemonBase()}/pty/stream`;
+}
+
 /** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */
 export async function startChatStream(options: {
   role: string;

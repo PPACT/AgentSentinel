@@ -7,6 +7,7 @@ CLI 只是 HTTP 客户端；daemon 退出（正常或崩溃）时 Job 句柄关�
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import os
@@ -36,6 +37,7 @@ from tools.orchestrator.launcher import (
     process_alive,
     sweep_leftover_real_workers,
 )
+from tools.orchestrator.pty_manager import PtyManager
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import (
     InvalidTransition,
@@ -643,6 +645,7 @@ class Daemon:
         )
         self.wild_driver = CwdProcessDriver()
         self.chat = ChatManager(external_session=self.external_session)
+        self.pty = PtyManager(cwd=self.project)
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -1296,6 +1299,7 @@ class Daemon:
                 watch_thread.join(timeout=5)
             self._wait_subscribers(timeout=2.0)
             self.chat.stop_all()
+            self.pty.stop()
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -1364,6 +1368,56 @@ class _Handler(BaseHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError):
             # 客户端已断开（常见于前端取消/刷新），不是 daemon 错误。
             return
+
+    def _stream_pty(self) -> None:
+        pty = self.daemon.pty
+        try:
+            pty.ensure_started()
+        except (OSError, RuntimeError) as exc:
+            self._send(500, {"error": f"pty start failed: {exc}"})
+            return
+        subscriber, backlog = pty.subscribe()
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except (ConnectionResetError, BrokenPipeError):
+            pty.unsubscribe(subscriber)
+            return
+        try:
+            for seq, chunk in backlog:
+                frame = {"seq": seq, "data": base64.b64encode(chunk).decode("ascii")}
+                if not self._write_bytes(f"event: output\ndata: {json.dumps(frame)}\n\n".encode()):
+                    return
+            if not pty.status().get("running"):
+                self._write_bytes(
+                    f"event: exit\ndata: {json.dumps({'exit_status': None})}\n\n".encode()
+                )
+                return
+            while True:
+                try:
+                    event, data = subscriber.get(timeout=pty.ping_seconds())
+                except queue.Empty:
+                    if not self._write_bytes(b": ping\n\n"):
+                        return
+                    continue
+                if event == "output":
+                    frame = {
+                        "seq": data.get("seq"),
+                        "data": base64.b64encode(data.get("data", b"")).decode("ascii"),
+                    }
+                    if not self._write_bytes(
+                        f"event: output\ndata: {json.dumps(frame)}\n\n".encode()
+                    ):
+                        return
+                elif event == "exit":
+                    self._write_bytes(f"event: exit\ndata: {json.dumps(data)}\n\n".encode())
+                    return
+        finally:
+            pty.unsubscribe(subscriber)
 
     def _stream_chat(self, payload: dict[str, Any]) -> None:
         try:
@@ -1639,6 +1693,14 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if method == "GET" and path == "/pty/status":
+            self._send(200, self.daemon.pty.status())
+            return
+
+        if method == "GET" and path == "/pty/stream":
+            self._stream_pty()
+            return
+
         if method == "GET" and path == "/events":
             self._stream_events()
             return
@@ -1666,6 +1728,43 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError) as exc:
                 status, body = 500, {"error": str(exc)}
             self._send(status, body)
+            return
+
+        if method == "POST" and path == "/pty/start":
+            try:
+                self._send(200, self.daemon.pty.start())
+            except (OSError, RuntimeError) as exc:
+                self._send(500, {"error": str(exc)})
+            return
+
+        if method == "POST" and path == "/pty/input":
+            data = payload.get("data")
+            if not isinstance(data, str):
+                self._send(400, {"error": "data is required"})
+                return
+            try:
+                ok = self.daemon.pty.write(data)
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            if ok:
+                self._send(200, {"written": len(data)})
+            else:
+                self._send(409, {"error": "pty not running", "reason": "pty_not_running"})
+            return
+
+        if method == "POST" and path == "/pty/resize":
+            try:
+                cols = int(payload.get("cols", 120))
+                rows = int(payload.get("rows", 30))
+            except (TypeError, ValueError):
+                self._send(400, {"error": "invalid cols/rows"})
+                return
+            self._send(200, self.daemon.pty.resize(cols, rows))
+            return
+
+        if method == "POST" and path == "/pty/stop":
+            self._send(200, self.daemon.pty.stop())
             return
 
         if method == "POST" and path == "/chat":

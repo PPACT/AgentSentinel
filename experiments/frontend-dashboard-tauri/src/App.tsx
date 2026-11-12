@@ -39,6 +39,9 @@ import { useTerminalHistory } from "@/lib/useTerminalHistory";
 const ChatPanel = lazy(() =>
   import("@/components/ChatPanel").then((module) => ({ default: module.ChatPanel })),
 );
+const TerminalPanel = lazy(() =>
+  import("@/components/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
+);
 
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
@@ -48,6 +51,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [centerTab, setCenterTab] = useState<"chat" | "terminal">("chat");
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const { histories: chatHistories, busy: chatBusy, inherited: chatInherited, send: sendChat, stop: stopChat } =
     useChatSessions();
@@ -382,29 +386,62 @@ export default function App() {
           </aside>
         )}
 
-        <main className="min-w-0 flex-1">
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-xs text-zinc-600">
-                加载对话面板…
-              </div>
-            }
-          >
-            <ChatPanel
-              role={selectedRole}
-              entries={allEntries}
-              busy={selectedRole ? (chatBusy[selectedRole] ?? false) : false}
-              inheritHint={inheritHint}
-              contextWarning={contextWarning}
-              terminalHistory={terminalEntries.length > 0}
-              onSend={(prompt) => {
-                if (selectedRole) void sendChat(selectedRole, prompt);
-              }}
-              onStop={() => {
-                if (selectedRole) stopChat(selectedRole);
-              }}
-            />
-          </Suspense>
+        <main className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-8 shrink-0 items-center gap-1 border-x border-b border-zinc-800 bg-zinc-950 px-2">
+            {(["chat", "terminal"] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setCenterTab(tab)}
+                className={`h-6 rounded px-2 text-[11px] transition-colors ${
+                  centerTab === tab
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {tab === "chat" ? "对话" : "终端"}
+              </button>
+            ))}
+            <span className="ml-auto text-[10px] text-zinc-600">
+              {centerTab === "terminal" ? "PTY 常驻 · 原始 ANSI" : "JSONL 旁路 · 零 token"}
+            </span>
+          </div>
+          <div className="min-h-0 flex-1">
+            {centerTab === "chat" ? (
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+                    加载对话面板…
+                  </div>
+                }
+              >
+                <ChatPanel
+                  role={selectedRole}
+                  entries={allEntries}
+                  busy={selectedRole ? (chatBusy[selectedRole] ?? false) : false}
+                  inheritHint={inheritHint}
+                  contextWarning={contextWarning}
+                  terminalHistory={terminalEntries.length > 0}
+                  onSend={(prompt) => {
+                    if (selectedRole) void sendChat(selectedRole, prompt);
+                  }}
+                  onStop={() => {
+                    if (selectedRole) stopChat(selectedRole);
+                  }}
+                />
+              </Suspense>
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+                    加载终端…
+                  </div>
+                }
+              >
+                <TerminalPanel />
+              </Suspense>
+            )}
+          </div>
         </main>
 
         {narrowTasks ? null : (

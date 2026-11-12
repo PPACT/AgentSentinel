@@ -281,7 +281,9 @@ class ChatManager:
         if not result_text and texts:
             result_text = texts[-1]
         cost = result_event.get("total_cost_usd") if result_event else None
-        self._append_dev_log(role, prompt, result_text, final_sid, error=error, disconnected=disconnected)
+        self._append_dev_log(
+            role, prompt, result_text, final_sid, error=error, disconnected=disconnected
+        )
         return {
             "role": role,
             "session_id": final_sid,

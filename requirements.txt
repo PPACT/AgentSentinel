@@ -19,3 +19,5 @@ psutil>=6.0
 pytest>=8.0
 ruff>=0.3.0
 mypy>=1.8.0
+
+pywinpty==2.0.15

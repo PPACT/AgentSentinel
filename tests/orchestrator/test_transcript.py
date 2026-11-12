@@ -99,4 +99,6 @@ def test_read_history_limit_and_boundary(tmp_path: Path) -> None:
     assert len(result["messages"]) == 2
     assert transcript_path(PROJECT, "../escape", config_dir=tmp_path) is None
     assert transcript_path(PROJECT, "not-a-uuid", config_dir=tmp_path) is None
-    assert read_history(PROJECT, "99999999-2222-3333-4444-555555555555", config_dir=tmp_path) is None
+    assert (
+        read_history(PROJECT, "99999999-2222-3333-4444-555555555555", config_dir=tmp_path) is None
+    )

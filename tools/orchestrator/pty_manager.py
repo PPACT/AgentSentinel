@@ -6,6 +6,7 @@ Phase 1：PowerShell shell；Phase 2：切换为交互式 claude TUI。
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import threading
@@ -42,6 +43,7 @@ class PtyManager:
         command_factory: Callable[[str], list[str]] | None = None,
         env: dict[str, str] | None = None,
         dimensions: tuple[int, int] = DEFAULT_DIMENSIONS,
+        state_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self.cwd = cwd
         self._command_override = list(command) if command else None
@@ -50,6 +52,7 @@ class PtyManager:
         self._command: list[str] = []
         self.session_id = ""
         self.env = env
+        self.state_path = str(state_path) if state_path is not None else None
         self.rows, self.cols = dimensions
         self._lock = threading.Lock()
         self._process: PtyProcess | None = None
@@ -110,6 +113,7 @@ class PtyManager:
             self.session_id = session
             self._running = True
             self._exit_status = None
+            self._write_state_locked()
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
             self._reader.start()
             return self._status_locked()
@@ -187,6 +191,32 @@ class PtyManager:
         self._process = None
         self._running = False
         self._pid = 0
+        self._clear_state()
+
+    def _write_state_locked(self) -> None:
+        """落盘 PTY pid/session 供兜底脚本定位残留进程。"""
+        if not self.state_path:
+            return
+        payload = {
+            "pid": self._pid,
+            "session_id": self.session_id,
+            "command": self._command[0] if self._command else "",
+        }
+        try:
+            temp = f"{self.state_path}.tmp"
+            with open(temp, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False)
+            os.replace(temp, self.state_path)
+        except OSError:
+            pass
+
+    def _clear_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            os.unlink(self.state_path)
+        except OSError:
+            pass
 
     def _read_loop(self) -> None:
         process = self._process
@@ -204,6 +234,7 @@ class PtyManager:
         with self._lock:
             self._running = False
             self._exit_status = process.exitstatus
+            self._clear_state()
         self._broadcast_exit(self._exit_status)
 
     def _broadcast(self, data: bytes) -> None:

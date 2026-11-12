@@ -93,7 +93,9 @@ def _daemon_start(home: Path, port: int) -> dict[str, Any]:
     environment["PYTHONIOENCODING"] = "utf-8"
     creationflags = 0
     if os.name == "nt":
-        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+        # 只用 CREATE_NO_WINDOW：本机默认终端为 Windows Terminal 时，
+        # DETACHED_PROCESS 会额外弹出可见终端页；隐藏控制台即可存活并静默。
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
     with log_path.open("a", encoding="utf-8") as stream:

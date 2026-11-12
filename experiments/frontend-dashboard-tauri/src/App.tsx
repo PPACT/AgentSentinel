@@ -21,10 +21,11 @@ import {
   discoverAgents,
   ensureDaemon,
   eventStreamUrl,
+  forceKillPid,
   getStatus,
   getTasks,
   logStreamUrl,
-  stopDaemon,
+  shutdownDaemon,
   stopRole,
   streamFetch,
 } from "@/lib/backend";
@@ -212,9 +213,44 @@ export default function App() {
       abortRef.current?.abort();
       logAbortRef.current?.abort();
       if (tasksTimerRef.current !== null) clearTimeout(tasksTimerRef.current);
-      void stopDaemon();
     };
   }, [appendLog, refreshAll, startLogStream, startStream]);
+
+  // 点击窗口 X：先让 daemon 优雅退出（Job Object 回收 PTY/claude），确认后再销毁窗口。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let closing = false;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const currentWindow = getCurrentWindow();
+        unlisten = await currentWindow.onCloseRequested(async (event) => {
+          event.preventDefault();
+          if (closing) return;
+          closing = true;
+          try {
+            const { exited, pid } = await shutdownDaemon(15_000);
+            if (!exited) await forceKillPid(pid);
+          } catch (error) {
+            appendLog("warn", `关闭中控时清理 daemon 失败：${errorMessage(error)}`);
+          } finally {
+            await currentWindow.destroy();
+          }
+        });
+        if (disposed) {
+          unlisten();
+          unlisten = undefined;
+        }
+      } catch {
+        // 非 Tauri 环境（单元测试）忽略
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [appendLog]);
 
   const handleStop = useCallback(
     async (role: string) => {

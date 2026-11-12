@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import sys
 import time
@@ -56,3 +57,17 @@ def test_write_without_process_returns_false(tmp_path: Path) -> None:
     manager = PtyManager(cwd=str(tmp_path), command=SHELL)
     assert manager.write("dir\r") is False
     assert manager.status()["running"] is False
+
+
+def test_state_file_tracks_running_pty(tmp_path: Path) -> None:
+    state = tmp_path / "pty.json"
+    manager = PtyManager(cwd=str(ROOT), command=SHELL, state_path=state)
+    try:
+        status = manager.start()
+        payload = json.loads(state.read_text(encoding="utf-8"))
+        assert payload["pid"] == status["pid"]
+        assert payload["session_id"] == status["session_id"]
+        assert payload["command"] == SHELL[0]
+    finally:
+        manager.stop()
+    assert not state.exists()

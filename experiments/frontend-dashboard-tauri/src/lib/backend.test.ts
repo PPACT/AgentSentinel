@@ -2,46 +2,49 @@ import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
-  create: vi.fn(),
+  invoke: vi.fn(),
+  stopping: { value: false },
 }));
 
 vi.mock("@tauri-apps/api/path", () => ({
   join: vi.fn(async (...parts: string[]) => parts.join("\\")),
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
-  readTextFile: vi.fn(async (filePath: string) =>
-    filePath.endsWith("daemon.json") ? '{"host":"127.0.0.1","port":8954}' : "token",
-  ),
+  readTextFile: vi.fn(async (filePath: string) => {
+    if (filePath.endsWith("daemon.json")) {
+      if (mocks.stopping.value) throw new Error("daemon.json removed");
+      return '{"host":"127.0.0.1","port":8954,"pid":4242}';
+    }
+    return "token";
+  }),
 }));
 vi.mock("@tauri-apps/plugin-http", () => ({ fetch: mocks.fetch }));
-vi.mock("@tauri-apps/plugin-shell", () => ({ Command: { create: mocks.create } }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 describe("ensureDaemon", () => {
   it("dedupes concurrent starts (StrictMode double mount)", async () => {
     vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
+    mocks.stopping.value = false;
     let started = false;
     mocks.fetch.mockImplementation(async () => {
       if (!started) throw new Error("daemon down");
       return { ok: true };
     });
-    const spawn = vi.fn(async () => {
+    mocks.invoke.mockImplementation(async () => {
       started = true;
     });
-    mocks.create.mockReturnValue({ spawn });
 
     const { ensureDaemon } = await import("./backend");
     await Promise.all([ensureDaemon(), ensureDaemon()]);
 
-    expect(mocks.create).toHaveBeenCalledTimes(1);
-    expect(spawn).toHaveBeenCalledTimes(1);
-    expect(mocks.create.mock.calls[0]?.[2]).toMatchObject({
-      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
-    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    expect(mocks.invoke).toHaveBeenCalledWith("start_daemon", { root: "C:\\root" });
   });
 
   it("reuses a daemon answering on 8765 when daemon.json is stale", async () => {
     vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
-    mocks.create.mockClear();
+    mocks.stopping.value = false;
+    mocks.invoke.mockClear();
     mocks.fetch.mockImplementation(async (url: string) => {
       if (url.includes(":8765/")) return { ok: true };
       throw new Error("stale daemon.json");
@@ -50,6 +53,29 @@ describe("ensureDaemon", () => {
     const { ensureDaemon } = await import("./backend");
     await ensureDaemon();
 
-    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("shutdownDaemon", () => {
+  it("posts /shutdown and waits for daemon.json removal", async () => {
+    vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
+    mocks.stopping.value = false;
+    mocks.fetch.mockImplementation(async (url: string) => {
+      if (url.endsWith("/shutdown")) {
+        mocks.stopping.value = true;
+        return { ok: true };
+      }
+      return { ok: true };
+    });
+
+    const { shutdownDaemon } = await import("./backend");
+    const result = await shutdownDaemon(2_000);
+
+    expect(result).toEqual({ exited: true, pid: 4242 });
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8954/shutdown",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

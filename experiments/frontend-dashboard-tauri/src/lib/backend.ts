@@ -1,10 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { Command, type Child } from "@tauri-apps/plugin-shell";
 
 import type { Agent, StatusSnapshot, TaskList, WildProcess } from "./types";
 import type { ChatBlock } from "./chat";
+import { errorMessage } from "./format";
 
 /** 默认 daemon 未写 daemon.json 时的兜底地址（与 shell scope 一致）。 */
 const FALLBACK_BASE = "http://127.0.0.1:8765";
@@ -19,7 +20,6 @@ export class ApiError extends Error {
   }
 }
 
-let daemonChild: Child | null = null;
 let daemonStart: Promise<void> | null = null;
 
 export function projectRoot(): string {
@@ -35,18 +35,34 @@ export async function orchestratorHome(): Promise<string> {
   return join(root, ".claude", "orchestrator");
 }
 
-/** 读取项目 daemon.json 得到实际 host:port；daemon 重启换端口后也能跟上。 */
-export async function daemonBase(): Promise<string> {
+export interface DaemonInfo {
+  host: string;
+  port: number;
+  pid: number;
+}
+
+/** 读取项目 daemon.json；daemon 重启换端口后也能跟上。 */
+export async function readDaemonInfo(): Promise<DaemonInfo | null> {
   try {
     const raw = await readTextFile(await join(await orchestratorHome(), "daemon.json"));
-    const info = JSON.parse(raw) as { host?: unknown; port?: unknown };
+    const info = JSON.parse(raw) as { host?: unknown; port?: unknown; pid?: unknown };
     if (typeof info.host === "string" && typeof info.port === "number") {
-      return `http://${info.host}:${info.port}`;
+      return {
+        host: info.host,
+        port: info.port,
+        pid: typeof info.pid === "number" ? info.pid : 0,
+      };
     }
   } catch {
     // daemon.json 尚不存在或不可读
   }
-  return FALLBACK_BASE;
+  return null;
+}
+
+/** 读取项目 daemon.json 得到实际 host:port。 */
+export async function daemonBase(): Promise<string> {
+  const info = await readDaemonInfo();
+  return info ? `http://${info.host}:${info.port}` : FALLBACK_BASE;
 }
 
 async function healthy(base: string): Promise<boolean> {
@@ -69,23 +85,22 @@ async function activeDaemonBase(): Promise<string | null> {
   return null;
 }
 
-/** 已在线则复用；否则用项目默认 home 在 8765 拉起 daemon。 */
+/** 已在线则复用；否则通过 Rust 命令静默拉起 daemon（无控制台窗口）。 */
 async function startDaemonOnce(): Promise<void> {
   if (await activeDaemonBase()) return;
   const root = projectRoot();
-  const home = await orchestratorHome();
-  const command = Command.create(
-    "start-daemon",
-    ["run", "python", "-m", "tools.orchestrator.service", "--serve", "--port", "8765"],
-    { cwd: root, env: { SENTINEL_ORCH_HOME: home, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" } },
-  );
-  daemonChild = await command.spawn();
+  if (!root) throw new Error("未配置 VITE_AGENT_SENTINEL_ROOT（AgentSentinel 项目根目录）");
+  try {
+    await invoke("start_daemon", { root });
+  } catch (error) {
+    throw new Error(`daemon 启动失败：${errorMessage(error)}`);
+  }
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     if (await activeDaemonBase()) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error(`daemon 启动超时（home=${home}）`);
+  throw new Error(`daemon 启动超时（root=${root}）`);
 }
 
 /** StrictMode 双挂载/并发调用共享同一次启动，避免双拉 daemon 与端口竞争。 */
@@ -98,16 +113,39 @@ export function ensureDaemon(): Promise<void> {
   return daemonStart;
 }
 
-export async function stopDaemon(): Promise<void> {
-  const child = daemonChild;
-  daemonChild = null;
-  if (child) {
-    try {
-      await child.kill();
-    } catch {
-      // 已退出，忽略
-    }
+export interface ShutdownResult {
+  exited: boolean;
+  pid: number;
+}
+
+/** 请求 daemon 优雅关闭并等待清理完成；超时返回 exited=false 由调用方兜底。 */
+export async function shutdownDaemon(timeoutMs = 12_000): Promise<ShutdownResult> {
+  const info = await readDaemonInfo();
+  const pid = info?.pid ?? 0;
+  const base = (await activeDaemonBase()) ?? (await daemonBase());
+  if (!(await healthy(base))) return { exited: true, pid };
+  try {
+    await tauriFetch(`${base}/shutdown`, {
+      method: "POST",
+      headers: { ...(await tokenHeader()), "Content-Type": "application/json" },
+      body: "{}",
+    });
+  } catch {
+    // daemon 已离线时无需再发
   }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // daemon 在 Job 回收 PTY/claude 之后才删除 daemon.json，以文件消失为完成信号。
+    if ((await readDaemonInfo()) === null) return { exited: true, pid };
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return { exited: false, pid };
+}
+
+/** 兜底：daemon 超时未退出时强杀整棵进程树（含 PTY / claude）。 */
+export async function forceKillPid(pid: number): Promise<void> {
+  if (pid <= 0) return;
+  await invoke("force_kill_pid", { pid });
 }
 
 async function tokenHeader(): Promise<Record<string, string>> {

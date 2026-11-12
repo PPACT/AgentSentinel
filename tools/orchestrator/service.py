@@ -666,6 +666,7 @@ class Daemon:
             command=pty_command,
             session_id=os.environ.get("SENTINEL_PTY_SESSION_ID", "").strip() or None,
             env=_pty_environment(),
+            state_path=self.home / "pty.json",
         )
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()

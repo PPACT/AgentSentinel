@@ -1,4 +1,5 @@
 import { parseSSEFrames } from "./sse";
+import type { ChatBlock } from "./chat";
 
 export interface PtyChunk {
   seq: number;
@@ -37,6 +38,28 @@ export async function consumePtyStream(
   },
 ): Promise<void> {
   if (!response.body) throw new Error("empty pty stream");
+  await consumeSse(response, (frame) => {
+    if (frame.event === "output") {
+      const chunk = decodePtyFrame(frame.event, frame.data);
+      if (chunk) handlers.onData(chunk.data);
+    } else if (frame.event === "exit") {
+      let status: number | null = null;
+      try {
+        const payload = JSON.parse(frame.data) as { exit_status?: unknown };
+        status = typeof payload.exit_status === "number" ? payload.exit_status : null;
+      } catch {
+        status = null;
+      }
+      handlers.onExit(status);
+    }
+  });
+}
+
+async function consumeSse(
+  response: Response,
+  onFrame: (frame: { event: string; data: string }) => void,
+): Promise<void> {
+  if (!response.body) throw new Error("empty stream");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -47,22 +70,7 @@ export async function consumePtyStream(
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSSEFrames(buffer);
       buffer = parsed.rest;
-      for (const frame of parsed.frames) {
-        if (frame.event === "output") {
-          const chunk = decodePtyFrame(frame.event, frame.data);
-          if (chunk) handlers.onData(chunk.data);
-        } else if (frame.event === "exit") {
-          let status: number | null = null;
-          try {
-            const payload = JSON.parse(frame.data) as { exit_status?: unknown };
-            status = typeof payload.exit_status === "number" ? payload.exit_status : null;
-          } catch {
-            status = null;
-          }
-          handlers.onExit(status);
-          return;
-        }
-      }
+      for (const frame of parsed.frames) onFrame(frame);
     }
   } finally {
     try {
@@ -71,4 +79,50 @@ export async function consumePtyStream(
       // 已释放
     }
   }
+}
+
+export interface PtyChatMessage {
+  role: string;
+  blocks: ChatBlock[];
+  timestamp?: string | null;
+}
+
+/** 读取 /pty/chat/stream 的 JSONL 旁路事件。 */
+export async function consumePtyChatStream(
+  response: Response,
+  handlers: {
+    onMessages: (messages: PtyChatMessage[]) => void;
+    onContext: (tokens: number) => void;
+    onSession: (sessionId: string) => void;
+    onExit: () => void;
+  },
+): Promise<void> {
+  await consumeSse(response, (frame) => {
+    if (frame.event === "message") {
+      try {
+        const payload = JSON.parse(frame.data) as { message?: PtyChatMessage };
+        if (payload.message && Array.isArray(payload.message.blocks)) {
+          handlers.onMessages([payload.message]);
+        }
+      } catch {
+        // 忽略坏帧
+      }
+    } else if (frame.event === "context") {
+      try {
+        const payload = JSON.parse(frame.data) as { context_tokens?: unknown };
+        if (typeof payload.context_tokens === "number") handlers.onContext(payload.context_tokens);
+      } catch {
+        // 忽略
+      }
+    } else if (frame.event === "session") {
+      try {
+        const payload = JSON.parse(frame.data) as { session_id?: unknown };
+        if (typeof payload.session_id === "string") handlers.onSession(payload.session_id);
+      } catch {
+        // 忽略
+      }
+    } else if (frame.event === "exit") {
+      handlers.onExit();
+    }
+  });
 }

@@ -52,7 +52,7 @@ from tools.orchestrator.router import (
     lost_timeout_seconds,
     watchdog_seconds,
 )
-from tools.orchestrator.transcript import read_history
+from tools.orchestrator.transcript import read_appended, read_history
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -1390,6 +1390,57 @@ class _Handler(BaseHTTPRequestHandler):
             # 客户端已断开（常见于前端取消/刷新），不是 daemon 错误。
             return
 
+    def _stream_pty_chat(self, offset: int) -> None:
+        """JSONL 旁路：只读轮询 PTY 会话 transcript，增量推送问答。"""
+        pty = self.daemon.pty
+        try:
+            pty.ensure_started()
+        except (OSError, RuntimeError) as exc:
+            self._send(500, {"error": f"pty start failed: {exc}"})
+            return
+        session = pty.session_id
+        current = offset
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except (ConnectionResetError, BrokenPipeError):
+            return
+        last_ping = time.monotonic()
+        while True:
+            if pty.session_id != session:
+                self._write_bytes(
+                    f"event: session\ndata: {json.dumps({'session_id': pty.session_id})}\n\n".encode()
+                )
+                return
+            result = read_appended(self.daemon.project, session, current)
+            if result is not None:
+                if result["reset"]:
+                    current = 0
+                    self._write_bytes(b"event: reset\ndata: {}\n\n")
+                else:
+                    if result["context_tokens"]:
+                        self._write_bytes(
+                            f"event: context\ndata: {json.dumps({'context_tokens': result['context_tokens']})}\n\n".encode()
+                        )
+                    for message in result["messages"]:
+                        frame = json.dumps({"message": message}, ensure_ascii=False)
+                        if not self._write_bytes(f"event: message\ndata: {frame}\n\n".encode()):
+                            return
+                    current = result["offset"]
+            now = time.monotonic()
+            if now - last_ping >= pty.ping_seconds():
+                if not self._write_bytes(b": ping\n\n"):
+                    return
+                last_ping = now
+            if not pty.status().get("running"):
+                self._write_bytes(b"event: exit\ndata: {}\n\n")
+                return
+            time.sleep(0.6)
+
     def _stream_pty(self) -> None:
         pty = self.daemon.pty
         try:
@@ -1714,6 +1765,34 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if method == "GET" and path == "/pty/history":
+            try:
+                self.daemon.pty.ensure_started()
+            except (OSError, RuntimeError) as exc:
+                self._send(500, {"error": f"pty start failed: {exc}"})
+                return
+            session = self.daemon.pty.session_id
+            history = read_history(self.daemon.project, session)
+            if history is None:
+                history = {
+                    "messages": [],
+                    "truncated": False,
+                    "context_tokens": 0,
+                    "bytes": 0,
+                    "offset": 0,
+                }
+            self._send(200, {"session_id": session, "source": "pty", **history})
+            return
+
+        if method == "GET" and path == "/pty/chat/stream":
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                offset = max(0, int((query.get("offset") or ["0"])[0]))
+            except ValueError:
+                offset = 0
+            self._stream_pty_chat(offset)
+            return
+
         if method == "GET" and path == "/pty/status":
             self._send(200, self.daemon.pty.status())
             return
@@ -1788,20 +1867,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, self.daemon.pty.stop())
             return
 
-        if method == "POST" and path == "/chat":
-            self._stream_chat(payload)
-            return
-
-        if method == "POST" and path == "/chat/stop":
-            try:
-                role = _role(payload)
-            except ValueError as exc:
-                self._send(400, {"error": str(exc)})
-                return
-            if not self.daemon.chat.stop(role):
-                self._send(404, {"error": "no active chat", "role": role})
-            else:
-                self._send(200, {"stopped": True, "role": role})
+        if method == "POST" and path in ("/chat", "/chat/stop"):
+            self._send(
+                410,
+                {
+                    "error": "headless chat disabled; use PTY",
+                    "reason": "pty_only",
+                },
+            )
             return
 
         if method == "GET" and path == "/health":

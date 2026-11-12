@@ -102,6 +102,40 @@ def _blocks(role: str, content: Any) -> list[dict[str, Any]]:
     return blocks
 
 
+def parse_entry(entry: Any) -> tuple[dict[str, Any] | None, int]:
+    """把一行 transcript 转成 UI 消息；返回 (message, context_tokens)。"""
+    if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
+        return None, 0
+    if entry.get("isSidechain"):
+        return None, 0
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return None, 0
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return None, 0
+    blocks = _blocks(str(role), message.get("content"))
+    if not blocks:
+        return None, 0
+    tokens = 0
+    if role == "assistant":
+        usage = message.get("usage")
+        if isinstance(usage, dict):
+            tokens = sum(
+                int(usage.get(key) or 0)
+                for key in (
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+            )
+    return {
+        "role": role,
+        "blocks": blocks,
+        "timestamp": entry.get("timestamp"),
+    }, tokens
+
+
 def read_history(
     project: str,
     session_id: str,
@@ -130,38 +164,11 @@ def read_history(
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
+        message, tokens = parse_entry(entry)
+        if message is None:
             continue
-        if entry.get("isSidechain"):
-            continue
-        message = entry.get("message")
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        blocks = _blocks(str(role), message.get("content"))
-        if not blocks:
-            continue
-        if role == "assistant":
-            usage = message.get("usage")
-            if isinstance(usage, dict):
-                tokens = sum(
-                    int(usage.get(key) or 0)
-                    for key in (
-                        "input_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                    )
-                )
-                context_tokens = max(context_tokens, tokens)
-        messages.append(
-            {
-                "role": role,
-                "blocks": blocks,
-                "timestamp": entry.get("timestamp"),
-            }
-        )
+        context_tokens = max(context_tokens, tokens)
+        messages.append(message)
 
     bounded = max(1, min(limit, MAX_HISTORY_MESSAGES))
     truncated = len(messages) > bounded
@@ -171,5 +178,57 @@ def read_history(
         "messages": messages,
         "truncated": truncated,
         "context_tokens": context_tokens,
+        "bytes": size,
+        "offset": size,
+    }
+
+
+def read_appended(
+    project: str,
+    session_id: str,
+    offset: int,
+    *,
+    config_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """从字节 offset 增量读取完整 JSONL 行；半行留到下次。"""
+    path = transcript_path(project, session_id, config_dir=config_dir)
+    if path is None:
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return {"messages": [], "context_tokens": 0, "offset": offset, "reset": False, "bytes": 0}
+    reset = size < offset
+    start = 0 if reset else offset
+    try:
+        with path.open("rb") as stream:
+            stream.seek(start)
+            raw = stream.read()
+    except OSError:
+        return None
+    if b"\n" in raw:
+        head, _, _tail = raw.rpartition(b"\n")
+        complete = head + b"\n" if head else b""
+    else:
+        complete = b""
+    messages: list[dict[str, Any]] = []
+    context_tokens = 0
+    for line in complete.decode("utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message, tokens = parse_entry(entry)
+        if message is None:
+            continue
+        context_tokens = max(context_tokens, tokens)
+        messages.append(message)
+    return {
+        "messages": messages,
+        "context_tokens": context_tokens,
+        "offset": start + len(complete),
+        "reset": reset,
         "bytes": size,
     }

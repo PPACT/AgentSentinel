@@ -259,6 +259,24 @@ export async function ptyStreamUrl(): Promise<string> {
   return `${await daemonBase()}/pty/stream`;
 }
 
+export interface PtyHistoryResponse {
+  session_id: string;
+  source: "pty";
+  messages: Array<{ role: string; blocks: ChatBlock[]; timestamp?: string | null }>;
+  truncated: boolean;
+  context_tokens: number;
+  bytes: number;
+  offset: number;
+}
+
+export function getPtyHistory(): Promise<PtyHistoryResponse> {
+  return requestJSON<PtyHistoryResponse>("/pty/history");
+}
+
+export async function ptyChatStreamUrl(offset: number): Promise<string> {
+  return `${await daemonBase()}/pty/chat/stream?offset=${offset}`;
+}
+
 /** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */
 export async function startChatStream(options: {
   role: string;

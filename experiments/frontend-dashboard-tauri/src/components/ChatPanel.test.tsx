@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatEntry } from "@/lib/chat";
 
 import { ChatPanel } from "./ChatPanel";
+
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
 
 afterEach(() => {
   cleanup();
@@ -17,9 +25,9 @@ function renderPanel(overrides: Partial<Parameters<typeof ChatPanel>[0]> = {}) {
   const onStop = vi.fn();
   render(
     <ChatPanel
-      role="dev"
       entries={[]}
       busy={false}
+      sessionId="session-12345678"
       onSend={onSend}
       onStop={onStop}
       {...overrides}
@@ -35,10 +43,11 @@ const ENTRIES: ChatEntry[] = [
 ];
 
 describe("ChatPanel", () => {
-  it("shows the selected role and a low-noise process", () => {
+  it("shows the PTY session and a low-noise process", () => {
     renderPanel({ entries: ENTRIES });
 
-    expect(screen.getByText("dev")).toBeInTheDocument();
+    expect(screen.getByText("PTY")).toBeInTheDocument();
+    expect(screen.getByText(/session session/)).toBeInTheDocument();
     expect(screen.queryByText("内部推理")).not.toBeInTheDocument();
     expect(screen.queryByText(/Agent 正在思考/)).not.toBeInTheDocument();
     expect(screen.getByText("执行了 1 个工具调用")).toBeInTheDocument();
@@ -84,17 +93,9 @@ describe("ChatPanel", () => {
     expect(screen.getByText("思考中")).toBeInTheDocument();
   });
 
-  it("disables input and asks for a role when none is selected", () => {
-    renderPanel({ role: null });
-
-    const input = screen.getByPlaceholderText("请先在左侧选择角色");
-    expect(input).toBeDisabled();
-    expect(screen.getByText("请先在左侧选择角色")).toBeInTheDocument();
-  });
-
-  it("sends once per Enter and keeps Shift+Enter as newline", () => {
+  it("sends on Enter and keeps Shift+Enter as newline", () => {
     const { onSend } = renderPanel();
-    const input = screen.getByPlaceholderText(/向 dev 发起对话/);
+    const input = screen.getByPlaceholderText("向 PTY 发送…");
     fireEvent.change(input, { target: { value: "帮我看看" } });
 
     fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
@@ -107,7 +108,7 @@ describe("ChatPanel", () => {
 
   it("does not send Enter while IME composition is active", () => {
     const { onSend } = renderPanel();
-    const input = screen.getByPlaceholderText(/向 dev 发起对话/);
+    const input = screen.getByPlaceholderText("向 PTY 发送…");
     fireEvent.change(input, { target: { value: "你好" } });
 
     fireEvent.compositionStart(input);
@@ -119,19 +120,14 @@ describe("ChatPanel", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the inherited-context hint", () => {
-    renderPanel({ inheritHint: "已继承 dev 终端上下文，当前为独立会话分支" });
-    expect(screen.getByText("已继承 dev 终端上下文，当前为独立会话分支")).toBeInTheDocument();
-  });
-
-  it("shows terminal history badge and a hoverable context dot", () => {
-    renderPanel({
-      terminalHistory: true,
-      contextWarning: "终端上下文约 195k tokens；继续对话按输入计费",
-    });
-    expect(screen.getByText("终端历史（只读）")).toBeInTheDocument();
+  it("shows the context warning in a tooltip on hover", async () => {
+    renderPanel({ contextWarning: "PTY 上下文约 195k tokens；继续对话按输入计费" });
     const dot = screen.getByLabelText("上下文用量");
-    expect(dot).toHaveAttribute("title", expect.stringContaining("195k tokens"));
+    fireEvent.mouseEnter(dot);
+    fireEvent.focus(dot);
+    await waitFor(() =>
+      expect(screen.getByText(/195k tokens/)).toBeInTheDocument(),
+    );
   });
 
   it("calls onStop", () => {

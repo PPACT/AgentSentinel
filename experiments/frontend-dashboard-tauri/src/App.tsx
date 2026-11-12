@@ -33,8 +33,7 @@ import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task, WildProcess } from "@/lib/types";
 import { useMediaQuery } from "@/lib/useMediaQuery";
-import { useChatSessions } from "@/lib/useChatSessions";
-import { useTerminalHistory } from "@/lib/useTerminalHistory";
+import { usePtyChat } from "@/lib/usePtyChat";
 
 // Markdown/高亮体积较大，聊天面板独立分包；主界面先渲染，面板异步加载。
 const ChatPanel = lazy(() =>
@@ -54,9 +53,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [centerTab, setCenterTab] = useState<"chat" | "progress" | "terminal">("chat");
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
-  const { histories: chatHistories, busy: chatBusy, inherited: chatInherited, send: sendChat, stop: stopChat } =
-    useChatSessions();
-  const terminalHistory = useTerminalHistory(selectedRole);
+  const ptyChat = usePtyChat();
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -340,28 +337,10 @@ export default function App() {
   );
   const tasksPane = <TasksPanel tasks={tasks} onSelect={setSelectedTask} />;
 
-  const selectedEntries = selectedRole ? (chatHistories[selectedRole] ?? []) : [];
-  const terminalData = selectedRole ? terminalHistory.data[selectedRole] : undefined;
-  const terminalEntries = terminalData?.entries ?? [];
-  const allEntries = [...terminalEntries, ...selectedEntries];
-  const terminalLoading = selectedRole ? Boolean(terminalHistory.loading[selectedRole]) : false;
-  const selectedAgent = agents.find((agent) => agent.role === selectedRole);
-  const inheritedFrom = selectedRole ? chatInherited[selectedRole] : undefined;
   const contextWarning =
-    terminalData && terminalData.contextTokens > 0
-      ? `终端上下文约 ${formatTokenCount(terminalData.contextTokens)} tokens；继续对话按输入计费（缓存命中亦有成本）`
+    ptyChat.contextTokens > 0
+      ? `PTY 上下文约 ${formatTokenCount(ptyChat.contextTokens)} tokens；继续对话按输入计费（缓存命中亦有成本）`
       : null;
-  const inheritHint = !selectedRole
-    ? null
-    : inheritedFrom
-      ? `已共享 ${selectedRole} 终端会话，当前为同一上下文`
-      : terminalLoading
-        ? `正在读取 ${selectedRole} 终端历史…`
-        : terminalEntries.length > 0
-          ? `已载入 ${selectedRole} 终端历史（只读）；首次发送将共享该会话继续对话`
-          : selectedAgent?.external_session_id
-            ? `首次发送将共享 ${selectedRole} 终端会话`
-            : null;
 
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
@@ -433,22 +412,20 @@ export default function App() {
                 }
               >
                 <ChatPanel
-                  role={selectedRole}
-                  entries={allEntries}
-                  busy={selectedRole ? (chatBusy[selectedRole] ?? false) : false}
-                  inheritHint={inheritHint}
+                  entries={ptyChat.entries}
+                  busy={ptyChat.busy}
+                  sessionId={ptyChat.sessionId}
                   contextWarning={contextWarning}
-                  terminalHistory={terminalEntries.length > 0}
                   onSend={(prompt) => {
-                    if (selectedRole) void sendChat(selectedRole, prompt);
+                    void ptyChat.send(prompt);
                   }}
                   onStop={() => {
-                    if (selectedRole) stopChat(selectedRole);
+                    void ptyChat.stop();
                   }}
                 />
               </Suspense>
             ) : centerTab === "progress" ? (
-              <ProgressPanel role={selectedRole} entries={allEntries} />
+              <ProgressPanel role={ptyChat.sessionId ? "PTY" : null} entries={ptyChat.entries} />
             ) : (
               <Suspense
                 fallback={

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.orchestrator.transcript import project_slug, read_history, transcript_path
+from tools.orchestrator.transcript import project_slug, read_appended, read_history, transcript_path
 
 PROJECT = r"D:\proj"
 SESSION = "11111111-2222-3333-4444-555555555555"
@@ -102,3 +102,43 @@ def test_read_history_limit_and_boundary(tmp_path: Path) -> None:
     assert (
         read_history(PROJECT, "99999999-2222-3333-4444-555555555555", config_dir=tmp_path) is None
     )
+
+
+def test_read_appended_only_returns_new_complete_lines(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    path = transcript_path(PROJECT, SESSION, config_dir=tmp_path)
+    assert path is not None
+
+    first = read_appended(PROJECT, SESSION, 0, config_dir=tmp_path)
+    assert first is not None
+    assert len(first["messages"]) == 3
+    offset = first["offset"]
+    assert offset > 0
+
+    extra = {
+        "type": "assistant",
+        "isSidechain": False,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "新增"}]},
+    }
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(extra) + "\n")
+
+    second = read_appended(PROJECT, SESSION, offset, config_dir=tmp_path)
+    assert second is not None
+    assert [message["blocks"][0].get("text") for message in second["messages"]] == ["新增"]
+    assert second["offset"] > offset
+
+    third = read_appended(PROJECT, SESSION, 0, config_dir=tmp_path)
+    assert third is not None
+    assert third["reset"] is False
+
+
+def test_read_appended_resets_on_truncation(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    path = transcript_path(PROJECT, SESSION, config_dir=tmp_path)
+    assert path is not None
+
+    result = read_appended(PROJECT, SESSION, path.stat().st_size + 10, config_dir=tmp_path)
+    assert result is not None
+    assert result["reset"] is True
+    assert result["offset"] >= 0

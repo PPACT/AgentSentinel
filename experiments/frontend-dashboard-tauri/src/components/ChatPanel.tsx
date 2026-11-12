@@ -6,15 +6,14 @@ import remarkGfm from "remark-gfm";
 import "highlight.js/styles/github-dark.css";
 
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatBlock, ChatEntry } from "@/lib/chat";
 
 interface ChatPanelProps {
-  role: string | null;
   entries: ChatEntry[];
   busy: boolean;
-  inheritHint?: string | null;
+  sessionId: string | null;
   contextWarning?: string | null;
-  terminalHistory?: boolean;
   onSend: (prompt: string) => void;
   onStop: () => void;
 }
@@ -100,12 +99,10 @@ function TextBlock({ block }: { block: Extract<ChatBlock, { kind: "user" | "text
 
 /** 纯问答视图：只保留用户 Prompt + Markdown 结果；工具折叠为状态条，thinking 隐去。 */
 export function ChatPanel({
-  role,
   entries,
   busy,
-  inheritHint,
+  sessionId,
   contextWarning,
-  terminalHistory = false,
   onSend,
   onStop,
 }: ChatPanelProps) {
@@ -120,10 +117,10 @@ export function ChatPanel({
 
   const submit = useCallback(() => {
     const prompt = input.trim();
-    if (!prompt || !role || busy) return;
+    if (!prompt || busy) return;
     onSend(prompt);
     setInput("");
-  }, [busy, input, onSend, role]);
+  }, [busy, input, onSend]);
 
   const rendered: ReactNode[] = [];
   let index = 0;
@@ -166,57 +163,56 @@ export function ChatPanel({
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col border-x border-zinc-800 bg-zinc-950">
       <header className="shrink-0 border-b border-zinc-800 px-4 py-2">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">Chat</h2>
-            {role ? (
+        <TooltipProvider>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">Chat</h2>
               <span className="rounded border border-sky-900/70 bg-sky-950/40 px-1.5 py-0.5 font-mono text-[10px] text-sky-400">
-                {role}
+                PTY
               </span>
-            ) : null}
-            {terminalHistory ? (
-              <span className="rounded border border-zinc-700/70 px-1.5 py-0.5 text-[9px] text-zinc-500">
-                终端历史（只读）
+              {sessionId ? (
+                <span
+                  className="truncate font-mono text-[9px] text-zinc-600"
+                  title={sessionId}
+                >
+                  session {sessionId.slice(0, 8)}
+                </span>
+              ) : null}
+              {contextWarning ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      role="img"
+                      aria-label="上下文用量"
+                      className="size-2 shrink-0 cursor-help rounded-full bg-amber-400/60 transition-colors hover:bg-amber-300"
+                    />
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{contextWarning}</TooltipContent>
+                </Tooltip>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {busy ? (
+                <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                  <span className="size-1.5 animate-pulse rounded-full bg-sky-400" />
+                  思考中
+                </span>
+              ) : null}
+              <span className="truncate font-mono text-[10px] text-zinc-600">
+                同一 PTY · JSONL 旁路
               </span>
-            ) : null}
-            {contextWarning ? (
-              <span
-                role="img"
-                aria-label="上下文用量"
-                title={contextWarning}
-                className="size-2 shrink-0 cursor-help rounded-full bg-amber-400/60 hover:bg-amber-300"
-              />
-            ) : null}
+            </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {busy ? (
-              <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-                <span className="size-1.5 animate-pulse rounded-full bg-sky-400" />
-                思考中
-              </span>
-            ) : null}
-            <span className="truncate font-mono text-[10px] text-zinc-600">
-              {role ? `独立会话 · ${role}` : "未选择角色"}
-            </span>
-          </div>
-        </div>
-        {inheritHint ? (
-          <div className="mt-0.5 truncate text-[10px] text-sky-500/70" title={inheritHint}>
-            {inheritHint}
-          </div>
-        ) : null}
+        </TooltipProvider>
       </header>
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
-        {!role ? (
+        {rendered.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
-            <div className="text-sm text-zinc-400">请先在左侧选择角色</div>
-            <div className="text-xs text-zinc-600">点击 Agents 列表中的一行开始独立对话</div>
-          </div>
-        ) : rendered.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
-            <div className="text-sm text-zinc-400">与 {role} 开始对话</div>
-            <div className="text-xs text-zinc-600">工具调用会折叠为状态条，可点击展开</div>
+            <div className="text-sm text-zinc-400">开始对话</div>
+            <div className="text-xs text-zinc-600">
+              输入会直接写入 PTY；终端与对话共享同一个 claude 会话
+            </div>
           </div>
         ) : (
           rendered
@@ -224,16 +220,11 @@ export function ChatPanel({
       </div>
 
       <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
-        <div
-          className={`overflow-hidden rounded-md border bg-zinc-900/70 ${
-            role ? "border-zinc-700/80 focus-within:border-sky-700/80" : "border-zinc-800/60"
-          }`}
-        >
+        <div className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 focus-within:border-sky-700/80">
           <textarea
-            className="h-20 w-full resize-none bg-transparent px-3 py-2 text-[13px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-60"
-            placeholder={role ? `向 ${role} 发起对话…` : "请先在左侧选择角色"}
+            className="h-20 w-full resize-none bg-transparent px-3 py-2 text-[13px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+            placeholder="向 PTY 发送…"
             value={input}
-            disabled={!role}
             onChange={(event) => setInput(event.target.value)}
             onCompositionStart={() => {
               composingRef.current = true;
@@ -265,10 +256,10 @@ export function ChatPanel({
               <Button
                 size="sm"
                 className="h-7 px-3 text-xs"
-                disabled={!role || busy || !input.trim()}
+                disabled={busy || !input.trim()}
                 onClick={submit}
               >
-                {busy ? "流式中…" : "发送"}
+                {busy ? "等待回复…" : "发送"}
               </Button>
             </div>
           </div>

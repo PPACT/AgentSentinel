@@ -43,7 +43,10 @@ export function useTerminalHistory(role: string | null): TerminalHistoryState {
         const entries: ChatEntry[] = response.messages.flatMap((message) =>
           message.blocks.map((block) => ({
             id: nextId++,
-            block,
+            block:
+              message.role === "user" && block.kind === "text"
+                ? ({ kind: "user", text: block.text } as const)
+                : block,
             timestamp: message.timestamp ?? null,
           })),
         );

@@ -36,6 +36,8 @@ WORKSPACES_DB = DATA_DIR / "workspaces.sqlite3"
 WORKSPACES_ROOT = DATA_DIR / "workspaces"
 
 targets: dict[int, str] = {}
+daemon_ports: dict[int, int] = {}
+listening_ports: dict[int, int] = {}
 self_pid = os.getpid()
 parent_pid = psutil.Process(self_pid).ppid()
 
@@ -101,7 +103,11 @@ def collect() -> None:
         raw_port = daemon.get("port")
         if isinstance(raw_port, (int, str)) and not isinstance(raw_port, bool):
             try:
-                ports.add(int(raw_port))
+                port = int(raw_port)
+                ports.add(port)
+                daemon_pid = daemon.get("pid")
+                if isinstance(daemon_pid, int) and not isinstance(daemon_pid, bool):
+                    daemon_ports[daemon_pid] = port
             except ValueError:
                 pass
         session = str(pty.get("session_id") or "").strip().lower()
@@ -109,7 +115,7 @@ def collect() -> None:
             sessions.add(session)
 
     try:
-        connections = psutil.net_connections(kind="inet")
+        connections = psutil.net_connections(kind="tcp")
     except (psutil.Error, OSError):
         connections = []
     for connection in connections:
@@ -119,6 +125,8 @@ def collect() -> None:
             and connection.pid
         ):
             add(connection.pid, f"port:{connection.laddr.port}")
+            if isinstance(connection.pid, int):
+                listening_ports[connection.pid] = connection.laddr.port
 
     for process in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
@@ -169,14 +177,21 @@ def kill_all() -> list[int]:
             process.terminate()
         except (psutil.Error, OSError):
             continue
-    _gone, alive = psutil.wait_procs(processes, timeout=5)
+    _gone, alive = psutil.wait_procs(processes, timeout=1.0)
     for process in alive:
         try:
             process.kill()
         except (psutil.Error, OSError):
             continue
-    _gone, alive = psutil.wait_procs(alive, timeout=5)
+    _gone, alive = psutil.wait_procs(alive, timeout=1.0)
     return [process.pid for process in alive]
+
+
+def released_ports(alive: list[int]) -> set[int]:
+    killed = set(targets) - set(alive)
+    ports = {port for pid, port in daemon_ports.items() if pid in killed}
+    ports |= {port for pid, port in listening_ports.items() if pid in killed}
+    return ports
 
 
 def remove_stale_state(alive: list[int]) -> None:
@@ -193,20 +208,26 @@ def remove_stale_state(alive: list[int]) -> None:
 def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
     collect()
+    if targets:
+        print(f"[扫描] 发现 {len(targets)} 个候选进程。", flush=True)
+    else:
+        print("[扫描] 未发现残留进程。", flush=True)
     if dry_run:
-        if not targets:
-            print("clean_all(dry-run): nothing matched.")
         for pid, reason in sorted(targets.items()):
             print(f"{pid}  {reason}")
         return 0
 
     alive = kill_all()
     remove_stale_state(alive)
-    print(f"clean_all: targets={len(targets)} killed={len(targets) - len(alive)}")
+    killed = len(set(targets) - set(alive))
+    ports = released_ports(alive)
     if alive:
-        print("clean_all: still alive: " + ",".join(str(pid) for pid in alive))
+        print(
+            f"[警告] 已清理 {killed} 个进程，仍有 {len(alive)} 个未退出："
+            + ",".join(str(pid) for pid in alive)
+        )
         return 1
-    print("clean_all: no related processes remain.")
+    print(f"[完成] 共清理了 {killed} 个进程，释放了 {len(ports)} 个端口。")
     return 0
 
 

@@ -20,6 +20,10 @@ mkdirSync(targetDir, { recursive: true });
 mkdirSync(capabilitiesDir, { recursive: true });
 
 const rootPosix = projectRoot.replaceAll("\\", "/");
+const appDataBase = process.env.APPDATA ?? path.join(projectRoot, ".claude");
+const agentDataDir =
+  process.env.SENTINEL_DATA_DIR ?? path.join(appDataBase, "AgentSentinel");
+const agentDataPosix = agentDataDir.replaceAll("\\", "/");
 const capability = `${JSON.stringify(
   {
     $schema: "../gen/schemas/desktop-schema.json",
@@ -34,6 +38,8 @@ const capability = `${JSON.stringify(
           { path: `${rootPosix}/.claude/orchestrator/daemon.json` },
           { path: `${rootPosix}/.claude/workspaces/*/token` },
           { path: `${rootPosix}/.claude/workspaces/*/daemon.json` },
+          { path: `${agentDataPosix}/workspaces/*/token` },
+          { path: `${agentDataPosix}/workspaces/*/daemon.json` },
         ],
       },
     ],

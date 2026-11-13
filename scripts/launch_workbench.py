@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -19,11 +20,38 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = ROOT / ".claude" / "orchestrator"
-WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
-WORKSPACES_ROOT = ROOT / ".claude" / "workspaces"
+LEGACY_WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
 LOG_DIR = ROOT / ".claude" / "logs"
 FRONTEND_DIR = ROOT / "experiments" / "frontend-dashboard-tauri"
 VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+
+
+def user_data_dir() -> Path:
+    override = os.environ.get("SENTINEL_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / "AgentSentinel"
+    return Path.home() / ".agentsentinel"
+
+
+DATA_DIR = user_data_dir()
+WORKSPACES_DB = DATA_DIR / "workspaces.sqlite3"
+WORKSPACES_ROOT = DATA_DIR / "workspaces"
+
+
+def resolve_workspaces_db() -> Path:
+    if WORKSPACES_DB.exists() or not LEGACY_WORKSPACES_DB.exists():
+        return WORKSPACES_DB
+    try:
+        WORKSPACES_DB.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(LEGACY_WORKSPACES_DB, WORKSPACES_DB)
+        log("migrated legacy workspaces.sqlite3 to user data directory")
+    except OSError:
+        pass
+    return WORKSPACES_DB
+
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -74,7 +102,8 @@ def stop_port_owner(port: int) -> None:
 def start_daemon(home: Path = HOME, extra_env: dict[str, str] | None = None) -> None:
     env = os.environ.copy()
     env["SENTINEL_ORCH_HOME"] = str(home)
-    env["SENTINEL_WORKSPACES_DB"] = str(WORKSPACES_DB)
+    env["SENTINEL_CONTROL_HOME"] = str(HOME)
+    env["SENTINEL_WORKSPACES_DB"] = str(resolve_workspaces_db())
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     if extra_env:
@@ -99,10 +128,11 @@ def start_daemon(home: Path = HOME, extra_env: dict[str, str] | None = None) -> 
 
 def start_active_workspace_daemon() -> None:
     """启动当前 active Workspace 的独立 daemon（控制面之外时）。"""
-    if not WORKSPACES_DB.exists():
+    db_path = resolve_workspaces_db()
+    if not db_path.exists():
         return
     try:
-        with sqlite3.connect(WORKSPACES_DB) as connection:
+        with sqlite3.connect(db_path) as connection:
             row = connection.execute(
                 "SELECT id, project_path, daemon_home FROM workspaces "
                 "WHERE active=1 ORDER BY id LIMIT 1"

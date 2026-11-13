@@ -28,10 +28,12 @@ def _int(value: object, default: int) -> int:
 
 
 class WorkspaceStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, control_home: Path | None = None) -> None:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.control_home = db_path.parent / "orchestrator"
+        self.control_home = (
+            Path(control_home) if control_home is not None else db_path.parent / "orchestrator"
+        )
         self.workspace_root = db_path.parent / "workspaces"
         self._lock = threading.RLock()
         self._init()

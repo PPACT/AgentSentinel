@@ -16,6 +16,7 @@ import queue
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import sys
@@ -260,16 +261,47 @@ def derive_project(home: Path) -> str:
     return _normalize_project(PROJECT_ROOT)
 
 
+def user_data_dir() -> Path:
+    """打包/多工作区运行时数据目录：默认 %APPDATA%/AgentSentinel。"""
+    override = os.environ.get("SENTINEL_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / "AgentSentinel"
+    return Path.home() / ".agentsentinel"
+
+
+def control_daemon_home() -> Path:
+    override = os.environ.get("SENTINEL_CONTROL_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return PROJECT_ROOT / ".claude" / "orchestrator"
+
+
 def workspace_db_path(home: Path) -> Path:
-    """配置中心 DB：默认中控根目录（跨工作区共享）；隔离测试用独立 home。"""
+    """全局配置库：默认在用户数据目录；隔离测试用独立 home。"""
     override = os.environ.get("SENTINEL_WORKSPACES_DB", "").strip()
     if override:
         return Path(override)
     resolved = home.resolve()
     default_home = (PROJECT_ROOT / ".claude" / "orchestrator").resolve()
     if resolved == default_home:
-        return PROJECT_ROOT / ".claude" / "workspaces.sqlite3"
+        return user_data_dir() / "workspaces.sqlite3"
     return home / "workspaces.sqlite3"
+
+
+def ensure_workspace_db(home: Path) -> Path:
+    """首次迁移：把旧的 <项目>/.claude/workspaces.sqlite3 复制到用户数据目录。"""
+    path = workspace_db_path(home)
+    legacy = PROJECT_ROOT / ".claude" / "workspaces.sqlite3"
+    try:
+        if path != legacy and not path.exists() and legacy.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy, path)
+    except OSError:
+        pass
+    return path
 
 
 def _configure_stdio(*streams: Any) -> None:
@@ -761,7 +793,12 @@ class Daemon:
         self._pty_sessions: dict[str, str] = {}
         self._pty_signature: tuple[Any, ...] = ()
         self._bound_workspace_id = _int(os.environ.get("SENTINEL_WORKSPACE_ID", ""))
-        self.workspaces = WorkspaceStore(workspace_db_path(home))
+        db_path = ensure_workspace_db(home)
+        is_global_db = db_path == user_data_dir() / "workspaces.sqlite3"
+        self.workspaces = WorkspaceStore(
+            db_path,
+            control_home=control_daemon_home() if is_global_db else None,
+        )
         self.workspaces.seed_default(self.project)
         self.pty = self._new_pty("", self._pty_session_override)
         self._handoff_lock = threading.Lock()

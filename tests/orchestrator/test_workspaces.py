@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tools.orchestrator import service
 from tools.orchestrator.engines import adapter_for, preflight
 from tools.orchestrator.service import _pty_environment
 from tools.orchestrator.workspaces import WorkspaceStore
@@ -100,3 +101,49 @@ def test_workspace_store_requires_fields(tmp_path: Path) -> None:
         except ValueError:
             continue
         raise AssertionError(f"expected ValueError for {payload}")
+
+
+def test_workspace_db_uses_appdata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SENTINEL_WORKSPACES_DB", raising=False)
+    monkeypatch.delenv("SENTINEL_DATA_DIR", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    control = service.PROJECT_ROOT / ".claude" / "orchestrator"
+    assert service.workspace_db_path(control) == (
+        tmp_path / "appdata" / "AgentSentinel" / "workspaces.sqlite3"
+    )
+
+
+def test_ensure_workspace_db_migrates_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    legacy = root / ".claude" / "workspaces.sqlite3"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy-workspaces")
+    monkeypatch.setattr(service, "PROJECT_ROOT", root)
+    monkeypatch.delenv("SENTINEL_WORKSPACES_DB", raising=False)
+    monkeypatch.delenv("SENTINEL_DATA_DIR", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+
+    path = service.ensure_workspace_db(root / ".claude" / "orchestrator")
+
+    assert path == tmp_path / "appdata" / "AgentSentinel" / "workspaces.sqlite3"
+    assert path.read_bytes() == b"legacy-workspaces"
+
+
+def test_workspace_store_respects_control_home(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    store = WorkspaceStore(tmp_path / "data" / "workspaces.sqlite3", control_home=control)
+    default = store.seed_default(str(tmp_path))
+    assert default["daemon_home"] == str(control)
+
+    other = store.save(
+        {
+            "name": "Other",
+            "project_path": str(tmp_path),
+            "command": "claude",
+            "engine": "claude",
+        },
+        activate=True,
+    )
+    assert other["daemon_home"] == str(tmp_path / "data" / "workspaces" / str(other["id"]))

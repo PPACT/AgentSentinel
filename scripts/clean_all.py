@@ -16,8 +16,24 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = ROOT / ".claude" / "orchestrator"
-WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
+LEGACY_WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
+LEGACY_WORKSPACES_ROOT = ROOT / ".claude" / "workspaces"
 DEFAULT_PORTS = (1420, 8765, 9222)
+
+
+def user_data_dir() -> Path:
+    override = os.environ.get("SENTINEL_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / "AgentSentinel"
+    return Path.home() / ".agentsentinel"
+
+
+DATA_DIR = user_data_dir()
+WORKSPACES_DB = DATA_DIR / "workspaces.sqlite3"
+WORKSPACES_ROOT = DATA_DIR / "workspaces"
 
 targets: dict[int, str] = {}
 self_pid = os.getpid()
@@ -45,11 +61,16 @@ def read_state_at(home: Path, name: str) -> dict[str, object]:
 
 
 def workspace_homes() -> list[Path]:
-    """控制面 + 所有已配置/已落盘的 Workspace daemon home。"""
+    """控制面 + 所有已配置/已落盘的 Workspace daemon home（新/旧目录都清理）。"""
     homes: set[Path] = {HOME}
-    if WORKSPACES_DB.exists():
+    for db_path, workspace_root in (
+        (WORKSPACES_DB, WORKSPACES_ROOT),
+        (LEGACY_WORKSPACES_DB, LEGACY_WORKSPACES_ROOT),
+    ):
+        if not db_path.exists():
+            continue
         try:
-            with sqlite3.connect(WORKSPACES_DB) as connection:
+            with sqlite3.connect(db_path) as connection:
                 for workspace_id, daemon_home in connection.execute(
                     "SELECT id, daemon_home FROM workspaces"
                 ):
@@ -58,14 +79,14 @@ def workspace_homes() -> list[Path]:
                     elif int(workspace_id) == 1:
                         homes.add(HOME)
                     else:
-                        homes.add(ROOT / ".claude" / "workspaces" / str(workspace_id))
+                        homes.add(workspace_root / str(workspace_id))
         except (sqlite3.Error, OSError):
             pass
-    workspace_root = ROOT / ".claude" / "workspaces"
-    if workspace_root.is_dir():
-        for child in workspace_root.iterdir():
-            if child.is_dir():
-                homes.add(child)
+    for workspace_root in (WORKSPACES_ROOT, LEGACY_WORKSPACES_ROOT):
+        if workspace_root.is_dir():
+            for child in workspace_root.iterdir():
+                if child.is_dir():
+                    homes.add(child)
     return sorted(homes)
 
 

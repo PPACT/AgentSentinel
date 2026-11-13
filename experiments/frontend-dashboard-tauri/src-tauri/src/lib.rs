@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[cfg(windows)]
@@ -16,6 +16,20 @@ fn hidden_command(program: &str) -> Command {
     command
 }
 
+fn agent_data_dir(root: &Path) -> PathBuf {
+    if let Ok(value) = std::env::var("SENTINEL_DATA_DIR") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    if let Ok(value) = std::env::var("APPDATA") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value).join("AgentSentinel");
+        }
+    }
+    root.join(".claude")
+}
+
 fn start_daemon_blocking(
     root: String,
     home: Option<String>,
@@ -23,10 +37,9 @@ fn start_daemon_blocking(
     workspace_id: Option<i64>,
 ) -> Result<(), String> {
     let root_path = PathBuf::from(root);
-    let home_path = home
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root_path.join(".claude").join("orchestrator"));
-    let workspace_db = root_path.join(".claude").join("workspaces.sqlite3");
+    let control_home = root_path.join(".claude").join("orchestrator");
+    let home_path = home.map(PathBuf::from).unwrap_or_else(|| control_home.clone());
+    let workspace_db = agent_data_dir(&root_path).join("workspaces.sqlite3");
     let mut command = hidden_command("uv");
     command
         .args([
@@ -41,6 +54,7 @@ fn start_daemon_blocking(
         ])
         .current_dir(&root_path)
         .env("SENTINEL_ORCH_HOME", &home_path)
+        .env("SENTINEL_CONTROL_HOME", &control_home)
         .env("SENTINEL_WORKSPACES_DB", &workspace_db)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8");

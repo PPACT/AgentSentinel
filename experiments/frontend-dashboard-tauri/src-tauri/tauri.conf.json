@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AgentSentinel Console",
+        "title": "AgentSentinel Console（工作台）",
         "width": 1280,
         "height": 800,
         "minWidth": 960,

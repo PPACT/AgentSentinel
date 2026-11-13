@@ -28,7 +28,7 @@ export function TopBar({
     <header className="flex items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-900/70 px-4 py-2.5">
       <div className="flex min-w-0 items-baseline gap-3">
         <h1 className="shrink-0 text-base font-semibold tracking-wide text-zinc-100">
-          AgentSentinel 中控
+          AgentSentinel Console（工作台）
         </h1>
         <span className="hidden truncate font-mono text-[11px] text-zinc-500 sm:inline">
           {daemonSummary(daemon)}

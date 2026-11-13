@@ -1,7 +1,11 @@
-"""兜底清理：结束本项目 daemon、PTY(claude)、前端与占用端口的残留进程。
+"""兜底清理：只结束本项目 Workspace / daemon / PTY / 前端相关进程。
 
-由 `clean_all.bat` 调用。只匹配本项目相关进程，不会动用户其他 Python/Claude
-会话；`--dry-run` 只打印候选，不执行结束操作。
+安全边界：
+- 只认本项目路径（项目根、%APPDATA%\\AgentSentinel、各 workspace home）或本次启动的
+  daemon/PTY pid；绝不按 python.exe / node.exe 名字全杀，也不按端口盲杀。
+- 系统与终端进程白名单；自身及所有祖先进程永不结束。
+- 清理前把 PID / 名称 / 命中原因 / 命令行 / cwd 写入项目根 clean_all.log。
+- `--dry-run` 只扫描并写日志，不结束任何进程。
 """
 
 from __future__ import annotations
@@ -10,15 +14,47 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 ROOT = Path(__file__).resolve().parents[1]
+ROOT_TEXT = str(ROOT).lower()
+FRONTEND_DIR = ROOT / "experiments" / "frontend-dashboard-tauri"
+FRONTEND_TEXT = str(FRONTEND_DIR).lower()
 HOME = ROOT / ".claude" / "orchestrator"
 LEGACY_WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
 LEGACY_WORKSPACES_ROOT = ROOT / ".claude" / "workspaces"
-DEFAULT_PORTS = (1420, 8765, 9222)
+LOG_PATH = ROOT / "clean_all.log"
+VITE_PORT = 1420
+
+WHITELIST_NAMES = {
+    "system",
+    "registry",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "services.exe",
+    "lsass.exe",
+    "winlogon.exe",
+    "svchost.exe",
+    "explorer.exe",
+    "dwm.exe",
+    "fontdrvhost.exe",
+    "taskhostw.exe",
+    "sihost.exe",
+    "ctfmon.exe",
+    "runtimebroker.exe",
+    "searchhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "textinputhost.exe",
+    "applicationframehost.exe",
+    "conhost.exe",
+    "openconsole.exe",
+    "windowsterminal.exe",
+}
 
 
 def user_data_dir() -> Path:
@@ -32,26 +68,31 @@ def user_data_dir() -> Path:
 
 
 DATA_DIR = user_data_dir()
+APP_DATA_TEXT = str(DATA_DIR).lower()
 WORKSPACES_DB = DATA_DIR / "workspaces.sqlite3"
 WORKSPACES_ROOT = DATA_DIR / "workspaces"
 
 targets: dict[int, str] = {}
-daemon_ports: dict[int, int] = {}
-listening_ports: dict[int, int] = {}
+ports: dict[int, int] = {}
 self_pid = os.getpid()
-parent_pid = psutil.Process(self_pid).ppid()
+excluded_pids: set[int] = {self_pid}
+try:
+    excluded_pids.update(parent.pid for parent in psutil.Process(self_pid).parents())
+except (psutil.Error, OSError):
+    excluded_pids.add(psutil.Process(self_pid).ppid())
+
+
+def belongs_to_project(text: str) -> bool:
+    lowered = text.lower()
+    return ROOT_TEXT in lowered or APP_DATA_TEXT in lowered
 
 
 def add(pid: object, reason: str) -> None:
-    if isinstance(pid, bool) or not isinstance(pid, (int, str)):
+    if isinstance(pid, bool) or not isinstance(pid, int):
         return
-    try:
-        value = int(pid)
-    except (TypeError, ValueError):
+    if pid <= 0 or pid in excluded_pids or pid in targets:
         return
-    if value <= 0 or value in (self_pid, parent_pid):
-        return
-    targets.setdefault(value, reason)
+    targets[pid] = reason
 
 
 def read_state_at(home: Path, name: str) -> dict[str, object]:
@@ -63,7 +104,6 @@ def read_state_at(home: Path, name: str) -> dict[str, object]:
 
 
 def workspace_homes() -> list[Path]:
-    """控制面 + 所有已配置/已落盘的 Workspace daemon home（新/旧目录都清理）。"""
     homes: set[Path] = {HOME}
     for db_path, workspace_root in (
         (WORKSPACES_DB, WORKSPACES_ROOT),
@@ -92,77 +132,151 @@ def workspace_homes() -> list[Path]:
     return sorted(homes)
 
 
+def process_text(pid: int) -> tuple[str, str, str, str]:
+    """返回 (name, cmdline, cwd, exe)；失败字段用空串。"""
+    try:
+        process = psutil.Process(pid)
+        name = process.name()
+    except (psutil.Error, OSError):
+        return "", "", "", ""
+    try:
+        cmdline = " ".join(process.cmdline())
+    except (psutil.Error, OSError):
+        cmdline = ""
+    try:
+        cwd = process.cwd()
+    except (psutil.Error, OSError):
+        cwd = ""
+    try:
+        exe = process.exe()
+    except (psutil.Error, OSError):
+        exe = ""
+    return name, cmdline, cwd, exe
+
+
 def collect() -> None:
-    ports = set(DEFAULT_PORTS)
     sessions: set[str] = set()
     for home in workspace_homes():
         daemon = read_state_at(home, "daemon.json")
         pty = read_state_at(home, "pty.json")
-        add(daemon.get("pid"), f"daemon:{home.name}")
-        add(pty.get("pid"), f"pty:{home.name}")
-        raw_port = daemon.get("port")
-        if isinstance(raw_port, (int, str)) and not isinstance(raw_port, bool):
-            try:
-                port = int(raw_port)
-                ports.add(port)
-                daemon_pid = daemon.get("pid")
-                if isinstance(daemon_pid, int) and not isinstance(daemon_pid, bool):
-                    daemon_ports[daemon_pid] = port
-            except ValueError:
-                pass
+        daemon_pid = daemon.get("pid")
+        add(daemon_pid if isinstance(daemon_pid, int) else 0, f"daemon:{home.name}")
+        if isinstance(daemon_pid, int):
+            raw_port = daemon.get("port")
+            if isinstance(raw_port, int) and not isinstance(raw_port, bool):
+                ports[daemon_pid] = raw_port
+        pty_pid = pty.get("pid")
+        add(pty_pid if isinstance(pty_pid, int) else 0, f"pty:{home.name}")
         session = str(pty.get("session_id") or "").strip().lower()
         if session:
             sessions.add(session)
 
+    # 只对 1420 做端口辅助识别，且必须是本项目 frontend 目录的 node/vite。
     try:
         connections = psutil.net_connections(kind="tcp")
     except (psutil.Error, OSError):
         connections = []
     for connection in connections:
         if (
-            connection.status == psutil.CONN_LISTEN
-            and connection.laddr.port in ports
-            and connection.pid
+            connection.status != psutil.CONN_LISTEN
+            or connection.laddr.port != VITE_PORT
+            or not connection.pid
         ):
-            add(connection.pid, f"port:{connection.laddr.port}")
-            if isinstance(connection.pid, int):
-                listening_ports[connection.pid] = connection.laddr.port
+            continue
+        name, cmdline, _cwd, _exe = process_text(connection.pid)
+        if name.lower() == "node.exe" and FRONTEND_TEXT in cmdline.lower():
+            add(connection.pid, f"vite:{VITE_PORT}")
+            ports[connection.pid] = VITE_PORT
 
     for process in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
+            pid = int(process.info["pid"])
             name = (process.info.get("name") or "").lower()
-            command = " ".join(process.info.get("cmdline") or []).lower()
-        except (psutil.Error, OSError):
+            cmdline = " ".join(process.info.get("cmdline") or [])
+        except (psutil.Error, OSError, TypeError, ValueError):
             continue
+        if name in WHITELIST_NAMES or pid in excluded_pids:
+            continue
+        lowered = cmdline.lower()
+        _name, _cmd, cwd, exe = process_text(pid)
+
         is_daemon = (
             name.startswith("python")
             and (
-                "tools.orchestrator.service" in command
-                or "tools.orchestrator.dummy_worker" in command
-                or "tools/orchestrator/service" in command
-                or "tools/orchestrator/dummy_worker" in command
+                "-m tools.orchestrator.service" in lowered
+                or "-m tools/orchestrator/service" in lowered
+                or ("dummy_worker" in lowered and ROOT_TEXT in lowered)
             )
-            and "mcp_server" not in command
+            and "mcp_server" not in lowered
+            and belongs_to_project(cmdline)
         )
-        is_frontend = name == "node.exe" and ("vite.js" in command or "tauri-cli" in command)
-        is_tauri = name in {"cargo-tauri.exe", "tauri.exe"}
-        is_npm = name == "cmd.exe" and ("tauri dev" in command or "vite" in command)
-        is_app = name == "agentsentinel-console.exe"
+        is_frontend = (
+            name == "node.exe"
+            and ("vite.js" in lowered or "tauri.mjs" in lowered or "@tauri-apps/cli" in lowered)
+            and (FRONTEND_TEXT in lowered or cwd.lower().startswith(FRONTEND_TEXT))
+        )
+        is_tauri = name in {"cargo-tauri.exe", "tauri.exe"} and (
+            FRONTEND_TEXT in lowered or ROOT_TEXT in lowered
+        )
+        is_npm = (
+            name == "cmd.exe"
+            and "tauri dev" in lowered
+            and (cwd.lower().startswith(FRONTEND_TEXT) or cwd.lower().startswith(ROOT_TEXT))
+        )
+        is_app = name == "agentsentinel-console.exe" and exe.lower().startswith(ROOT_TEXT)
         is_pty_claude = name == "claude.exe" and (
-            any(session in command for session in sessions)
-            or "active orchestration task" in command
+            any(session in lowered for session in sessions)
+            or "active orchestration task" in lowered
         )
         if is_daemon or is_frontend or is_tauri or is_npm or is_app or is_pty_claude:
-            reason = "claude" if is_pty_claude else "process"
-            add(process.info.get("pid"), reason)
+            reason = (
+                "daemon"
+                if is_daemon
+                else "vite"
+                if is_frontend
+                else "tauri"
+                if is_tauri
+                else "npm"
+                if is_npm
+                else "app"
+                if is_app
+                else "pty-claude"
+            )
+            add(pid, reason)
 
-    # 补全子孙进程（先收集再结束，避免漏掉 PTY 下的 claude）。
+    # 只展开已确认属主进程的子孙；白名单与祖先继续排除。
     for pid in list(targets):
         try:
-            for child in psutil.Process(pid).children(recursive=True):
-                add(child.pid, "child")
+            children = psutil.Process(pid).children(recursive=True)
         except (psutil.Error, OSError):
             continue
+        for child in children:
+            if child.pid in excluded_pids:
+                continue
+            try:
+                child_name = child.name().lower()
+            except (psutil.Error, OSError):
+                continue
+            if child_name in WHITELIST_NAMES:
+                continue
+            add(child.pid, "descendant")
+
+
+def write_log(dry_run: bool) -> None:
+    lines = [
+        f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} clean_all =====",
+        f"root={ROOT}",
+        f"mode={'dry-run' if dry_run else 'clean'} targets={len(targets)}",
+        "PID | NAME | REASON | CMDLINE | CWD",
+    ]
+    for pid, reason in sorted(targets.items()):
+        name, cmdline, cwd, _exe = process_text(pid)
+        lines.append(f"{pid} | {name or '-'} | {reason} | {cmdline or '-'} | {cwd or '-'}")
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as stream:
+            stream.write("\n".join(lines) + "\n\n")
+    except OSError:
+        pass
 
 
 def kill_all() -> list[int]:
@@ -187,13 +301,6 @@ def kill_all() -> list[int]:
     return [process.pid for process in alive]
 
 
-def released_ports(alive: list[int]) -> set[int]:
-    killed = set(targets) - set(alive)
-    ports = {port for pid, port in daemon_ports.items() if pid in killed}
-    ports |= {port for pid, port in listening_ports.items() if pid in killed}
-    return ports
-
-
 def remove_stale_state(alive: list[int]) -> None:
     if alive:
         return
@@ -205,29 +312,39 @@ def remove_stale_state(alive: list[int]) -> None:
                 pass
 
 
+def released_ports(alive: list[int]) -> set[int]:
+    killed = set(targets) - set(alive)
+    return {port for pid, port in ports.items() if pid in killed}
+
+
 def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
     collect()
+    write_log(dry_run)
     if targets:
         print(f"[扫描] 发现 {len(targets)} 个候选进程。", flush=True)
     else:
         print("[扫描] 未发现残留进程。", flush=True)
+    print(f"[详情] 命中清单：{LOG_PATH}", flush=True)
     if dry_run:
-        for pid, reason in sorted(targets.items()):
-            print(f"{pid}  {reason}")
         return 0
 
     alive = kill_all()
     remove_stale_state(alive)
     killed = len(set(targets) - set(alive))
-    ports = released_ports(alive)
+    port_count = len(released_ports(alive))
     if alive:
         print(
             f"[警告] 已清理 {killed} 个进程，仍有 {len(alive)} 个未退出："
             + ",".join(str(pid) for pid in alive)
         )
         return 1
-    print(f"[完成] 共清理了 {killed} 个进程，释放了 {len(ports)} 个端口。")
+    with LOG_PATH.open("a", encoding="utf-8") as stream:
+        stream.write(
+            f"RESULT killed={killed} ports={port_count} at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
+    print(f"[完成] 共清理了 {killed} 个进程，释放了 {port_count} 个端口。")
     return 0
 
 

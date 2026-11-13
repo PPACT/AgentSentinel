@@ -24,6 +24,7 @@ secrets*.json
 .claude/tauri-target/
 .claude/logs/
 .claude/workspaces.sqlite3
+clean_all.log
 docs/local/
 
 # ===== Python 虚拟环境 =====

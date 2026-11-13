@@ -1,4 +1,4 @@
-import { Lock, Square } from "lucide-react";
+import { ArrowRightLeft, Lock, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatBlock, ChatEntry } from "@/lib/chat";
 import { formatTokenCount } from "@/lib/format";
-import type { PtyNotice, TokenUsage } from "@/lib/types";
+import type { HandoffStatus, PtyNotice, TokenUsage } from "@/lib/types";
 
 interface ChatPanelProps {
   entries: ChatEntry[];
@@ -20,8 +20,10 @@ interface ChatPanelProps {
   usage?: TokenUsage | null;
   budgetTokens?: number;
   notice?: PtyNotice | null;
+  handoff?: HandoffStatus | null;
   onSend: (prompt: string) => void;
   onStop: () => void;
+  onHandoff?: () => void;
   locked?: boolean;
   lockReason?: string;
 }
@@ -115,8 +117,10 @@ export function ChatPanel({
   usage = null,
   budgetTokens = 0,
   notice = null,
+  handoff = null,
   onSend,
   onStop,
+  onHandoff = () => undefined,
   locked = false,
   lockReason = "当前 Agent 已离线，对话已锁定",
 }: ChatPanelProps) {
@@ -269,6 +273,25 @@ export function ChatPanel({
           {notice.message}
         </div>
       ) : null}
+      {handoff ? (
+        <div
+          className={`shrink-0 border-b px-4 py-1.5 text-[11px] ${
+            handoff.phase === "error"
+              ? "border-red-500/30 bg-red-500/10 text-red-300"
+              : handoff.active
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-200/90"
+                : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+          }`}
+        >
+          {handoff.active
+            ? `交接中：${handoff.message}`
+            : handoff.phase === "error"
+              ? `交接失败：${handoff.error || handoff.message}`
+              : handoff.phase === "done"
+                ? `交接完成${handoff.warning ? `（${handoff.warning}）` : ""}`
+                : handoff.message}
+        </div>
+      ) : null}
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
         {rendered.length === 0 ? (
@@ -314,6 +337,17 @@ export function ChatPanel({
           <div className="flex items-center justify-between border-t border-zinc-800/70 px-2 py-1.5">
             <span className="text-[10px] text-zinc-600">Enter 发送 · Shift+Enter 换行</span>
             <div className="flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 border-zinc-700 px-2 text-xs text-zinc-300"
+                disabled={busy || locked || Boolean(handoff?.active)}
+                title="一键交接：提示词 → 等待完成 → /clear → 唤醒提示词"
+                onClick={onHandoff}
+              >
+                <ArrowRightLeft className="size-3" />
+                {handoff?.active ? "交接中…" : "一键交接"}
+              </Button>
               <Button
                 variant="ghost"
                 size="sm"

@@ -70,6 +70,11 @@ def adapter_for(engine: str) -> EngineAdapter:
     return ENGINES.get((engine or "").strip().lower(), ENGINES["generic"])
 
 
+def bracketed_paste(text: str) -> str:
+    """多行提示词以 bracketed paste 注入，避免 TUI 在内嵌换行处提前提交。"""
+    return f"\x1b[200~{text}\x1b[201~"
+
+
 def split_command(command: str) -> list[str]:
     """按 Windows 命令行习惯拆分；保留路径反斜杠。"""
     text = command.strip()

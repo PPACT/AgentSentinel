@@ -34,7 +34,7 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 from tools.orchestrator.chat import PROMPT_MAX_CHARS, ChatBusy, ChatManager
 from tools.orchestrator.drivers.cwd_process import CwdProcessDriver, _normalize_path, _within
-from tools.orchestrator.engines import ENGINES, adapter_for, preflight
+from tools.orchestrator.engines import ENGINES, adapter_for, bracketed_paste, preflight
 from tools.orchestrator.launcher import (
     Launcher,
     kill_process_tree,
@@ -55,7 +55,13 @@ from tools.orchestrator.router import (
     lost_timeout_seconds,
     watchdog_seconds,
 )
-from tools.orchestrator.transcript import USAGE_KEYS, read_appended, read_history
+from tools.orchestrator.transcript import (
+    USAGE_KEYS,
+    newest_session,
+    read_appended,
+    read_history,
+    transcript_path,
+)
 from tools.orchestrator.workspaces import WorkspaceStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -634,6 +640,49 @@ def _optional_agent_id(payload: dict[str, Any]) -> str:
 
 
 DEFAULT_TOKEN_BUDGET = 200_000
+DEFAULT_HANDOFF_PROMPT = "上下文即将满，请立即更新 STATUS 并准备交接。"
+DEFAULT_HANDOFF_TIMEOUT_SECONDS = 180.0
+HANDOFF_RELOCATE_SECONDS = 20.0
+
+
+def handoff_prompt() -> str:
+    return os.environ.get("SENTINEL_HANDOFF_PROMPT", "").strip() or DEFAULT_HANDOFF_PROMPT
+
+
+def handoff_timeout_seconds() -> float:
+    raw = os.environ.get("SENTINEL_HANDOFF_TIMEOUT_SECONDS", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_HANDOFF_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_HANDOFF_TIMEOUT_SECONDS
+
+
+def resolve_wake_prompt(workspace: dict[str, Any]) -> str:
+    file_text = str(workspace.get("wake_prompt_file") or "").strip()
+    if file_text:
+        try:
+            text = Path(file_text).expanduser().read_text(encoding="utf-8")[:65536]
+        except OSError as exc:
+            raise ValueError(f"读取唤醒提示词文件失败：{exc}") from exc
+        if text.strip():
+            return text.strip()
+    return str(workspace.get("wake_prompt") or "").strip()
+
+
+def _transcript_offset(project: str, session: str) -> int:
+    path = transcript_path(project, session)
+    if path is None:
+        return 0
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _inject_prompt(pty: Any, text: str) -> None:
+    payload = bracketed_paste(text) if "\n" in text else text
+    pty.write(payload + "\r")
 
 
 def _query_role(query: dict[str, list[str]]) -> str:
@@ -713,6 +762,8 @@ class Daemon:
         self.workspaces = WorkspaceStore(workspace_db_path(home))
         self.workspaces.seed_default(self.project)
         self.pty = self._new_pty("", self._pty_session_override)
+        self._handoff_lock = threading.Lock()
+        self._handoff: dict[str, Any] = {"active": False, "phase": "idle", "message": ""}
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -791,6 +842,130 @@ class Daemon:
             agent_id=agent_id,
             engine=adapter.id,
         )
+
+    def handoff_status(self) -> dict[str, Any]:
+        with self._handoff_lock:
+            return dict(self._handoff)
+
+    def _handoff_phase(self, phase: str, message: str) -> None:
+        with self._handoff_lock:
+            self._handoff.update({"phase": phase, "message": message})
+
+    def start_handoff(self, role: str, agent_id: str) -> tuple[int, dict[str, Any]]:
+        workspace = self.active_workspace()
+        adapter = adapter_for(str(workspace.get("engine") or "claude"))
+        if not adapter.supports_clear:
+            return 400, {"error": "当前引擎不支持一键交接", "reason": "handoff_unsupported"}
+        try:
+            wake = resolve_wake_prompt(workspace)
+        except ValueError as exc:
+            return 400, {"error": str(exc), "reason": "wake_prompt_read_failed"}
+        if not wake:
+            return 400, {
+                "error": "请先在设置/工作区配置唤醒提示词",
+                "reason": "wake_prompt_required",
+            }
+        pty = self.pty
+        if not pty.status().get("running"):
+            return 409, {"error": "PTY 未运行，无法交接", "reason": "pty_not_running"}
+        session = pty.session_id
+        project = self.transcript_project()
+        offset = _transcript_offset(project, session)
+        with self._handoff_lock:
+            if self._handoff.get("active"):
+                return 409, {"error": "已有交接进行中", "reason": "handoff_busy"}
+            self._handoff = {
+                "active": True,
+                "phase": "handoff",
+                "message": "正在注入交接提示词…",
+                "role": role,
+                "agent_id": agent_id,
+                "session_before": session,
+                "session_after": "",
+                "started_at": utc_now(),
+                "finished_at": "",
+                "error": "",
+                "warning": "",
+            }
+        threading.Thread(
+            target=self._run_handoff,
+            args=(role, session, project, offset, wake),
+            daemon=True,
+        ).start()
+        return 202, self.handoff_status()
+
+    def _run_handoff(self, role: str, session: str, project: str, offset: int, wake: str) -> None:
+        pty = self.pty
+        try:
+            _inject_prompt(pty, handoff_prompt())
+            self._handoff_phase("waiting", "等待 Agent 完成…")
+            if not self._wait_handoff_reply(pty, project, session, offset):
+                raise RuntimeError("等待 Agent 完成超时")
+            self._handoff_phase("clearing", "正在清空会话…")
+            clear_at = time.time()
+            pty.write("/clear\r")
+            time.sleep(0.8)
+            self._handoff_phase("wake", "正在注入唤醒提示词…")
+            _inject_prompt(pty, wake)
+            self._handoff_phase("relocating", "正在定位新会话…")
+            new_session = self._wait_new_session(project, clear_at, exclude=session)
+            warning = ""
+            if new_session:
+                pty.set_session(new_session)
+                with self._pty_lock:
+                    self._pty_sessions[role] = new_session
+            else:
+                warning = "未能定位新会话 JSONL，对话页可能仍显示旧会话"
+            with self._handoff_lock:
+                self._handoff.update(
+                    {
+                        "active": False,
+                        "phase": "done",
+                        "message": "交接完成，已进入新会话",
+                        "session_after": new_session,
+                        "warning": warning,
+                        "finished_at": utc_now(),
+                    }
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            with self._handoff_lock:
+                self._handoff.update(
+                    {
+                        "active": False,
+                        "phase": "error",
+                        "message": f"交接失败：{exc}",
+                        "error": str(exc),
+                        "finished_at": utc_now(),
+                    }
+                )
+
+    def _wait_handoff_reply(self, pty: PtyManager, project: str, session: str, offset: int) -> bool:
+        deadline = time.monotonic() + handoff_timeout_seconds()
+        current = offset
+        while time.monotonic() < deadline:
+            if not pty.status().get("running"):
+                raise RuntimeError("PTY 已退出")
+            if pty.session_id != session:
+                return False
+            result = read_appended(project, session, current)
+            if result is not None:
+                current = int(result.get("offset", current))
+                for message in result.get("messages", []):
+                    if message.get("role") == "assistant" and any(
+                        block.get("kind") == "text" for block in message.get("blocks", [])
+                    ):
+                        return True
+            time.sleep(0.5)
+        return False
+
+    def _wait_new_session(self, project: str, after: float, exclude: str) -> str:
+        deadline = time.monotonic() + HANDOFF_RELOCATE_SECONDS
+        while time.monotonic() < deadline:
+            session = newest_session(project, after=after - 0.5, exclude=exclude)
+            if session:
+                return session
+            time.sleep(0.5)
+        return ""
 
     def pty_for(self, role: str, agent_id: str = "") -> PtyManager:
         """返回绑定该 Agent 的唯一实例；role 相同但 agent_id 变化视为换人。"""
@@ -2117,6 +2292,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream_pty(role, agent_id)
             return
 
+        if method == "GET" and path == "/handoff":
+            self._send(200, self.daemon.handoff_status())
+            return
+
         if method == "GET" and path == "/workspaces":
             self._send(200, self._workspaces_payload())
             return
@@ -2147,6 +2326,17 @@ class _Handler(BaseHTTPRequestHandler):
                 status, body = self.daemon.cleanup_wild(payload)
             except (OSError, RuntimeError) as exc:
                 status, body = 500, {"error": str(exc)}
+            self._send(status, body)
+            return
+
+        if method == "POST" and path == "/handoff":
+            role = _optional_role(payload)
+            agent_id = _optional_agent_id(payload)
+            error = self._pty_role_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            status, body = self.daemon.start_handoff(role, agent_id)
             self._send(status, body)
             return
 

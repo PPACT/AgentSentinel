@@ -48,6 +48,20 @@ export interface WorkspacesResponse {
   workspace?: Workspace;
 }
 
+export interface HandoffStatus {
+  active: boolean;
+  phase: string;
+  message: string;
+  role?: string;
+  agent_id?: string;
+  session_before?: string;
+  session_after?: string;
+  started_at?: string;
+  finished_at?: string;
+  error?: string;
+  warning?: string;
+}
+
 export interface PtyNotice {
   seq: number;
   kind: string;

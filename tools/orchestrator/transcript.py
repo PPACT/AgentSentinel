@@ -53,6 +53,35 @@ def transcript_path(
     return resolved
 
 
+def newest_session(
+    project: str,
+    *,
+    after: float,
+    exclude: str = "",
+    config_dir: Path | None = None,
+) -> str | None:
+    """/clear 后定位新的 JSONL（按项目 slug 目录内 mtime 最新的 session 文件）。"""
+    base = (config_dir or claude_config_dir()) / "projects" / project_slug(project)
+    try:
+        entries = list(base.glob("*.jsonl"))
+    except OSError:
+        return None
+    best: tuple[float, str] | None = None
+    for path in entries:
+        session = path.stem
+        if session == exclude or _SESSION_RE.fullmatch(session) is None:
+            continue
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            continue
+        if modified < after:
+            continue
+        if best is None or modified > best[0]:
+            best = (modified, session)
+    return best[1] if best is not None else None
+
+
 def _tool_summary(name: str, data: Any) -> str:
     tool = name.casefold()
     if isinstance(data, dict):

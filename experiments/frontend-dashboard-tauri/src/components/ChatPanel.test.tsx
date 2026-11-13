@@ -173,4 +173,22 @@ describe("ChatPanel", () => {
 
     expect(screen.getByText(/旧会话正被外部占用/)).toBeInTheDocument();
   });
+
+  it("triggers one-click handoff", () => {
+    const onHandoff = vi.fn();
+    renderPanel({ onHandoff });
+
+    fireEvent.click(screen.getByRole("button", { name: /一键交接/ }));
+
+    expect(onHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows handoff progress and locks the button", () => {
+    renderPanel({
+      handoff: { active: true, phase: "waiting", message: "等待 Agent 完成…" },
+    });
+
+    expect(screen.getByText("交接中：等待 Agent 完成…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /交接中/ })).toBeDisabled();
+  });
 });

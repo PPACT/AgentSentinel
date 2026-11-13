@@ -5,6 +5,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
 import type {
   Agent,
+  HandoffStatus,
   PreflightResult,
   StatusSnapshot,
   TaskList,
@@ -256,6 +257,18 @@ export function preflightWorkspace(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command, project_path: projectPath }),
+  });
+}
+
+export function getHandoff(): Promise<HandoffStatus> {
+  return requestJSON<HandoffStatus>("/handoff");
+}
+
+export function startHandoff(role: string, agentId: string): Promise<HandoffStatus> {
+  return requestJSON<HandoffStatus>("/handoff", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role, agent_id: agentId }),
   });
 }
 

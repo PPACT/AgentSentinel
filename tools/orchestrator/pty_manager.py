@@ -167,6 +167,16 @@ class PtyManager:
             return False
         return True
 
+    def set_session(self, session_id: str) -> None:
+        """/clear 后底层换 session 时，更新旁路解析使用的 session id。"""
+        session = session_id.strip()
+        if not session:
+            return
+        with self._lock:
+            self.session_id = session
+            if self._running:
+                self._write_state_locked()
+
     def resize(self, cols: int, rows: int) -> dict[str, Any]:
         cols = max(20, min(400, int(cols)))
         rows = max(5, min(200, int(rows)))

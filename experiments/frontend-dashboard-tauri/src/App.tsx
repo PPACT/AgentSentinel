@@ -26,8 +26,10 @@ import {
   getStatus,
   getTasks,
   getWorkspaces,
+  getHandoff,
   logStreamUrl,
   shutdownDaemon,
+  startHandoff,
   stopPty,
   stopRole,
   streamFetch,
@@ -40,6 +42,7 @@ import type {
   ConnectionState,
   DaemonInfo,
   EngineOption,
+  HandoffStatus,
   StatusSnapshot,
   Task,
   WildProcess,
@@ -76,6 +79,7 @@ export default function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
+  const [handoff, setHandoff] = useState<HandoffStatus | null>(null);
   const fallbackRole = agents.find((agent) => isAgentOnline(agent) && agent.role)?.role ?? null;
   const selectedExists = agents.some((agent) => agent.role === selectedRole);
   const activeRole =
@@ -98,6 +102,10 @@ export default function App() {
     selectedOnline && chatSupported,
     workspaceEpoch,
   );
+  const activeHandoff =
+    handoff && handoff.role === activeRole && handoff.agent_id === selectedAgentId
+      ? handoff
+      : null;
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -157,6 +165,32 @@ export default function App() {
     },
     [appendLog],
   );
+
+  const handleHandoff = useCallback(async () => {
+    if (!activeRole || !selectedAgentId) return;
+    try {
+      setHandoff(await startHandoff(activeRole, selectedAgentId));
+    } catch (err) {
+      const message = errorMessage(err);
+      appendLog("error", `一键交接失败：${message}`);
+      setError(message);
+    }
+  }, [activeRole, selectedAgentId, appendLog]);
+
+  useEffect(() => {
+    if (!handoff?.active) return;
+    const timer = setInterval(() => {
+      void getHandoff()
+        .then((status) => {
+          setHandoff(status);
+          if (!status.active && status.phase === "done") {
+            setWorkspaceEpoch((value) => value + 1);
+          }
+        })
+        .catch(() => undefined);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [handoff?.active]);
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -546,6 +580,7 @@ export default function App() {
                   usage={ptyChat.usage}
                   budgetTokens={ptyChat.budgetTokens}
                   notice={ptyChat.notice}
+                  handoff={activeHandoff}
                   locked={!selectedOnline}
                   lockReason={chatLockReason}
                   onSend={(prompt) => {
@@ -553,6 +588,9 @@ export default function App() {
                   }}
                   onStop={() => {
                     void ptyChat.stop();
+                  }}
+                  onHandoff={() => {
+                    void handleHandoff();
                   }}
                 />
               </Suspense>

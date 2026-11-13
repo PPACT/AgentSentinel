@@ -12,6 +12,7 @@ import type {
   TokenUsage,
   WildProcess,
   Workspace,
+  WorkspaceAgent,
   WorkspacesResponse,
 } from "./types";
 import type { ChatBlock } from "./chat";
@@ -366,10 +367,59 @@ export function preflightWorkspace(
   });
 }
 
+export function getWorkspaceAgents(
+  workspaceId: number,
+): Promise<{ agents: WorkspaceAgent[]; workspace_id: number }> {
+  return requestControlJSON(`/workspaces/agents?workspace_id=${workspaceId}`);
+}
+
+export function getWorkspaceAgent(
+  workspaceId: number,
+  role: string,
+): Promise<{ agent: WorkspaceAgent | null }> {
+  return requestControlJSON(
+    `/workspaces/agents?workspace_id=${workspaceId}&role=${encodeURIComponent(role)}`,
+  );
+}
+
+export function saveWorkspaceAgent(payload: {
+  workspace_id: number;
+  role: string;
+  wake_prompt_type: "text" | "file";
+  wake_prompt_content: string;
+}): Promise<{ agent: WorkspaceAgent; agents: WorkspaceAgent[] }> {
+  return requestControlJSON("/workspaces/agents/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteWorkspaceAgent(
+  workspaceId: number,
+  role: string,
+): Promise<{ deleted: boolean; agents: WorkspaceAgent[] }> {
+  return requestControlJSON("/workspaces/agents/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, role }),
+  });
+}
+
+export function updateWorkspaceBudget(
+  workspaceId: number,
+  budgetTokens: number,
+): Promise<{ workspace: Workspace }> {
+  return requestControlJSON("/workspaces/budget", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId, budget_tokens: budgetTokens }),
+  });
+}
+
 export function getHandoff(): Promise<HandoffStatus> {
   return requestJSON<HandoffStatus>("/handoff");
 }
-
 export function startHandoff(role: string, agentId: string): Promise<HandoffStatus> {
   return requestJSON<HandoffStatus>("/handoff", {
     method: "POST",

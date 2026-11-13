@@ -114,6 +114,7 @@ async fn force_kill_pid(pid: u32) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![start_daemon, force_kill_pid])

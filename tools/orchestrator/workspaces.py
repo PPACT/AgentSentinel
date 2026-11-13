@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -73,15 +74,58 @@ class WorkspaceStore:
                 connection.execute(
                     "ALTER TABLE workspaces ADD COLUMN daemon_home TEXT NOT NULL DEFAULT ''"
                 )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS workspace_agents ("
+                "workspace_id INTEGER NOT NULL, "
+                "role TEXT NOT NULL, "
+                "wake_prompt_type TEXT NOT NULL DEFAULT 'text', "
+                "wake_prompt_content TEXT NOT NULL DEFAULT '', "
+                "updated_at TEXT NOT NULL, "
+                "PRIMARY KEY (workspace_id, role))"
+            )
+            # 旧数据迁移：Workspace 级唤醒词下放给该工作区的 local 角色。
+            legacy_rows = connection.execute(
+                "SELECT id, wake_prompt, wake_prompt_file FROM workspaces"
+            ).fetchall()
+            for legacy in legacy_rows:
+                file_value = str(legacy["wake_prompt_file"] or "").strip()
+                text_value = str(legacy["wake_prompt"] or "").strip()
+                if not file_value and not text_value:
+                    continue
+                exists = connection.execute(
+                    "SELECT 1 FROM workspace_agents WHERE workspace_id=? AND role='local'",
+                    (legacy["id"],),
+                ).fetchone()
+                if exists is None:
+                    prompt_type = "file" if file_value else "text"
+                    content = file_value or text_value
+                    connection.execute(
+                        "INSERT INTO workspace_agents "
+                        "(workspace_id, role, wake_prompt_type, wake_prompt_content, updated_at) "
+                        "VALUES (?, 'local', ?, ?, ?)",
+                        (legacy["id"], prompt_type, content, _now()),
+                    )
+                connection.execute(
+                    "UPDATE workspaces SET wake_prompt='', wake_prompt_file='' WHERE id=?",
+                    (legacy["id"],),
+                )
 
     def _to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         adapter = adapter_for(str(data.get("engine", "")))
         data["engine_label"] = adapter.label
         data["capabilities"] = adapter.capabilities()
-        data["wake_prompt_source"] = "file" if data.get("wake_prompt_file") else "text"
+        data.pop("wake_prompt", None)
+        data.pop("wake_prompt_file", None)
         if not data.get("daemon_home"):
             data["daemon_home"] = str(self._daemon_home(int(data.get("id", 0))))
+        return data
+
+    @staticmethod
+    def _agent_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        content = str(data.get("wake_prompt_content") or "").strip()
+        data["configured"] = bool(content)
         return data
 
     def list(self) -> list[dict[str, Any]]:
@@ -129,8 +173,6 @@ class WorkspaceStore:
         engine = str(payload.get("engine", "claude")).strip().lower() or "claude"
         adapter = adapter_for(engine)
         command = str(payload.get("command", "")).strip() or adapter.default_command
-        wake_prompt = str(payload.get("wake_prompt", "") or "")
-        wake_prompt_file = str(payload.get("wake_prompt_file", "") or "").strip()
         budget_tokens = max(1, _int(payload.get("budget_tokens"), DEFAULT_BUDGET_TOKENS))
         if not name:
             raise ValueError("workspace name is required")
@@ -142,20 +184,20 @@ class WorkspaceStore:
         with self._lock, self._connect() as connection:
             if workspace_id > 0:
                 existing = connection.execute(
-                    "SELECT id FROM workspaces WHERE id=?", (workspace_id,)
+                    "SELECT id, budget_tokens FROM workspaces WHERE id=?", (workspace_id,)
                 ).fetchone()
                 if existing is None:
                     raise ValueError(f"unknown workspace: {workspace_id}")
+                if "budget_tokens" not in payload:
+                    budget_tokens = int(existing["budget_tokens"] or DEFAULT_BUDGET_TOKENS)
                 connection.execute(
                     "UPDATE workspaces SET name=?, project_path=?, command=?, engine=?, "
-                    "wake_prompt=?, wake_prompt_file=?, budget_tokens=?, updated_at=? WHERE id=?",
+                    "budget_tokens=?, updated_at=? WHERE id=?",
                     (
                         name,
                         project_path,
                         command,
                         engine,
-                        wake_prompt,
-                        wake_prompt_file,
                         budget_tokens,
                         now,
                         workspace_id,
@@ -164,16 +206,14 @@ class WorkspaceStore:
                 saved_id = workspace_id
             else:
                 cursor = connection.execute(
-                    "INSERT INTO workspaces (name, project_path, command, engine, wake_prompt, "
-                    "wake_prompt_file, budget_tokens, active, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    "INSERT INTO workspaces (name, project_path, command, engine, "
+                    "budget_tokens, active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
                     (
                         name,
                         project_path,
                         command,
                         engine,
-                        wake_prompt,
-                        wake_prompt_file,
                         budget_tokens,
                         now,
                         now,
@@ -210,6 +250,7 @@ class WorkspaceStore:
             if row is None:
                 return False
             connection.execute("DELETE FROM workspaces WHERE id=?", (workspace_id,))
+            connection.execute("DELETE FROM workspace_agents WHERE workspace_id=?", (workspace_id,))
             if int(row["active"]) == 1:
                 next_row = connection.execute(
                     "SELECT id FROM workspaces ORDER BY id LIMIT 1"
@@ -220,6 +261,93 @@ class WorkspaceStore:
                     )
             connection.commit()
         return True
+
+    def list_agents(self, workspace_id: int) -> Sequence[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workspace_agents WHERE workspace_id=? ORDER BY role",
+                (workspace_id,),
+            ).fetchall()
+        return [self._agent_to_dict(row) for row in rows]
+
+    def get_agent(self, workspace_id: int, role: str) -> dict[str, Any] | None:
+        role = role.strip().casefold()
+        if workspace_id <= 0 or not role:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workspace_agents WHERE workspace_id=? AND role=?",
+                (workspace_id, role),
+            ).fetchone()
+        return self._agent_to_dict(row) if row is not None else None
+
+    def save_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        workspace_id = _int(payload.get("workspace_id"), 0)
+        role = str(payload.get("role", "")).strip().casefold()
+        prompt_type = str(payload.get("wake_prompt_type", "text")).strip().lower()
+        content = str(payload.get("wake_prompt_content", "") or "")
+        if prompt_type not in ("text", "file"):
+            raise ValueError("wake_prompt_type must be text or file")
+        if workspace_id <= 0:
+            raise ValueError("workspace_id is required")
+        if not role:
+            raise ValueError("role is required")
+        now = _now()
+        with self._lock, self._connect() as connection:
+            workspace = connection.execute(
+                "SELECT id FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
+            if workspace is None:
+                raise ValueError(f"unknown workspace: {workspace_id}")
+            connection.execute(
+                "INSERT INTO workspace_agents "
+                "(workspace_id, role, wake_prompt_type, wake_prompt_content, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(workspace_id, role) DO UPDATE SET "
+                "wake_prompt_type=excluded.wake_prompt_type, "
+                "wake_prompt_content=excluded.wake_prompt_content, "
+                "updated_at=excluded.updated_at",
+                (workspace_id, role, prompt_type, content, now),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM workspace_agents WHERE workspace_id=? AND role=?",
+                (workspace_id, role),
+            ).fetchone()
+        if row is None:
+            raise ValueError("workspace agent save failed")
+        return self._agent_to_dict(row)
+
+    def delete_agent(self, workspace_id: int, role: str) -> bool:
+        role = role.strip().casefold()
+        if workspace_id <= 0 or not role:
+            return False
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM workspace_agents WHERE workspace_id=? AND role=?",
+                (workspace_id, role),
+            )
+            connection.commit()
+            return bool(cursor.rowcount)
+
+    def set_budget(self, workspace_id: int, budget_tokens: object) -> dict[str, Any]:
+        budget = _int(budget_tokens, 0)
+        if budget <= 0:
+            raise ValueError("budget_tokens must be positive")
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE workspaces SET budget_tokens=?, updated_at=? WHERE id=?",
+                (budget, _now(), workspace_id),
+            )
+            connection.commit()
+            if cursor.rowcount == 0:
+                raise ValueError(f"unknown workspace: {workspace_id}")
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown workspace: {workspace_id}")
+        return self._to_dict(row)
 
     def activate(self, workspace_id: int) -> dict[str, Any]:
         with self._lock, self._connect() as connection:

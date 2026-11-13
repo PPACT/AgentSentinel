@@ -25,6 +25,7 @@ import {
   eventStreamUrl,
   getStatus,
   getTasks,
+  getWorkspaceAgent,
   getWorkspaces,
   getHandoff,
   logStreamUrl,
@@ -34,6 +35,7 @@ import {
   stopPty,
   stopRole,
   streamFetch,
+  updateWorkspaceBudget,
 } from "@/lib/backend";
 import { errorMessage, formatTokenCount } from "@/lib/format";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
@@ -80,6 +82,7 @@ export default function App() {
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
+  const [budgetOverride, setBudgetOverride] = useState<number | null>(null);
   const [handoff, setHandoff] = useState<HandoffStatus | null>(null);
   const fallbackRole = agents.find((agent) => isAgentOnline(agent) && agent.role)?.role ?? null;
   const selectedExists = agents.some((agent) => agent.role === selectedRole);
@@ -107,6 +110,8 @@ export default function App() {
     handoff && handoff.role === activeRole && handoff.agent_id === selectedAgentId
       ? handoff
       : null;
+  const effectiveBudget =
+    budgetOverride ?? activeWorkspace?.budget_tokens ?? ptyChat.budgetTokens;
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -155,15 +160,49 @@ export default function App() {
   }, [appendLog]);
 
   const handleHandoff = useCallback(async () => {
-    if (!activeRole || !selectedAgentId) return;
+    if (!activeRole || !selectedAgentId || !activeWorkspace) return;
     try {
+      const config = await getWorkspaceAgent(activeWorkspace.id, activeRole);
+      if (!config.agent || !config.agent.configured) {
+        const message = `当前 Agent（${activeRole}）未配置唤醒词`;
+        setHandoff({
+          active: false,
+          phase: "error",
+          message,
+          error: `当前 Agent（${activeRole}）未配置唤醒词，请到 设置/工作区 → Agent 唤醒词 配置`,
+          role: activeRole,
+          agent_id: selectedAgentId,
+        });
+        appendLog("warn", message);
+        return;
+      }
       setHandoff(await startHandoff(activeRole, selectedAgentId));
     } catch (err) {
       const message = errorMessage(err);
       appendLog("error", `一键交接失败：${message}`);
       setError(message);
     }
-  }, [activeRole, selectedAgentId, appendLog]);
+  }, [activeRole, selectedAgentId, activeWorkspace, appendLog]);
+
+  const handleBudgetChange = useCallback(
+    async (tokens: number) => {
+      if (!activeWorkspace) return;
+      try {
+        const data = await updateWorkspaceBudget(activeWorkspace.id, tokens);
+        setBudgetOverride(tokens);
+        setActiveWorkspace(data.workspace);
+        setWorkspaces((previous) =>
+          previous.map((workspace) =>
+            workspace.id === data.workspace.id ? data.workspace : workspace,
+          ),
+        );
+        appendLog("info", `上下文预算：${tokens.toLocaleString()} tokens`);
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    },
+    [activeWorkspace, appendLog],
+  );
 
   useEffect(() => {
     if (!handoff?.active) return;
@@ -286,6 +325,7 @@ export default function App() {
       setTasks([]);
       setSelectedRole(null);
       setHandoff(null);
+      setBudgetOverride(null);
       try {
         if (workspace) await ensureWorkspaceDaemon(workspace);
         setDaemonHome(workspace?.daemon_home ?? null);
@@ -621,7 +661,7 @@ export default function App() {
                   contextWarning={contextWarning}
                   contextTokens={ptyChat.contextTokens}
                   usage={ptyChat.usage}
-                  budgetTokens={ptyChat.budgetTokens}
+                  budgetTokens={effectiveBudget}
                   notice={ptyChat.notice}
                   handoff={activeHandoff}
                   locked={!selectedOnline}
@@ -634,6 +674,9 @@ export default function App() {
                   }}
                   onHandoff={() => {
                     void handleHandoff();
+                  }}
+                  onBudgetChange={(tokens) => {
+                    void handleBudgetChange(tokens);
                   }}
                 />
               </Suspense>

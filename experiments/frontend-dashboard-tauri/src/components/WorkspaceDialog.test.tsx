@@ -9,13 +9,22 @@ const mocks = vi.hoisted(() => ({
   preflight: vi.fn(),
   activate: vi.fn(),
   remove: vi.fn(),
+  agents: vi.fn(),
+  saveAgent: vi.fn(),
+  deleteAgent: vi.fn(),
+  openDialog: vi.fn(),
 }));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openDialog }));
 
 vi.mock("@/lib/backend", () => ({
   saveWorkspace: mocks.save,
   preflightWorkspace: mocks.preflight,
   activateWorkspace: mocks.activate,
   deleteWorkspace: mocks.remove,
+  getWorkspaceAgents: mocks.agents,
+  saveWorkspaceAgent: mocks.saveAgent,
+  deleteWorkspaceAgent: mocks.deleteAgent,
 }));
 
 import type { EngineOption, Workspace, WorkspacesResponse } from "@/lib/types";
@@ -29,8 +38,6 @@ const WORKSPACE: Workspace = {
   command: "claude",
   engine: "claude",
   engine_label: "Claude Code",
-  wake_prompt: "",
-  wake_prompt_file: "",
   budget_tokens: 200_000,
   active: 1,
   capabilities: { chat: true, usage: true, clear: true },
@@ -62,6 +69,11 @@ beforeEach(() => {
   mocks.preflight.mockReset();
   mocks.activate.mockReset();
   mocks.remove.mockReset();
+  mocks.agents.mockReset();
+  mocks.agents.mockResolvedValue({ agents: [], workspace_id: 1 });
+  mocks.saveAgent.mockReset();
+  mocks.deleteAgent.mockReset();
+  mocks.openDialog.mockReset();
 });
 
 afterEach(() => {
@@ -115,5 +127,33 @@ describe("WorkspaceDialog", () => {
     await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
     expect(mocks.save.mock.calls[0][0]).toMatchObject({ engine: "codex", command: "codex" });
     expect(onRefresh).toHaveBeenCalledWith(saved);
+  });
+
+  it("saves a per-role wake prompt", async () => {
+    const agent = {
+      workspace_id: 1,
+      role: "dev",
+      wake_prompt_type: "text" as const,
+      wake_prompt_content: "接续",
+      configured: true,
+    };
+    mocks.saveAgent.mockResolvedValue({ agent, agents: [agent] });
+    renderDialog();
+    await waitFor(() => expect(mocks.agents).toHaveBeenCalledWith(1));
+
+    fireEvent.change(screen.getByLabelText("角色"), { target: { value: "dev" } });
+    fireEvent.change(screen.getByPlaceholderText(/该 Agent 专属唤醒词/), {
+      target: { value: "接续" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色唤醒词" }));
+
+    await waitFor(() =>
+      expect(mocks.saveAgent).toHaveBeenCalledWith({
+        workspace_id: 1,
+        role: "dev",
+        wake_prompt_type: "text",
+        wake_prompt_content: "接续",
+      }),
+    );
   });
 });

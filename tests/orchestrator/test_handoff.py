@@ -14,21 +14,45 @@ OLD_SESSION = "11111111-1111-1111-1111-111111111111"
 NEW_SESSION = "22222222-2222-2222-2222-222222222222"
 
 
-def test_resolve_wake_prompt_text_file_and_missing(tmp_path: Path) -> None:
-    assert (
-        service.resolve_wake_prompt({"wake_prompt": "  接续  ", "wake_prompt_file": ""}) == "接续"
+def test_agent_wake_prompt_text_file_and_missing(tmp_path: Path) -> None:
+    daemon = service.Daemon(tmp_path / "orch")
+    workspace_id = int(daemon.active_workspace()["id"])
+
+    with pytest.raises(ValueError):
+        daemon.resolve_agent_wake_prompt(workspace_id, "dev")
+
+    daemon.workspaces.save_agent(
+        {
+            "workspace_id": workspace_id,
+            "role": "dev",
+            "wake_prompt_type": "text",
+            "wake_prompt_content": "  接续  ",
+        }
     )
+    assert daemon.resolve_agent_wake_prompt(workspace_id, "dev") == "接续"
+
     wake_file = tmp_path / "wake.md"
     wake_file.write_text("读取文件里的唤醒词", encoding="utf-8")
-    assert (
-        service.resolve_wake_prompt({"wake_prompt": "文本", "wake_prompt_file": str(wake_file)})
-        == "读取文件里的唤醒词"
+    daemon.workspaces.save_agent(
+        {
+            "workspace_id": workspace_id,
+            "role": "doc",
+            "wake_prompt_type": "file",
+            "wake_prompt_content": str(wake_file),
+        }
+    )
+    assert daemon.resolve_agent_wake_prompt(workspace_id, "doc") == "读取文件里的唤醒词"
+
+    daemon.workspaces.save_agent(
+        {
+            "workspace_id": workspace_id,
+            "role": "local",
+            "wake_prompt_type": "file",
+            "wake_prompt_content": str(tmp_path / "missing.md"),
+        }
     )
     with pytest.raises(ValueError):
-        service.resolve_wake_prompt(
-            {"wake_prompt": "", "wake_prompt_file": str(tmp_path / "missing.md")}
-        )
-    assert service.resolve_wake_prompt({"wake_prompt": "", "wake_prompt_file": ""}) == ""
+        daemon.resolve_agent_wake_prompt(workspace_id, "local")
 
 
 def test_newest_session_after_clear(tmp_path: Path) -> None:
@@ -113,12 +137,19 @@ def test_start_handoff_validations(tmp_path: Path) -> None:
     active = daemon.active_workspace()
     assert active["engine"] == "claude"
 
-    # 无唤醒词
+    # 无 Agent 唤醒词
     status, body = daemon.start_handoff("dev", "agent")
     assert status == 400 and body["reason"] == "wake_prompt_required"
 
-    # 配置唤醒词但 PTY 未运行
-    daemon.workspaces.save({**active, "wake_prompt": "开始工作"})
+    # 配置 dev 唤醒词但 PTY 未运行
+    daemon.workspaces.save_agent(
+        {
+            "workspace_id": int(daemon.active_workspace()["id"]),
+            "role": "dev",
+            "wake_prompt_type": "text",
+            "wake_prompt_content": "开始工作",
+        }
+    )
     status, body = daemon.start_handoff("dev", "agent")
     assert status == 409 and body["reason"] == "pty_not_running"
 

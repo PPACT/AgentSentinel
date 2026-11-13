@@ -146,7 +146,8 @@ describe("ChatPanel", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("shows session token usage and budget progress", () => {
+  it("opens the inline budget editor and commits on Enter", async () => {
+    const onBudgetChange = vi.fn();
     renderPanel({
       usage: {
         input_tokens: 1_234,
@@ -156,10 +157,15 @@ describe("ChatPanel", () => {
       },
       contextTokens: 5_000,
       budgetTokens: 200_000,
+      onBudgetChange,
     });
 
-    expect(screen.getByLabelText("Token 用量")).toBeInTheDocument();
-    expect(screen.getByText(/in 1k · out 567/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("编辑上下文预算"));
+    await waitFor(() => expect(screen.getByText("上下文预算")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "500k" }));
+    fireEvent.keyDown(screen.getByLabelText("上下文预算 tokens"), { key: "Enter" });
+
+    await waitFor(() => expect(onBudgetChange).toHaveBeenCalledWith(500_000));
   });
 
   it("shows PTY notices such as session conflict", () => {

@@ -690,18 +690,6 @@ def handoff_timeout_seconds() -> float:
     return value if value > 0 else DEFAULT_HANDOFF_TIMEOUT_SECONDS
 
 
-def resolve_wake_prompt(workspace: dict[str, Any]) -> str:
-    file_text = str(workspace.get("wake_prompt_file") or "").strip()
-    if file_text:
-        try:
-            text = Path(file_text).expanduser().read_text(encoding="utf-8")[:65536]
-        except OSError as exc:
-            raise ValueError(f"读取唤醒提示词文件失败：{exc}") from exc
-        if text.strip():
-            return text.strip()
-    return str(workspace.get("wake_prompt") or "").strip()
-
-
 def _transcript_offset(project: str, session: str) -> int:
     path = transcript_path(project, session)
     if path is None:
@@ -916,6 +904,26 @@ class Daemon:
             engine=adapter.id,
         )
 
+    def resolve_agent_wake_prompt(self, workspace_id: int, role: str) -> str:
+        """按 workspace_id + role 取该 Agent 的专属唤醒词。"""
+        config = self.workspaces.get_agent(workspace_id, role)
+        if config is None:
+            raise ValueError(
+                f"当前 Agent（{role}）未配置唤醒词，请在 设置/工作区 → Agent 唤醒词 中配置"
+            )
+        content = str(config.get("wake_prompt_content") or "").strip()
+        if not content:
+            raise ValueError(f"当前 Agent（{role}）的唤醒词为空，请先配置")
+        if str(config.get("wake_prompt_type") or "text") == "file":
+            try:
+                text = Path(content).expanduser().read_text(encoding="utf-8")[:65536]
+            except OSError as exc:
+                raise ValueError(f"读取唤醒提示词文件失败：{exc}") from exc
+            if not text.strip():
+                raise ValueError(f"当前 Agent（{role}）的唤醒词文件为空")
+            return text.strip()
+        return content
+
     def handoff_status(self) -> dict[str, Any]:
         with self._handoff_lock:
             return dict(self._handoff)
@@ -926,18 +934,14 @@ class Daemon:
 
     def start_handoff(self, role: str, agent_id: str) -> tuple[int, dict[str, Any]]:
         workspace = self.active_workspace()
+        workspace_id = int(workspace.get("id") or 0)
         adapter = adapter_for(str(workspace.get("engine") or "claude"))
         if not adapter.supports_clear:
             return 400, {"error": "当前引擎不支持一键交接", "reason": "handoff_unsupported"}
         try:
-            wake = resolve_wake_prompt(workspace)
+            wake = self.resolve_agent_wake_prompt(workspace_id, role)
         except ValueError as exc:
-            return 400, {"error": str(exc), "reason": "wake_prompt_read_failed"}
-        if not wake:
-            return 400, {
-                "error": "请先在设置/工作区配置唤醒提示词",
-                "reason": "wake_prompt_required",
-            }
+            return 400, {"error": str(exc), "reason": "wake_prompt_required"}
         pty = self.pty
         if not pty.status().get("running"):
             return 409, {"error": "PTY 未运行，无法交接", "reason": "pty_not_running"}
@@ -953,6 +957,7 @@ class Daemon:
                 "message": "正在注入交接提示词…",
                 "role": role,
                 "agent_id": agent_id,
+                "workspace_id": workspace_id,
                 "session_before": session,
                 "session_after": "",
                 "started_at": utc_now(),
@@ -2375,6 +2380,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, self.daemon.handoff_status())
             return
 
+        if method == "GET" and path == "/workspaces/agents":
+            query = parse_qs(urlparse(self.path).query)
+            workspace_id = _int((query.get("workspace_id") or ["0"])[0])
+            role = (query.get("role") or [""])[0].strip().casefold()
+            if role:
+                self._send(
+                    200,
+                    {"agent": self.daemon.workspaces.get_agent(workspace_id, role)},
+                )
+            else:
+                self._send(
+                    200,
+                    {
+                        "agents": self.daemon.workspaces.list_agents(workspace_id),
+                        "workspace_id": workspace_id,
+                    },
+                )
+            return
+
         if method == "GET" and path == "/workspaces":
             self._send(200, self._workspaces_payload())
             return
@@ -2417,6 +2441,47 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             status, body = self.daemon.start_handoff(role, agent_id)
             self._send(status, body)
+            return
+
+        if method == "POST" and path == "/workspaces/agents/save":
+            try:
+                workspace_agent = self.daemon.workspaces.save_agent(payload)
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            workspace_id = int(workspace_agent.get("workspace_id") or 0)
+            self._send(
+                200,
+                {
+                    "agent": workspace_agent,
+                    "agents": self.daemon.workspaces.list_agents(workspace_id),
+                },
+            )
+            return
+
+        if method == "POST" and path == "/workspaces/agents/delete":
+            workspace_id = _int(payload.get("workspace_id"))
+            role = _str(payload.get("role"))
+            deleted = self.daemon.workspaces.delete_agent(workspace_id, role)
+            self._send(
+                200,
+                {
+                    "deleted": deleted,
+                    "agents": self.daemon.workspaces.list_agents(workspace_id),
+                },
+            )
+            return
+
+        if method == "POST" and path == "/workspaces/budget":
+            workspace_id = _int(payload.get("workspace_id")) or _int(payload.get("id"))
+            try:
+                workspace = self.daemon.workspaces.set_budget(
+                    workspace_id, payload.get("budget_tokens")
+                )
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            self._send(200, {"workspace": workspace})
             return
 
         if method == "POST" and path == "/workspaces/preflight":

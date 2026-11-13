@@ -5,10 +5,10 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import "highlight.js/styles/github-dark.css";
 
+import { BudgetPopover } from "@/components/BudgetPopover";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatBlock, ChatEntry } from "@/lib/chat";
-import { formatTokenCount } from "@/lib/format";
 import type { HandoffStatus, PtyNotice, TokenUsage } from "@/lib/types";
 
 interface ChatPanelProps {
@@ -24,6 +24,7 @@ interface ChatPanelProps {
   onSend: (prompt: string) => void;
   onStop: () => void;
   onHandoff?: () => void;
+  onBudgetChange?: (tokens: number) => void;
   locked?: boolean;
   lockReason?: string;
 }
@@ -121,6 +122,7 @@ export function ChatPanel({
   onSend,
   onStop,
   onHandoff = () => undefined,
+  onBudgetChange = () => undefined,
   locked = false,
   lockReason = "当前 Agent 已离线，对话已锁定",
 }: ChatPanelProps) {
@@ -197,49 +199,12 @@ export function ChatPanel({
                 </span>
               ) : null}
               {usage ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div
-                      aria-label="Token 用量"
-                      className="flex shrink-0 cursor-help items-center gap-1.5"
-                    >
-                      {budgetTokens > 0 ? (
-                        <div className="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-800">
-                          <div
-                            className={`h-full transition-[width] ${
-                              contextTokens / budgetTokens >= 0.85
-                                ? "bg-red-500"
-                                : contextTokens / budgetTokens >= 0.6
-                                  ? "bg-amber-400"
-                                  : "bg-emerald-500"
-                            }`}
-                            style={{
-                              width: `${Math.min(100, (contextTokens / budgetTokens) * 100)}%`,
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                      <span className="font-mono text-[9px] text-zinc-500">
-                        in {formatTokenCount(usage.input_tokens)} · out{" "}
-                        {formatTokenCount(usage.output_tokens)}
-                      </span>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">
-                    <div>
-                      上下文 {formatTokenCount(contextTokens)}
-                      {budgetTokens > 0 ? ` / ${formatTokenCount(budgetTokens)}` : ""}
-                    </div>
-                    <div>
-                      累计输入 {formatTokenCount(usage.input_tokens)} · 输出{" "}
-                      {formatTokenCount(usage.output_tokens)}
-                    </div>
-                    <div>
-                      缓存读 {formatTokenCount(usage.cache_read_input_tokens)} · 写入{" "}
-                      {formatTokenCount(usage.cache_creation_input_tokens)}
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
+                <BudgetPopover
+                  contextTokens={contextTokens}
+                  usage={usage}
+                  budgetTokens={budgetTokens}
+                  onBudgetChange={onBudgetChange}
+                />
               ) : contextWarning ? (
                 <Tooltip>
                   <TooltipTrigger asChild>

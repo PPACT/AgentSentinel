@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-destroy",
+    "dialog:allow-open",
     {
       "identifier": "http:default",
       "allow": [{ "url": "http://127.0.0.1:*" }]

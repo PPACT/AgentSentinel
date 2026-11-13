@@ -1,5 +1,6 @@
-import { FolderCog, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { FolderCog, FolderOpen, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,14 +15,18 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   activateWorkspace,
   deleteWorkspace,
+  deleteWorkspaceAgent,
+  getWorkspaceAgents,
   preflightWorkspace,
   saveWorkspace,
+  saveWorkspaceAgent,
 } from "@/lib/backend";
 import { errorMessage } from "@/lib/format";
 import type {
   EngineOption,
   PreflightResult,
   Workspace,
+  WorkspaceAgent,
   WorkspacesResponse,
 } from "@/lib/types";
 
@@ -40,10 +45,6 @@ interface FormState {
   project_path: string;
   engine: string;
   command: string;
-  wakeMode: "text" | "file";
-  wake_prompt: string;
-  wake_prompt_file: string;
-  budget_tokens: number;
 }
 
 const EMPTY_FORM: FormState = {
@@ -52,10 +53,6 @@ const EMPTY_FORM: FormState = {
   project_path: "",
   engine: "claude",
   command: "claude",
-  wakeMode: "text",
-  wake_prompt: "",
-  wake_prompt_file: "",
-  budget_tokens: 200_000,
 };
 
 function fromWorkspace(workspace: Workspace | undefined): FormState {
@@ -66,10 +63,6 @@ function fromWorkspace(workspace: Workspace | undefined): FormState {
     project_path: workspace.project_path,
     engine: workspace.engine,
     command: workspace.command,
-    wakeMode: workspace.wake_prompt_file ? "file" : "text",
-    wake_prompt: workspace.wake_prompt,
-    wake_prompt_file: workspace.wake_prompt_file,
-    budget_tokens: workspace.budget_tokens,
   };
 }
 
@@ -91,7 +84,7 @@ function Field({
   );
 }
 
-/** 工作区配置中心：项目路径 / 启动命令 / 唤醒提示词 / 预算，配置存中控 SQLite。 */
+/** 设置/工作区：Workspace 配置 + 每个 Agent 角色的专属唤醒词。 */
 export function WorkspaceDialog({
   open,
   onOpenChange,
@@ -107,11 +100,37 @@ export function WorkspaceDialog({
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const [agentConfigs, setAgentConfigs] = useState<WorkspaceAgent[]>([]);
+  const [agentRole, setAgentRole] = useState("");
+  const [agentType, setAgentType] = useState<"text" | "file">("text");
+  const [agentContent, setAgentContent] = useState("");
+  const [agentMessage, setAgentMessage] = useState<string | null>(null);
+  const [agentBusy, setAgentBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (selectedId === null) return;
+    void getWorkspaceAgents(selectedId)
+      .then((data) => {
+        if (!cancelled) setAgentConfigs(data.agents ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentConfigs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
+
   const selectWorkspace = (workspace: Workspace) => {
     setSelectedId(workspace.id);
     setForm(fromWorkspace(workspace));
     setPreflight(workspace.preflight ?? null);
     setMessage(null);
+    setAgentRole("");
+    setAgentType("text");
+    setAgentContent("");
+    setAgentMessage(null);
   };
 
   const startNew = () => {
@@ -119,6 +138,11 @@ export function WorkspaceDialog({
     setForm({ ...EMPTY_FORM });
     setPreflight(null);
     setMessage(null);
+    setAgentConfigs([]);
+    setAgentRole("");
+    setAgentType("text");
+    setAgentContent("");
+    setAgentMessage(null);
   };
 
   const selectEngine = (engineId: string) => {
@@ -132,6 +156,27 @@ export function WorkspaceDialog({
           : previous.command;
       return { ...previous, engine: engineId, command };
     });
+  };
+
+  const browseProject = async () => {
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "选择项目目录",
+    });
+    if (typeof selected === "string") setForm((previous) => ({ ...previous, project_path: selected }));
+  };
+
+  const browseWakeFile = async () => {
+    const selected = await openDialog({
+      multiple: false,
+      title: "选择唤醒提示词文件",
+      filters: [{ name: "Text", extensions: ["md", "txt"] }],
+    });
+    if (typeof selected === "string") {
+      setAgentType("file");
+      setAgentContent(selected);
+    }
   };
 
   const runPreflight = async () => {
@@ -150,13 +195,7 @@ export function WorkspaceDialog({
     setBusy(true);
     setMessage(null);
     try {
-      const payload = {
-        ...form,
-        wake_prompt: form.wakeMode === "text" ? form.wake_prompt : "",
-        wake_prompt_file: form.wakeMode === "file" ? form.wake_prompt_file : "",
-        activate: form.id === null,
-      };
-      const data = await saveWorkspace(payload);
+      const data = await saveWorkspace({ ...form, activate: form.id === null });
       onRefresh(data);
       if (data.workspace) {
         setSelectedId(data.workspace.id);
@@ -203,11 +242,78 @@ export function WorkspaceDialog({
       setSelectedId(next?.id ?? null);
       setForm(fromWorkspace(next));
       setPreflight(next?.preflight ?? null);
+      setAgentConfigs([]);
+      setAgentRole("");
+      setAgentContent("");
       setMessage("已删除");
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const selectAgent = (agent: WorkspaceAgent) => {
+    setAgentRole(agent.role);
+    setAgentType(agent.wake_prompt_type === "file" ? "file" : "text");
+    setAgentContent(agent.wake_prompt_content);
+    setAgentMessage(null);
+  };
+
+  const resetAgent = () => {
+    setAgentRole("");
+    setAgentType("text");
+    setAgentContent("");
+    setAgentMessage(null);
+  };
+
+  const saveAgent = async () => {
+    if (selectedId === null) {
+      setAgentMessage("请先保存工作区，再配置 Agent 唤醒词");
+      return;
+    }
+    const role = agentRole.trim().toLowerCase();
+    if (!role) {
+      setAgentMessage("请填写角色名（如 dev / doc / local）");
+      return;
+    }
+    if (!agentContent.trim()) {
+      setAgentMessage("唤醒词内容不能为空");
+      return;
+    }
+    setAgentBusy(true);
+    setAgentMessage(null);
+    try {
+      const data = await saveWorkspaceAgent({
+        workspace_id: selectedId,
+        role,
+        wake_prompt_type: agentType,
+        wake_prompt_content: agentContent,
+      });
+      setAgentConfigs(data.agents ?? []);
+      setAgentRole(role);
+      setAgentMessage(`已保存 ${role} 的唤醒词`);
+    } catch (error) {
+      setAgentMessage(errorMessage(error));
+    } finally {
+      setAgentBusy(false);
+    }
+  };
+
+  const deleteAgent = async () => {
+    if (selectedId === null || !agentRole) return;
+    if (!window.confirm(`删除 ${agentRole} 的唤醒词配置？`)) return;
+    setAgentBusy(true);
+    setAgentMessage(null);
+    try {
+      const data = await deleteWorkspaceAgent(selectedId, agentRole);
+      setAgentConfigs(data.agents ?? []);
+      resetAgent();
+      setAgentMessage("已删除该角色的唤醒词");
+    } catch (error) {
+      setAgentMessage(errorMessage(error));
+    } finally {
+      setAgentBusy(false);
     }
   };
 
@@ -222,7 +328,7 @@ export function WorkspaceDialog({
             设置 / 工作区
           </DialogTitle>
           <DialogDescription>
-            配置保存在中控本地 SQLite，不写入项目文件；切换工作区时注册表、任务与终端会话相互隔离。
+            配置保存在中控本地 SQLite；唤醒词按 Agent 角色独立配置，交接时按 workspace + role 取词。
           </DialogDescription>
         </DialogHeader>
 
@@ -275,11 +381,23 @@ export function WorkspaceDialog({
                 />
               </Field>
               <Field label="项目路径" hint="中控拉起 Agent 时直接切换到此 cwd">
-                <Input
-                  value={form.project_path}
-                  placeholder="D:\\Code\\your-project"
-                  onChange={(event) => setForm({ ...form, project_path: event.target.value })}
-                />
+                <div className="flex gap-1.5">
+                  <Input
+                    value={form.project_path}
+                    placeholder="请选择或输入项目路径"
+                    onChange={(event) => setForm({ ...form, project_path: event.target.value })}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-9 shrink-0 gap-1 border-zinc-700 px-2 text-[11px]"
+                    onClick={() => void browseProject()}
+                  >
+                    <FolderOpen className="size-3.5" />
+                    浏览
+                  </Button>
+                </div>
               </Field>
             </div>
 
@@ -310,75 +428,112 @@ export function WorkspaceDialog({
               </Field>
             </div>
 
-            <Field label="唤醒提示词">
-              <div className="mb-1 flex items-center gap-3 text-[11px] text-zinc-400">
-                <label className="flex items-center gap-1">
-                  <input
-                    type="radio"
-                    checked={form.wakeMode === "text"}
-                    onChange={() => setForm({ ...form, wakeMode: "text" })}
-                  />
-                  直接输入
-                </label>
-                <label className="flex items-center gap-1">
-                  <input
-                    type="radio"
-                    checked={form.wakeMode === "file"}
-                    onChange={() => setForm({ ...form, wakeMode: "file" })}
-                  />
-                  读取 .md 文件
-                </label>
+            <div className="border-t border-zinc-800 pt-3">
+              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-200">
+                Agent 唤醒词
+                <span className="text-[10px] font-normal text-zinc-500">
+                  每个角色独立；一键交接时按 workspace + role 取词
+                </span>
               </div>
-              {form.wakeMode === "text" ? (
+              <div className="mb-2 flex flex-wrap items-center gap-1">
+                {agentConfigs.map((agent) => (
+                  <button
+                    key={agent.role}
+                    type="button"
+                    onClick={() => selectAgent(agent)}
+                    className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${
+                      agentRole === agent.role
+                        ? "border-sky-700 bg-sky-950/40 text-sky-300"
+                        : "border-zinc-700 text-zinc-400 hover:bg-zinc-800/50"
+                    }`}
+                  >
+                    {agent.role}
+                    {agent.configured ? "" : "（空）"}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={resetAgent}
+                  className="flex items-center gap-0.5 rounded border border-dashed border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300"
+                >
+                  <Plus className="size-3" />
+                  新建角色
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_180px] gap-2">
+                <Field label="角色">
+                  <Input
+                    value={agentRole}
+                    placeholder="dev / doc / local"
+                    onChange={(event) => setAgentRole(event.target.value)}
+                  />
+                </Field>
+                <Field label="提示词来源">
+                  <select
+                    value={agentType}
+                    onChange={(event) =>
+                      setAgentType(event.target.value === "file" ? "file" : "text")
+                    }
+                    className="h-9 w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200 outline-none focus:border-sky-700"
+                  >
+                    <option value="text">直接输入</option>
+                    <option value="file">读取 .md / .txt 文件</option>
+                  </select>
+                </Field>
+              </div>
+              {agentType === "text" ? (
                 <Textarea
-                  value={form.wake_prompt}
-                  placeholder="粘贴你的唤醒词 / 交接提示词…"
-                  className="min-h-24"
-                  onChange={(event) => setForm({ ...form, wake_prompt: event.target.value })}
+                  value={agentContent}
+                  placeholder="该 Agent 专属唤醒词；交接 /clear 后注入…"
+                  className="mt-2 min-h-20"
+                  onChange={(event) => setAgentContent(event.target.value)}
                 />
               ) : (
-                <Input
-                  value={form.wake_prompt_file}
-                  placeholder="D:\\path\\wake.md"
-                  onChange={(event) => setForm({ ...form, wake_prompt_file: event.target.value })}
-                />
+                <div className="mt-2 flex gap-1.5">
+                  <Input
+                    value={agentContent}
+                    placeholder="请选择或输入提示词的文件路径"
+                    onChange={(event) => setAgentContent(event.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-9 shrink-0 gap-1 border-zinc-700 px-2 text-[11px]"
+                    onClick={() => void browseWakeFile()}
+                  >
+                    <FolderOpen className="size-3.5" />
+                    浏览
+                  </Button>
+                </div>
               )}
-            </Field>
-
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="会话预算（tokens）" hint="用于对话页 Token 进度条">
-                <Input
-                  type="number"
-                  min={1}
-                  value={form.budget_tokens}
-                  onChange={(event) =>
-                    setForm({ ...form, budget_tokens: Number(event.target.value) || 0 })
-                  }
-                />
-              </Field>
-              <div className="flex items-end gap-2">
+              <div className="mt-2 flex items-center gap-2">
                 <Button
                   size="sm"
-                  variant="outline"
-                  className="h-8 gap-1.5 text-xs"
-                  disabled={busy}
-                  onClick={() => void runPreflight()}
+                  className="h-8 text-xs"
+                  disabled={agentBusy || selectedId === null}
+                  onClick={() => void saveAgent()}
                 >
-                  <RefreshCw className="size-3.5" />
-                  检测环境
+                  保存角色唤醒词
                 </Button>
-                {preflight ? (
-                  <span
-                    className={`text-[11px] ${preflight.ok ? "text-emerald-400" : "text-red-400"}`}
-                  >
-                    {preflight.ok ? "命令与路径可用" : preflight.error}
-                  </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 gap-1 text-xs text-red-300 hover:text-red-200"
+                  disabled={agentBusy || selectedId === null || !agentRole}
+                  onClick={() => void deleteAgent()}
+                >
+                  <Trash2 className="size-3.5" />
+                  删除
+                </Button>
+                {agentMessage ? (
+                  <span className="text-[11px] text-zinc-400">{agentMessage}</span>
                 ) : null}
               </div>
             </div>
 
             <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
-              <div className="flex gap-2">
+              <div className="flex items-center gap-2">
                 <Button size="sm" className="h-8 text-xs" disabled={busy} onClick={() => void save()}>
                   保存
                 </Button>
@@ -401,8 +556,27 @@ export function WorkspaceDialog({
                   <Trash2 className="size-3.5" />
                   删除
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 gap-1.5 border-zinc-700 text-xs"
+                  disabled={busy}
+                  onClick={() => void runPreflight()}
+                >
+                  <RefreshCw className="size-3.5" />
+                  检测环境
+                </Button>
               </div>
-              {message ? <span className="text-[11px] text-zinc-400">{message}</span> : null}
+              <div className="flex items-center gap-2">
+                {preflight ? (
+                  <span
+                    className={`text-[11px] ${preflight.ok ? "text-emerald-400" : "text-red-400"}`}
+                  >
+                    {preflight.ok ? "命令与路径可用" : preflight.error}
+                  </span>
+                ) : null}
+                {message ? <span className="text-[11px] text-zinc-400">{message}</span> : null}
+              </div>
             </div>
           </div>
         </div>

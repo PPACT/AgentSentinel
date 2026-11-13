@@ -20,15 +20,21 @@ export interface Workspace {
   command: string;
   engine: string;
   engine_label?: string;
-  wake_prompt: string;
-  wake_prompt_file: string;
-  wake_prompt_source?: "text" | "file";
   budget_tokens: number;
   active: number;
   daemon_home?: string;
   capabilities?: EngineCapabilities;
   preflight?: PreflightResult;
   created_at?: string;
+  updated_at?: string;
+}
+
+export interface WorkspaceAgent {
+  workspace_id: number;
+  role: string;
+  wake_prompt_type: "text" | "file";
+  wake_prompt_content: string;
+  configured: boolean;
   updated_at?: string;
 }
 

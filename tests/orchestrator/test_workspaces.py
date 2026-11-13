@@ -90,6 +90,53 @@ def test_workspace_store_crud_and_active(tmp_path: Path) -> None:
     assert active["id"] == default["id"]
 
 
+def test_workspace_agents_crud_and_budget(tmp_path: Path) -> None:
+    store = WorkspaceStore(tmp_path / "w.sqlite3")
+    default = store.seed_default(str(tmp_path))
+    workspace_id = int(default["id"])
+    assert "wake_prompt" not in default
+
+    agent = store.save_agent(
+        {
+            "workspace_id": workspace_id,
+            "role": "dev",
+            "wake_prompt_type": "text",
+            "wake_prompt_content": "接续",
+        }
+    )
+    assert agent["configured"] is True
+    saved = store.get_agent(workspace_id, "DEV")
+    assert saved is not None and saved["wake_prompt_content"] == "接续"
+
+    store.save_agent(
+        {
+            "workspace_id": workspace_id,
+            "role": "dev",
+            "wake_prompt_type": "text",
+            "wake_prompt_content": "更新",
+        }
+    )
+    saved = store.get_agent(workspace_id, "dev")
+    assert saved is not None and saved["wake_prompt_content"] == "更新"
+    assert [item["role"] for item in store.list_agents(workspace_id)] == ["dev"]
+    assert store.delete_agent(workspace_id, "dev") is True
+    assert store.get_agent(workspace_id, "dev") is None
+
+    updated = store.save(
+        {
+            "id": workspace_id,
+            "name": "Renamed",
+            "project_path": str(tmp_path),
+            "command": "claude",
+            "engine": "claude",
+        }
+    )
+    assert updated["budget_tokens"] == default["budget_tokens"]
+
+    budgeted = store.set_budget(workspace_id, 500_000)
+    assert budgeted["budget_tokens"] == 500_000
+
+
 def test_workspace_store_requires_fields(tmp_path: Path) -> None:
     store = WorkspaceStore(tmp_path / "workspaces.sqlite3")
     for payload in (

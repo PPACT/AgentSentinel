@@ -135,4 +135,14 @@ describe("ChatPanel", () => {
     fireEvent.click(screen.getByTitle("停止本轮"));
     expect(onStop).toHaveBeenCalledTimes(1);
   });
+
+  it("locks the composer when the selected agent is offline", () => {
+    const { onSend } = renderPanel({ locked: true });
+    const input = screen.getByPlaceholderText("Agent 已离线，输入已禁用");
+
+    expect(screen.getByText("当前 Agent 已离线，对话已锁定")).toBeInTheDocument();
+    expect(input).toBeDisabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });

@@ -1,4 +1,4 @@
-import { Square } from "lucide-react";
+import { Lock, Square } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -16,6 +16,8 @@ interface ChatPanelProps {
   contextWarning?: string | null;
   onSend: (prompt: string) => void;
   onStop: () => void;
+  locked?: boolean;
+  lockReason?: string;
 }
 
 type ToolBlock = Extract<ChatBlock, { kind: "tool" }>;
@@ -105,6 +107,8 @@ export function ChatPanel({
   contextWarning,
   onSend,
   onStop,
+  locked = false,
+  lockReason = "当前 Agent 已离线，对话已锁定",
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const composingRef = useRef(false);
@@ -117,10 +121,10 @@ export function ChatPanel({
 
   const submit = useCallback(() => {
     const prompt = input.trim();
-    if (!prompt || busy) return;
+    if (!prompt || busy || locked) return;
     onSend(prompt);
     setInput("");
-  }, [busy, input, onSend]);
+  }, [busy, input, locked, onSend]);
 
   const rendered: ReactNode[] = [];
   let index = 0;
@@ -220,11 +224,18 @@ export function ChatPanel({
       </div>
 
       <div className="shrink-0 border-t border-zinc-800 px-3 py-2">
+        {locked ? (
+          <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+            <Lock className="size-3.5" />
+            <span>{lockReason}</span>
+          </div>
+        ) : null}
         <div className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 focus-within:border-sky-700/80">
           <textarea
-            className="h-20 w-full resize-none bg-transparent px-3 py-2 text-[13px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
-            placeholder="向 PTY 发送…"
+            className="h-20 w-full resize-none bg-transparent px-3 py-2 text-[13px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
+            placeholder={locked ? "Agent 已离线，输入已禁用" : "向 PTY 发送…"}
             value={input}
+            disabled={locked}
             onChange={(event) => setInput(event.target.value)}
             onCompositionStart={() => {
               composingRef.current = true;
@@ -256,7 +267,7 @@ export function ChatPanel({
               <Button
                 size="sm"
                 className="h-7 px-3 text-xs"
-                disabled={busy || !input.trim()}
+                disabled={busy || locked || !input.trim()}
                 onClick={submit}
               >
                 {busy ? "等待回复…" : "发送"}

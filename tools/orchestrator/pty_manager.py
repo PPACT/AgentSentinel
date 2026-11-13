@@ -44,13 +44,17 @@ class PtyManager:
         env: dict[str, str] | None = None,
         dimensions: tuple[int, int] = DEFAULT_DIMENSIONS,
         state_path: str | os.PathLike[str] | None = None,
+        role: str = "",
+        agent_id: str = "",
     ) -> None:
         self.cwd = cwd
+        self.role = role.strip()
+        self.agent_id = agent_id.strip()
         self._command_override = list(command) if command else None
         self._command_factory = command_factory or claude_command
         self._fixed_session = session_id.strip() if session_id and session_id.strip() else None
         self._command: list[str] = []
-        self.session_id = ""
+        self.session_id = self._fixed_session or ""
         self.env = env
         self.state_path = str(state_path) if state_path is not None else None
         self.rows, self.cols = dimensions
@@ -74,6 +78,8 @@ class PtyManager:
         return {
             "running": self._running,
             "pid": self._pid,
+            "role": self.role,
+            "agent_id": self.agent_id,
             "cols": self.cols,
             "rows": self.rows,
             "exit_status": self._exit_status,
@@ -199,6 +205,8 @@ class PtyManager:
             return
         payload = {
             "pid": self._pid,
+            "role": self.role,
+            "agent_id": self.agent_id,
             "session_id": self.session_id,
             "command": self._command[0] if self._command else "",
         }

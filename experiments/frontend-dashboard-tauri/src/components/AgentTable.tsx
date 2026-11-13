@@ -67,7 +67,10 @@ export function AgentTable({
               `task=${row.currentTask}`,
               `project=${row.project}`,
             ].join("\n");
-            const statusLabel = STATUS_LABEL[row.status] ?? row.status;
+            const statusLabel =
+              agent.alive === false && row.status !== "stopped"
+                ? "已停止"
+                : (STATUS_LABEL[row.status] ?? row.status);
             const selected = selectedRole === role && Boolean(role);
             return (
               <TableRow

@@ -206,11 +206,11 @@ export function discoverAgents(): Promise<DiscoverResult> {
   });
 }
 
-export async function stopRole(role: string): Promise<void> {
+export async function stopRole(role: string, agentId?: string): Promise<void> {
   await requestJSON<unknown>("/stop", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role }),
+    body: JSON.stringify({ role, agent_id: agentId ?? "" }),
   });
 }
 
@@ -260,6 +260,7 @@ export function getSessionHistory(role: string, limit = 200): Promise<SessionHis
 export interface PtyStatus {
   running: boolean;
   pid: number;
+  role?: string;
   cols: number;
   rows: number;
   exit_status: number | null;
@@ -269,32 +270,45 @@ export interface PtyStatus {
   session_id: string;
 }
 
-export function startPty(): Promise<PtyStatus> {
+export function startPty(role?: string, agentId?: string): Promise<PtyStatus> {
   return requestJSON<PtyStatus>("/pty/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify({ role: role ?? "", agent_id: agentId ?? "" }),
   });
 }
 
-export function sendPtyInput(data: string): Promise<void> {
+export function sendPtyInput(data: string, role?: string, agentId?: string): Promise<void> {
   return requestJSON<unknown>("/pty/input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data }),
+    body: JSON.stringify({ data, role: role ?? "", agent_id: agentId ?? "" }),
   }).then(() => undefined);
 }
 
-export function resizePty(cols: number, rows: number): Promise<PtyStatus> {
+export function resizePty(
+  cols: number,
+  rows: number,
+  role?: string,
+  agentId?: string,
+): Promise<PtyStatus> {
   return requestJSON<PtyStatus>("/pty/resize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cols, rows }),
+    body: JSON.stringify({ cols, rows, role: role ?? "", agent_id: agentId ?? "" }),
   });
 }
 
-export async function ptyStreamUrl(): Promise<string> {
-  return `${await daemonBase()}/pty/stream`;
+export async function ptyStreamUrl(role?: string, agentId?: string): Promise<string> {
+  return `${await daemonBase()}/pty/stream?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
+}
+
+export function stopPty(role?: string, agentId?: string): Promise<void> {
+  return requestJSON<unknown>("/pty/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role: role ?? "", agent_id: agentId ?? "" }),
+  }).then(() => undefined);
 }
 
 export interface PtyHistoryResponse {
@@ -307,12 +321,18 @@ export interface PtyHistoryResponse {
   offset: number;
 }
 
-export function getPtyHistory(): Promise<PtyHistoryResponse> {
-  return requestJSON<PtyHistoryResponse>("/pty/history");
+export function getPtyHistory(role?: string, agentId?: string): Promise<PtyHistoryResponse> {
+  return requestJSON<PtyHistoryResponse>(
+    `/pty/history?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`,
+  );
 }
 
-export async function ptyChatStreamUrl(offset: number): Promise<string> {
-  return `${await daemonBase()}/pty/chat/stream?offset=${offset}`;
+export async function ptyChatStreamUrl(
+  offset: number,
+  role?: string,
+  agentId?: string,
+): Promise<string> {
+  return `${await daemonBase()}/pty/chat/stream?offset=${offset}&role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
 }
 
 /** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */

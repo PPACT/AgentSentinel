@@ -79,3 +79,32 @@ describe("shutdownDaemon", () => {
     );
   });
 });
+
+describe("pty agent binding", () => {
+  it("carries role and agent_id in start/input/history calls", async () => {
+    vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
+    mocks.stopping.value = false;
+    mocks.fetch.mockResolvedValue({ ok: true, text: async () => "{}" });
+
+    const { getPtyHistory, sendPtyInput, startPty } = await import("./backend");
+    await startPty("doc", "id-doc");
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8954/pty/start",
+      expect.objectContaining({ body: JSON.stringify({ role: "doc", agent_id: "id-doc" }) }),
+    );
+
+    await sendPtyInput("hi", "doc", "id-doc");
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8954/pty/input",
+      expect.objectContaining({
+        body: JSON.stringify({ data: "hi", role: "doc", agent_id: "id-doc" }),
+      }),
+    );
+
+    await getPtyHistory("doc", "id-doc");
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8954/pty/history?role=doc&agent_id=id-doc",
+      expect.anything(),
+    );
+  });
+});

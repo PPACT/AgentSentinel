@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -20,6 +21,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -601,6 +603,32 @@ def _role(payload: dict[str, Any]) -> str:
     return role
 
 
+def _agent_id(record: AgentRecord) -> str:
+    """注册期唯一标识：项目 + 角色 + pid + started_at，角色重开/换进程即变化。"""
+    raw = f"{record.project}|{record.role}|{record.pid}|{record.started_at}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _optional_role(payload: dict[str, Any]) -> str:
+    value = payload.get("role")
+    return value.strip().casefold() if isinstance(value, str) else ""
+
+
+def _optional_agent_id(payload: dict[str, Any]) -> str:
+    value = payload.get("agent_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _query_role(query: dict[str, list[str]]) -> str:
+    value = (query.get("role") or [""])[0]
+    return value.strip().casefold() if isinstance(value, str) else ""
+
+
+def _query_agent_id(query: dict[str, list[str]]) -> str:
+    value = (query.get("agent_id") or [""])[0]
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _int(value: object) -> int:
     if isinstance(value, bool):
         return 0
@@ -660,14 +688,12 @@ class Daemon:
         self.wild_driver = CwdProcessDriver()
         self.chat = ChatManager(external_session=self.external_session)
         pty_override = os.environ.get("SENTINEL_PTY_COMMAND", "").strip()
-        pty_command = tuple(shlex.split(pty_override)) if pty_override else None
-        self.pty = PtyManager(
-            cwd=self.project,
-            command=pty_command,
-            session_id=os.environ.get("SENTINEL_PTY_SESSION_ID", "").strip() or None,
-            env=_pty_environment(),
-            state_path=self.home / "pty.json",
-        )
+        self._pty_command = tuple(shlex.split(pty_override)) if pty_override else None
+        self._pty_session_override = os.environ.get("SENTINEL_PTY_SESSION_ID", "").strip() or None
+        self._pty_env = _pty_environment()
+        self._pty_lock = threading.Lock()
+        self._pty_sessions: dict[str, str] = {}
+        self.pty = self._new_pty("", self._pty_session_override)
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -684,9 +710,84 @@ class Daemon:
         self.router.startup_recovery()
         self.reconcile_pending_agents()
 
+    def _new_pty(self, role: str, session_id: str | None = None, agent_id: str = "") -> PtyManager:
+        return PtyManager(
+            cwd=self.project,
+            command=self._pty_command,
+            session_id=session_id,
+            env=self._pty_env,
+            state_path=self.home / "pty.json",
+            role=role,
+            agent_id=agent_id,
+        )
+
+    def pty_for(self, role: str, agent_id: str = "") -> PtyManager:
+        """返回绑定该 Agent 的唯一实例；role 相同但 agent_id 变化视为换人。"""
+        role = role.strip()
+        agent_id = agent_id.strip()
+        with self._pty_lock:
+            if self.pty.role == role and self.pty.agent_id == agent_id:
+                return self.pty
+            self.pty.stop()
+            session = self._pty_sessions.get(role)
+            if not session:
+                session = (
+                    self._pty_session_override
+                    if role == "" and self._pty_session_override
+                    else str(uuid.uuid4())
+                )
+                self._pty_sessions[role] = session
+            self.pty = self._new_pty(role, session, agent_id)
+            return self.pty
+
+    def stop_pty_for_role(self, role: str, agent_id: str = "") -> bool:
+        role = role.strip()
+        agent_id = agent_id.strip()
+        with self._pty_lock:
+            if self.pty.role != role:
+                return False
+            if agent_id and self.pty.agent_id != agent_id:
+                # 旧句柄（同 role、旧 agent_id）不得误杀新 Agent 的 PTY。
+                return False
+            if self.pty.status().get("running"):
+                self.pty.stop()
+            return True
+
+    def check_agent_id(self, role: str, agent_id: str) -> bool:
+        role = role.strip()
+        agent_id = agent_id.strip()
+        if not role or not agent_id:
+            return False
+        record = self.registry.get(role)
+        return record is not None and _agent_id(record) == agent_id
+
+    def role_online(self, role: str) -> bool:
+        role = role.strip()
+        if not role:
+            return True
+        record = self.registry.get(role)
+        if record is None or record.status in ("stopped", "lost", "failed", "pending"):
+            return False
+        return process_alive(record.pid)
+
+    def enforce_pty_binding(self) -> bool:
+        """PTY 绑定的 Agent 离线/停止/被同角色新注册顶替时，立即回收 PTY 与 claude。"""
+        role = self.pty.role
+        if not role:
+            return False
+        record = self.registry.get(role)
+        if record is None:
+            return self.stop_pty_for_role(role)
+        if record.status in ("stopped", "lost", "failed", "pending"):
+            return self.stop_pty_for_role(role)
+        if not process_alive(record.pid) or _agent_id(record) != self.pty.agent_id:
+            return self.stop_pty_for_role(role)
+        return False
+
     def _agent_dict(self, record: AgentRecord) -> dict[str, Any]:
         data = record.to_dict()
         data["alive"] = process_alive(record.pid)
+        data["agent_id"] = _agent_id(record)
         data["external_session_id"] = self.external_session(record.role)
         return data
 
@@ -990,6 +1091,7 @@ class Daemon:
                 changed = self.registry.set_status(record.role, "registered") or changed
             elif not alive and record.status != "stopped":
                 changed = self.registry.set_status(record.role, "stopped") or changed
+                self.stop_pty_for_role(record.role)
         if changed:
             self._publish()
         agents = self.registry.list()
@@ -1127,7 +1229,17 @@ class Daemon:
         record = self.registry.get(role)
         if record is None:
             return 404, {"error": f"unknown role: {role}"}
+        agent_id = _str(payload.get("agent_id"))
+        if agent_id and _agent_id(record) != agent_id:
+            # 旧前端句柄（同 role、旧 agent_id）不得误杀新注册的同名 Agent。
+            return 409, {
+                "error": f"stale agent id for {role}",
+                "reason": "stale_agent",
+                "agent": self._agent_dict(record),
+            }
         if not record.job_id:
+            # 外部会话不归中控杀，但必须释放绑定在它名下的 PTY（工作台幽灵终端）。
+            self.stop_pty_for_role(role, agent_id)
             return 409, {
                 "error": f"external agent cannot be stopped: {role}",
                 "reason": "external_agent",
@@ -1137,6 +1249,7 @@ class Daemon:
             reclaim = self.launcher.stop(role)
         except KeyError:
             if process_alive(record.pid):
+                self.stop_pty_for_role(role, agent_id)
                 return 409, {
                     "error": f"agent is not managed by this daemon: {role}",
                     "reason": "external_agent",
@@ -1144,6 +1257,7 @@ class Daemon:
                 }
             reclaim = {"role": role, "note": "worker already exited"}
         self.registry.set_status(role, "stopped")
+        self.stop_pty_for_role(role, agent_id)
         self._publish()
         return 200, {"stopped": True, "role": role, "reclaim": reclaim}
 
@@ -1225,8 +1339,12 @@ class Daemon:
         while not self._stop_monitor.wait(interval):
             try:
                 changed = bool(self.router.check_timeouts(self.ack_timeout))
-                changed = bool(self.router.check_heartbeats(self.lost_seconds)) or changed
+                lost = self.router.check_heartbeats(self.lost_seconds)
+                for action in lost:
+                    self.stop_pty_for_role(str(action.get("role", "")))
+                changed = bool(lost) or changed
                 changed = bool(self.router.check_task_budgets()) or changed
+                changed = self.enforce_pty_binding() or changed
                 now = time.monotonic()
                 if now - self._last_watchdog >= self.watchdog_seconds:
                     self._last_watchdog = now
@@ -1391,9 +1509,38 @@ class _Handler(BaseHTTPRequestHandler):
             # 客户端已断开（常见于前端取消/刷新），不是 daemon 错误。
             return
 
-    def _stream_pty_chat(self, offset: int) -> None:
+    def _agent_guard(self, role: str, agent_id: str) -> dict[str, Any] | None:
+        """角色请求必须携带注册期唯一 agent_id；空 role 保留旧版全局行为。"""
+        if not role:
+            return None
+        if not agent_id:
+            return {"error": "agent_id is required", "reason": "agent_id_required"}
+        if not self.daemon.check_agent_id(role, agent_id):
+            return {"error": f"stale agent id for {role}", "reason": "stale_agent"}
+        if not self.daemon.role_online(role):
+            return {"error": f"agent offline: {role}", "reason": "agent_offline"}
+        return None
+
+    def _pty_role_guard(self, role: str, agent_id: str) -> dict[str, Any] | None:
+        """输入/缩放必须命中当前绑定的角色与 agent_id；空 role 保留旧版全局行为。"""
+        if not role:
+            return None
+        error = self._agent_guard(role, agent_id)
+        if error is not None:
+            return error
+        bound = self.daemon.pty
+        if bound.role != role or bound.agent_id != agent_id:
+            return {
+                "error": f"pty bound to {bound.role or 'global'}/{bound.agent_id or '-'}",
+                "reason": "role_mismatch",
+                "bound_role": bound.role,
+                "bound_agent_id": bound.agent_id,
+            }
+        return None
+
+    def _stream_pty_chat(self, offset: int, role: str = "", agent_id: str = "") -> None:
         """JSONL 旁路：只读轮询 PTY 会话 transcript，增量推送问答。"""
-        pty = self.daemon.pty
+        pty = self.daemon.pty_for(role, agent_id)
         try:
             pty.ensure_started()
         except (OSError, RuntimeError) as exc:
@@ -1442,8 +1589,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             time.sleep(0.6)
 
-    def _stream_pty(self) -> None:
-        pty = self.daemon.pty
+    def _stream_pty(self, role: str = "", agent_id: str = "") -> None:
+        pty = self.daemon.pty_for(role, agent_id)
         try:
             pty.ensure_started()
         except (OSError, RuntimeError) as exc:
@@ -1767,12 +1914,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if method == "GET" and path == "/pty/history":
+            query = parse_qs(urlparse(self.path).query)
+            role = _query_role(query)
+            agent_id = _query_agent_id(query)
+            error = self._agent_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            pty = self.daemon.pty_for(role, agent_id)
             try:
-                self.daemon.pty.ensure_started()
+                pty.ensure_started()
             except (OSError, RuntimeError) as exc:
                 self._send(500, {"error": f"pty start failed: {exc}"})
                 return
-            session = self.daemon.pty.session_id
+            session = pty.session_id
             history = read_history(self.daemon.project, session)
             if history is None:
                 history = {
@@ -1787,19 +1942,39 @@ class _Handler(BaseHTTPRequestHandler):
 
         if method == "GET" and path == "/pty/chat/stream":
             query = parse_qs(urlparse(self.path).query)
+            role = _query_role(query)
+            agent_id = _query_agent_id(query)
             try:
                 offset = max(0, int((query.get("offset") or ["0"])[0]))
             except ValueError:
                 offset = 0
-            self._stream_pty_chat(offset)
+            error = self._agent_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            self._stream_pty_chat(offset, role, agent_id)
             return
 
         if method == "GET" and path == "/pty/status":
-            self._send(200, self.daemon.pty.status())
+            query = parse_qs(urlparse(self.path).query)
+            role = _query_role(query)
+            agent_id = _query_agent_id(query)
+            pty_status = self.daemon.pty.status()
+            if role:
+                pty_status["role_online"] = self.daemon.role_online(role)
+                pty_status["agent_match"] = self.daemon.check_agent_id(role, agent_id)
+            self._send(200, pty_status)
             return
 
         if method == "GET" and path == "/pty/stream":
-            self._stream_pty()
+            query = parse_qs(urlparse(self.path).query)
+            role = _query_role(query)
+            agent_id = _query_agent_id(query)
+            error = self._agent_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            self._stream_pty(role, agent_id)
             return
 
         if method == "GET" and path == "/events":
@@ -1832,8 +2007,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if method == "POST" and path == "/pty/start":
+            role = _optional_role(payload)
+            agent_id = _optional_agent_id(payload)
+            error = self._agent_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
             try:
-                self._send(200, self.daemon.pty.start())
+                self._send(200, self.daemon.pty_for(role, agent_id).start())
             except (OSError, RuntimeError) as exc:
                 self._send(500, {"error": str(exc)})
             return
@@ -1842,6 +2023,12 @@ class _Handler(BaseHTTPRequestHandler):
             data = payload.get("data")
             if not isinstance(data, str):
                 self._send(400, {"error": "data is required"})
+                return
+            role = _optional_role(payload)
+            agent_id = _optional_agent_id(payload)
+            error = self._pty_role_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
             try:
                 ok = self.daemon.pty.write(data)
@@ -1861,10 +2048,25 @@ class _Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._send(400, {"error": "invalid cols/rows"})
                 return
+            role = _optional_role(payload)
+            agent_id = _optional_agent_id(payload)
+            error = self._pty_role_guard(role, agent_id)
+            if error is not None:
+                self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
             self._send(200, self.daemon.pty.resize(cols, rows))
             return
 
         if method == "POST" and path == "/pty/stop":
+            role = _optional_role(payload)
+            agent_id = _optional_agent_id(payload)
+            if role and not agent_id:
+                self._send(400, {"error": "agent_id is required", "reason": "agent_id_required"})
+                return
+            if role:
+                stopped = self.daemon.stop_pty_for_role(role, agent_id)
+                self._send(200, {"stopped": stopped, "role": role, "agent_id": agent_id})
+                return
             self._send(200, self.daemon.pty.stop())
             return
 

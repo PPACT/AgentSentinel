@@ -1,5 +1,6 @@
 export interface Agent {
   role?: string;
+  agent_id?: string;
   pid?: number;
   pgid?: number;
   job_id?: string;

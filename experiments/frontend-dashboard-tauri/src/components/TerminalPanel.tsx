@@ -1,6 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { Lock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ptyStreamUrl, resizePty, sendPtyInput, startPty, streamFetch } from "@/lib/backend";
@@ -16,13 +17,28 @@ const STATE_LABEL: Record<PtyState, string> = {
   error: "连接失败",
 };
 
-/** 原生 PTY 终端：xterm.js 渲染 ANSI，输入直接写入同一 PTY。 */
-export function TerminalPanel() {
+interface TerminalPanelProps {
+  role?: string | null;
+  agentId?: string | null;
+  locked?: boolean;
+  lockReason?: string;
+}
+
+/** 原生 PTY 终端：xterm.js 渲染 ANSI；只允许写入当前选中且在线 Agent 的 PTY。 */
+export function TerminalPanel({
+  role = null,
+  agentId = null,
+  locked = false,
+  lockReason = "当前 Agent 已离线，终端已锁定",
+}: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<PtyState>("connecting");
   const [info, setInfo] = useState<{ command: string; sessionId: string } | null>(null);
 
   useEffect(() => {
+    if (!role || !agentId || locked) {
+      return;
+    }
     const container = containerRef.current;
     if (!container) return;
     const term = new Terminal({
@@ -55,7 +71,7 @@ export function TerminalPanel() {
 
     const controller = new AbortController();
     const dataDisposable = term.onData((data) => {
-      void sendPtyInput(data).catch(() => undefined);
+      void sendPtyInput(data, role, agentId).catch(() => undefined);
     });
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,7 +83,7 @@ export function TerminalPanel() {
         } catch {
           return;
         }
-        void resizePty(term.cols, term.rows).catch(() => undefined);
+        void resizePty(term.cols, term.rows, role, agentId).catch(() => undefined);
       }, 150);
     };
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(applySize);
@@ -76,9 +92,9 @@ export function TerminalPanel() {
     const connect = async () => {
       try {
         setState("connecting");
-        const status = await startPty();
+        const status = await startPty(role, agentId);
         setInfo({ command: status.command, sessionId: status.session_id });
-        const response = await streamFetch(await ptyStreamUrl(), {
+        const response = await streamFetch(await ptyStreamUrl(role, agentId), {
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
         });
@@ -113,32 +129,52 @@ export function TerminalPanel() {
       }
       term.dispose();
     };
-  }, []);
+  }, [role, agentId, locked]);
+
+  const displayState: PtyState = !role || !agentId || locked ? "exited" : state;
+  const displayInfo = !role || !agentId || locked ? null : info;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col bg-[#09090b]">
+    <section className="relative flex h-full min-h-0 min-w-0 flex-col bg-[#09090b]">
       <div className="flex h-8 shrink-0 items-center gap-2 border-x border-b border-zinc-800 bg-zinc-950 px-3 text-[11px] text-zinc-500">
         <span
           className={`size-1.5 rounded-full ${
-            state === "running"
-              ? "bg-emerald-400"
-              : state === "error"
-                ? "bg-red-400"
-                : "bg-amber-400"
+            locked
+              ? "bg-zinc-500"
+              : displayState === "running"
+                ? "bg-emerald-400"
+                : displayState === "error"
+                  ? "bg-red-400"
+                  : "bg-amber-400"
           }`}
         />
         <span className="text-zinc-300">Terminal</span>
         <span className="font-mono text-zinc-600">
-          {info ? `${info.command} · PTY` : "claude · PTY"}
+          {role ? `${role} · ` : ""}
+          {displayInfo ? `${displayInfo.command} · PTY` : "claude · PTY"}
         </span>
-        {info?.sessionId ? (
-          <span className="truncate font-mono text-[10px] text-zinc-700" title={info.sessionId}>
-            session {info.sessionId.slice(0, 8)}
+        {displayInfo?.sessionId ? (
+          <span
+            className="truncate font-mono text-[10px] text-zinc-700"
+            title={displayInfo.sessionId}
+          >
+            session {displayInfo.sessionId.slice(0, 8)}
           </span>
         ) : null}
-        <span className="ml-auto font-mono text-zinc-600">{STATE_LABEL[state]}</span>
+        <span className="ml-auto font-mono text-zinc-600">
+          {locked ? "已锁定" : STATE_LABEL[displayState]}
+        </span>
       </div>
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-2 py-1" />
+      {locked ? (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-zinc-950/85 backdrop-blur-sm">
+          <Lock className="size-5 text-amber-400/80" />
+          <span className="text-xs text-zinc-300">{lockReason}</span>
+          <span className="font-mono text-[10px] text-zinc-600">
+            {role ? `role=${role}` : "未选择 Agent"} · 输入已禁用
+          </span>
+        </div>
+      ) : null}
     </section>
   );
 }

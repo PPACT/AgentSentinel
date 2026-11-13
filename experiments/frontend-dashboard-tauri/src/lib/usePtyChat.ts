@@ -25,9 +25,14 @@ const BUSY_TIMEOUT_MS = 180_000;
 
 /**
  * 对话页唯一数据源：JSONL 旁路。输入直接写入同一 PTY 的 stdin；
- * 终端/对话共享一个 claude 会话，消息从本地 transcript 增量读取。
+ * 终端/对话共享一个绑定当前选中 Agent 的 claude 会话，消息从本地 transcript 增量读取。
+ * role 为空或 Agent 不在线时不上线、不启动 PTY。
  */
-export function usePtyChat(): PtyChatState {
+export function usePtyChat(
+  role: string | null,
+  agentId: string | null,
+  enabled: boolean,
+): PtyChatState {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [contextTokens, setContextTokens] = useState(0);
@@ -68,16 +73,22 @@ export function usePtyChat(): PtyChatState {
   );
 
   useEffect(() => {
+    if (!role || !agentId || !enabled) {
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     const connect = async () => {
+      setEntries([]);
+      setSessionId(null);
+      setContextTokens(0);
       try {
-        const history = await getPtyHistory();
+        const history = await getPtyHistory(role, agentId);
         if (cancelled) return;
         setSessionId(history.session_id);
         setContextTokens(history.context_tokens);
         setEntries(toEntries(history.messages));
-        const response = await streamFetch(await ptyChatStreamUrl(history.offset), {
+        const response = await streamFetch(await ptyChatStreamUrl(history.offset, role, agentId), {
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
         });
@@ -101,34 +112,47 @@ export function usePtyChat(): PtyChatState {
       cancelled = true;
       controller.abort();
     };
-  }, [appendMessages, toEntries]);
+  }, [appendMessages, toEntries, role, agentId, enabled]);
 
-  const send = useCallback(async (prompt: string) => {
-    const text = prompt.trim();
-    if (!text) return;
-    setBusy(true);
-    setError(null);
-    if (busyTimer.current) clearTimeout(busyTimer.current);
-    busyTimer.current = setTimeout(() => setBusy(false), BUSY_TIMEOUT_MS);
-    try {
-      const status = await startPty();
-      setSessionId(status.session_id);
-      await sendPtyInput(`${text}\r`);
-    } catch (err) {
-      setBusy(false);
-      setError(errorMessage(err));
-    }
-  }, []);
+  const send = useCallback(
+    async (prompt: string) => {
+      const text = prompt.trim();
+      if (!text || !role || !agentId || !enabled) return;
+      setBusy(true);
+      setError(null);
+      if (busyTimer.current) clearTimeout(busyTimer.current);
+      busyTimer.current = setTimeout(() => setBusy(false), BUSY_TIMEOUT_MS);
+      try {
+        const status = await startPty(role, agentId);
+        setSessionId(status.session_id);
+        await sendPtyInput(`${text}\r`, role, agentId);
+      } catch (err) {
+        setBusy(false);
+        setError(errorMessage(err));
+      }
+    },
+    [role, agentId, enabled],
+  );
 
   const stop = useCallback(async () => {
     setBusy(false);
     if (busyTimer.current) clearTimeout(busyTimer.current);
+    if (!role || !agentId) return;
     try {
-      await sendPtyInput("\u0003");
+      await sendPtyInput("\u0003", role, agentId);
     } catch {
       // PTY 已退出时忽略
     }
-  }, []);
+  }, [role, agentId]);
 
-  return { entries, busy, contextTokens, sessionId, error, send, stop };
+  const active = Boolean(role) && Boolean(agentId) && enabled;
+  return {
+    entries: active ? entries : [],
+    busy: active ? busy : false,
+    contextTokens: active ? contextTokens : 0,
+    sessionId: active ? sessionId : null,
+    error: active ? error : null,
+    send,
+    stop,
+  };
 }

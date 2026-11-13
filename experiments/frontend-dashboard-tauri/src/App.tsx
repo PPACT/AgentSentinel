@@ -26,6 +26,7 @@ import {
   getTasks,
   logStreamUrl,
   shutdownDaemon,
+  stopPty,
   stopRole,
   streamFetch,
 } from "@/lib/backend";
@@ -44,6 +45,11 @@ const TerminalPanel = lazy(() =>
   import("@/components/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
 );
 
+function isAgentOnline(agent: Agent | undefined): boolean {
+  if (!agent || !agent.alive || !agent.agent_id) return false;
+  return !["stopped", "lost", "failed", "pending"].includes(agent.status ?? "");
+}
+
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -54,7 +60,20 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [centerTab, setCenterTab] = useState<"chat" | "progress" | "terminal">("chat");
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
-  const ptyChat = usePtyChat();
+  const fallbackRole = agents.find((agent) => isAgentOnline(agent) && agent.role)?.role ?? null;
+  const selectedExists = agents.some((agent) => agent.role === selectedRole);
+  const activeRole =
+    selectedRole === null || (agents.length > 0 && !selectedExists) ? fallbackRole : selectedRole;
+  const selectedAgent = agents.find((agent) => agent.role === activeRole);
+  const selectedAgentId = selectedAgent?.agent_id ?? null;
+  const selectedOnline = isAgentOnline(selectedAgent);
+  const terminalLockReason = activeRole
+    ? "当前 Agent 已离线，终端已锁定"
+    : "请先在左侧选择在线 Agent";
+  const chatLockReason = activeRole
+    ? "当前 Agent 已离线，对话已锁定"
+    : "请先在左侧选择在线 Agent";
+  const ptyChat = usePtyChat(activeRole, selectedAgentId, selectedOnline);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -252,6 +271,17 @@ export default function App() {
     };
   }, [appendLog]);
 
+  // 切换 Agent 时释放上一个角色的 PTY；必须带旧 agent_id，避免误杀同名新 Agent。
+  const previousRoleRef = useRef<{ role: string; agentId: string } | null>(null);
+  useEffect(() => {
+    const previous = previousRoleRef.current;
+    previousRoleRef.current =
+      activeRole && selectedAgentId ? { role: activeRole, agentId: selectedAgentId } : null;
+    if (previous && (previous.role !== activeRole || previous.agentId !== selectedAgentId)) {
+      void stopPty(previous.role, previous.agentId).catch(() => undefined);
+    }
+  }, [activeRole, selectedAgentId]);
+
   const handleStop = useCallback(
     async (role: string) => {
       setPendingRole(role);
@@ -260,7 +290,8 @@ export default function App() {
       );
       appendLog("info", `正在停止 ${role}…`);
       try {
-        await stopRole(role);
+        const agentId = agents.find((agent) => agent.role === role)?.agent_id;
+        await stopRole(role, agentId);
         appendLog("info", `已停止 ${role}`);
         setError(null);
         await refreshTasks();
@@ -277,7 +308,7 @@ export default function App() {
         setPendingRole(null);
       }
     },
-    [appendLog, applySnapshot, refreshTasks],
+    [agents, appendLog, applySnapshot, refreshTasks],
   );
 
   const handleDiscover = useCallback(async () => {
@@ -358,7 +389,7 @@ export default function App() {
       onStop={(role) => {
         void handleStop(role);
       }}
-      selectedRole={selectedRole}
+      selectedRole={activeRole}
       onSelectRole={setSelectedRole}
       wild={wild}
       wildOpen={wildOpen}
@@ -452,6 +483,8 @@ export default function App() {
                   busy={ptyChat.busy}
                   sessionId={ptyChat.sessionId}
                   contextWarning={contextWarning}
+                  locked={!selectedOnline}
+                  lockReason={chatLockReason}
                   onSend={(prompt) => {
                     void ptyChat.send(prompt);
                   }}
@@ -461,7 +494,10 @@ export default function App() {
                 />
               </Suspense>
             ) : centerTab === "progress" ? (
-              <ProgressPanel role={ptyChat.sessionId ? "PTY" : null} entries={ptyChat.entries} />
+              <ProgressPanel
+                role={selectedOnline && ptyChat.sessionId ? activeRole : null}
+                entries={ptyChat.entries}
+              />
             ) : (
               <Suspense
                 fallback={
@@ -470,7 +506,13 @@ export default function App() {
                   </div>
                 }
               >
-                <TerminalPanel />
+                <TerminalPanel
+                  key={activeRole ?? "none"}
+                  role={activeRole}
+                  agentId={selectedAgentId}
+                  locked={!selectedOnline}
+                  lockReason={terminalLockReason}
+                />
               </Suspense>
             )}
           </div>

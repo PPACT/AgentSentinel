@@ -16,6 +16,7 @@ import { ProgressPanel } from "@/components/ProgressPanel";
 import { TaskDetailsDialog } from "@/components/TaskDetailsDialog";
 import { TasksPanel } from "@/components/TasksPanel";
 import { TopBar } from "@/components/TopBar";
+import { WorkspaceDialog } from "@/components/WorkspaceDialog";
 import {
   cleanupWildProcess,
   discoverAgents,
@@ -24,6 +25,7 @@ import {
   forceKillPid,
   getStatus,
   getTasks,
+  getWorkspaces,
   logStreamUrl,
   shutdownDaemon,
   stopPty,
@@ -33,8 +35,17 @@ import {
 import { errorMessage, formatTokenCount } from "@/lib/format";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
-import type { Agent, ConnectionState, DaemonInfo, StatusSnapshot, Task, WildProcess } from "@/lib/types";
-import { useMediaQuery } from "@/lib/useMediaQuery";
+import type {
+  Agent,
+  ConnectionState,
+  DaemonInfo,
+  EngineOption,
+  StatusSnapshot,
+  Task,
+  WildProcess,
+  Workspace,
+  WorkspacesResponse,
+} from "@/lib/types";import { useMediaQuery } from "@/lib/useMediaQuery";
 import { usePtyChat } from "@/lib/usePtyChat";
 
 // Markdown/高亮体积较大，聊天面板独立分包；主界面先渲染，面板异步加载。
@@ -60,6 +71,11 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [centerTab, setCenterTab] = useState<"chat" | "progress" | "terminal">("chat");
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [engines, setEngines] = useState<EngineOption[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
   const fallbackRole = agents.find((agent) => isAgentOnline(agent) && agent.role)?.role ?? null;
   const selectedExists = agents.some((agent) => agent.role === selectedRole);
   const activeRole =
@@ -67,13 +83,21 @@ export default function App() {
   const selectedAgent = agents.find((agent) => agent.role === activeRole);
   const selectedAgentId = selectedAgent?.agent_id ?? null;
   const selectedOnline = isAgentOnline(selectedAgent);
+  const chatSupported =
+    activeWorkspace === null ? false : (activeWorkspace.capabilities?.chat ?? true);
+  const effectiveCenterTab = chatSupported ? centerTab : "terminal";
   const terminalLockReason = activeRole
     ? "当前 Agent 已离线，终端已锁定"
     : "请先在左侧选择在线 Agent";
   const chatLockReason = activeRole
     ? "当前 Agent 已离线，对话已锁定"
     : "请先在左侧选择在线 Agent";
-  const ptyChat = usePtyChat(activeRole, selectedAgentId, selectedOnline);
+  const ptyChat = usePtyChat(
+    activeRole,
+    selectedAgentId,
+    selectedOnline && chatSupported,
+    workspaceEpoch,
+  );
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [cleaningPid, setCleaningPid] = useState<number | null>(null);
@@ -103,6 +127,36 @@ export default function App() {
     setDaemon(snapshot.daemon);
     setAgents(Array.isArray(snapshot.agents) ? snapshot.agents : []);
   }, []);
+
+  const refreshWorkspaces = useCallback(async () => {
+    try {
+      const data = await getWorkspaces();
+      setWorkspaces(data.workspaces ?? []);
+      setEngines(data.engines ?? []);
+      setActiveWorkspace(
+        data.workspaces.find((workspace) => workspace.id === data.active_id) ??
+          data.workspaces[0] ??
+          null,
+      );
+    } catch (err) {
+      appendLog("warn", `读取工作区失败：${errorMessage(err)}`);
+    }
+  }, [appendLog]);
+
+  const handleWorkspacesChanged = useCallback(
+    (data: WorkspacesResponse) => {
+      setWorkspaces(data.workspaces ?? []);
+      setEngines(data.engines ?? []);
+      const active =
+        data.workspaces.find((workspace) => workspace.id === data.active_id) ??
+        data.workspaces[0] ??
+        null;
+      setActiveWorkspace(active);
+      setWorkspaceEpoch((value) => value + 1);
+      appendLog("info", `工作区：${active?.name ?? "未选择"}`);
+    },
+    [appendLog],
+  );
 
   const refreshTasks = useCallback(async () => {
     try {
@@ -207,6 +261,7 @@ export default function App() {
         await ensureDaemon();
         if (cancelled) return;
         appendLog("info", "daemon 已就绪，加载状态…");
+        await refreshWorkspaces();
         await refreshAll();
         startStream();
         startLogStream();
@@ -233,7 +288,7 @@ export default function App() {
       logAbortRef.current?.abort();
       if (tasksTimerRef.current !== null) clearTimeout(tasksTimerRef.current);
     };
-  }, [appendLog, refreshAll, startLogStream, startStream]);
+  }, [appendLog, refreshAll, refreshWorkspaces, startLogStream, startStream]);
 
   // 点击窗口 X：先让 daemon 优雅退出（Job Object 回收 PTY/claude），确认后再销毁窗口。
   useEffect(() => {
@@ -419,6 +474,8 @@ export default function App() {
         onToggleAgents={() => setAgentsDrawer((value) => !value)}
         showTasksToggle={narrowTasks}
         onToggleTasks={() => setTasksDrawer((value) => !value)}
+        workspaceName={activeWorkspace?.name}
+        onOpenWorkspaces={() => setWorkspaceDialogOpen(true)}
       />
       {error ? (
         <div className="border-b border-red-500/30 bg-red-500/10 px-5 py-2 text-sm text-red-300">
@@ -441,17 +498,19 @@ export default function App() {
                 { key: "progress", label: "进度记录", icon: ListChecks },
                 { key: "terminal", label: "原生终端", icon: Terminal },
               ] as const
-            ).map((tab) => {
+            )
+              .filter((tab) => chatSupported || tab.key === "terminal")
+              .map((tab) => {
               const Icon = tab.icon;
               return (
                 <button
                   key={tab.key}
                   type="button"
                   role="tab"
-                  aria-selected={centerTab === tab.key}
+                  aria-selected={effectiveCenterTab === tab.key}
                   onClick={() => setCenterTab(tab.key)}
                   className={`flex h-7 items-center gap-1.5 rounded px-3 text-[11px] transition-colors ${
-                    centerTab === tab.key
+                    effectiveCenterTab === tab.key
                       ? "bg-zinc-800 text-zinc-100"
                       : "text-zinc-500 hover:text-zinc-300"
                   }`}
@@ -462,15 +521,15 @@ export default function App() {
               );
             })}
             <span className="ml-auto pr-1 font-mono text-[10px] text-zinc-600">
-              {centerTab === "terminal"
+              {effectiveCenterTab === "terminal"
                 ? "PTY 常驻 · 原始 ANSI"
-                : centerTab === "progress"
+                : effectiveCenterTab === "progress"
                   ? "工具时间轴 · 零 token"
                   : "JSONL 旁路 · 零 token"}
             </span>
           </div>
           <div className="min-h-0 flex-1">
-            {centerTab === "chat" ? (
+            {effectiveCenterTab === "chat" ? (
               <Suspense
                 fallback={
                   <div className="flex h-full items-center justify-center text-xs text-zinc-600">
@@ -497,7 +556,7 @@ export default function App() {
                   }}
                 />
               </Suspense>
-            ) : centerTab === "progress" ? (
+            ) : effectiveCenterTab === "progress" ? (
               <ProgressPanel
                 role={selectedOnline && ptyChat.sessionId ? activeRole : null}
                 entries={ptyChat.entries}
@@ -511,9 +570,10 @@ export default function App() {
                 }
               >
                 <TerminalPanel
-                  key={activeRole ?? "none"}
+                  key={`${activeWorkspace?.id ?? "none"}:${activeRole ?? "none"}:${workspaceEpoch}`}
                   role={activeRole}
                   agentId={selectedAgentId}
+                  workspaceName={activeWorkspace?.name ?? null}
                   locked={!selectedOnline}
                   lockReason={terminalLockReason}
                 />
@@ -618,6 +678,16 @@ export default function App() {
           if (!open) setSelectedTask(null);
         }}
       />
+      {workspaceDialogOpen ? (
+        <WorkspaceDialog
+          open={workspaceDialogOpen}
+          onOpenChange={setWorkspaceDialogOpen}
+          workspaces={workspaces}
+          engines={engines}
+          activeId={activeWorkspace?.id ?? null}
+          onRefresh={handleWorkspacesChanged}
+        />
+      ) : null}
     </div>
   );
 }

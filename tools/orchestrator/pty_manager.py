@@ -56,10 +56,12 @@ class PtyManager:
         state_path: str | os.PathLike[str] | None = None,
         role: str = "",
         agent_id: str = "",
+        engine: str = "claude",
     ) -> None:
         self.cwd = cwd
         self.role = role.strip()
         self.agent_id = agent_id.strip()
+        self.engine = engine.strip() or "claude"
         self._command_override = list(command) if command else None
         self._command_factory = command_factory or claude_command
         self._fixed_session = session_id.strip() if session_id and session_id.strip() else None
@@ -93,6 +95,7 @@ class PtyManager:
             "pid": self._pid,
             "role": self.role,
             "agent_id": self.agent_id,
+            "engine": self.engine,
             "cols": self.cols,
             "rows": self.rows,
             "exit_status": self._exit_status,
@@ -227,6 +230,7 @@ class PtyManager:
             "pid": self._pid,
             "role": self.role,
             "agent_id": self.agent_id,
+            "engine": self.engine,
             "session_id": self.session_id,
             "command": self._command[0] if self._command else "",
         }

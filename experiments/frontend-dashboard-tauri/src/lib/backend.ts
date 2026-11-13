@@ -3,7 +3,15 @@ import { join } from "@tauri-apps/api/path";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
-import type { Agent, StatusSnapshot, TaskList, TokenUsage, WildProcess } from "./types";
+import type {
+  Agent,
+  PreflightResult,
+  StatusSnapshot,
+  TaskList,
+  TokenUsage,
+  WildProcess,
+  WorkspacesResponse,
+} from "./types";
 import type { ChatBlock } from "./chat";
 import { errorMessage } from "./format";
 
@@ -211,6 +219,43 @@ export async function stopRole(role: string, agentId?: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role, agent_id: agentId ?? "" }),
+  });
+}
+
+export function getWorkspaces(): Promise<WorkspacesResponse> {
+  return requestJSON<WorkspacesResponse>("/workspaces");
+}
+
+function workspaceAction(path: string, body: Record<string, unknown>): Promise<WorkspacesResponse> {
+  return requestJSON<WorkspacesResponse>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function saveWorkspace(
+  payload: Record<string, unknown>,
+): Promise<WorkspacesResponse> {
+  return workspaceAction("/workspaces/save", payload);
+}
+
+export function deleteWorkspace(id: number): Promise<WorkspacesResponse> {
+  return workspaceAction("/workspaces/delete", { id });
+}
+
+export function activateWorkspace(id: number): Promise<WorkspacesResponse> {
+  return workspaceAction("/workspaces/activate", { id });
+}
+
+export function preflightWorkspace(
+  command: string,
+  projectPath: string,
+): Promise<PreflightResult> {
+  return requestJSON<PreflightResult>("/workspaces/preflight", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command, project_path: projectPath }),
   });
 }
 

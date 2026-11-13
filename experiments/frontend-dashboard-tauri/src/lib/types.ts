@@ -1,3 +1,53 @@
+export interface EngineCapabilities {
+  chat: boolean;
+  usage: boolean;
+  clear: boolean;
+}
+
+export interface PreflightResult {
+  ok: boolean;
+  reason?: string;
+  error?: string;
+  command_path?: string;
+  executable?: string;
+  project_path?: string;
+}
+
+export interface Workspace {
+  id: number;
+  name: string;
+  project_path: string;
+  command: string;
+  engine: string;
+  engine_label?: string;
+  wake_prompt: string;
+  wake_prompt_file: string;
+  wake_prompt_source?: "text" | "file";
+  budget_tokens: number;
+  active: number;
+  capabilities?: EngineCapabilities;
+  preflight?: PreflightResult;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface EngineOption {
+  id: string;
+  label: string;
+  default_command: string;
+  chat: boolean;
+  usage: boolean;
+  clear: boolean;
+}
+
+export interface WorkspacesResponse {
+  workspaces: Workspace[];
+  active_id: number | null;
+  active_preflight?: PreflightResult;
+  engines: EngineOption[];
+  workspace?: Workspace;
+}
+
 export interface PtyNotice {
   seq: number;
   kind: string;

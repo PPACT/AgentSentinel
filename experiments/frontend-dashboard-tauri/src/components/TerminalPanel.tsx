@@ -21,6 +21,7 @@ const STATE_LABEL: Record<PtyState, string> = {
 interface TerminalPanelProps {
   role?: string | null;
   agentId?: string | null;
+  workspaceName?: string | null;
   locked?: boolean;
   lockReason?: string;
 }
@@ -29,6 +30,7 @@ interface TerminalPanelProps {
 export function TerminalPanel({
   role = null,
   agentId = null,
+  workspaceName = null,
   locked = false,
   lockReason = "当前 Agent 已离线，终端已锁定",
 }: TerminalPanelProps) {
@@ -159,6 +161,7 @@ export function TerminalPanel({
         />
         <span className="text-zinc-300">Terminal</span>
         <span className="font-mono text-zinc-600">
+          {workspaceName ? `${workspaceName} · ` : ""}
           {role ? `${role} · ` : ""}
           {displayInfo ? `${displayInfo.command} · PTY` : "claude · PTY"}
         </span>

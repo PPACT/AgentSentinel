@@ -53,6 +53,7 @@ export function usePtyChat(
   role: string | null,
   agentId: string | null,
   enabled: boolean,
+  generation = 0,
 ): PtyChatState {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -104,7 +105,7 @@ export function usePtyChat(
     }
     const controller = new AbortController();
     let cancelled = false;
-    const bindKey = `${role}:${agentId}`;
+    const bindKey = `${role}:${agentId}:${generation}`;
     const connect = async () => {
       if (lastBindRef.current !== bindKey) {
         lastBindRef.current = bindKey;
@@ -151,7 +152,7 @@ export function usePtyChat(
       cancelled = true;
       controller.abort();
     };
-  }, [appendMessages, toEntries, role, agentId, enabled, epoch]);
+  }, [appendMessages, toEntries, role, agentId, enabled, epoch, generation]);
 
   const send = useCallback(
     async (prompt: string) => {

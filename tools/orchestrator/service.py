@@ -34,6 +34,7 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 from tools.orchestrator.chat import PROMPT_MAX_CHARS, ChatBusy, ChatManager
 from tools.orchestrator.drivers.cwd_process import CwdProcessDriver, _normalize_path, _within
+from tools.orchestrator.engines import ENGINES, adapter_for, preflight
 from tools.orchestrator.launcher import (
     Launcher,
     kill_process_tree,
@@ -55,6 +56,7 @@ from tools.orchestrator.router import (
     watchdog_seconds,
 )
 from tools.orchestrator.transcript import USAGE_KEYS, read_appended, read_history
+from tools.orchestrator.workspaces import WorkspaceStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -250,6 +252,18 @@ def derive_project(home: Path) -> str:
     if resolved.name == "orchestrator" and resolved.parent.name == ".claude":
         return _normalize_project(resolved.parent.parent)
     return _normalize_project(PROJECT_ROOT)
+
+
+def workspace_db_path(home: Path) -> Path:
+    """配置中心 DB：默认中控根目录（跨工作区共享）；隔离测试用独立 home。"""
+    override = os.environ.get("SENTINEL_WORKSPACES_DB", "").strip()
+    if override:
+        return Path(override)
+    resolved = home.resolve()
+    default_home = (PROJECT_ROOT / ".claude" / "orchestrator").resolve()
+    if resolved == default_home:
+        return PROJECT_ROOT / ".claude" / "workspaces.sqlite3"
+    return home / "workspaces.sqlite3"
 
 
 def _configure_stdio(*streams: Any) -> None:
@@ -622,16 +636,6 @@ def _optional_agent_id(payload: dict[str, Any]) -> str:
 DEFAULT_TOKEN_BUDGET = 200_000
 
 
-def token_budget() -> int:
-    """会话 token 预算；Workspace 配置接入前用环境变量，默认 200k。"""
-    raw = os.environ.get("SENTINEL_TOKEN_BUDGET", "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_TOKEN_BUDGET
-    return value if value > 0 else DEFAULT_TOKEN_BUDGET
-
-
 def _query_role(query: dict[str, list[str]]) -> str:
     value = (query.get("role") or [""])[0]
     return value.strip().casefold() if isinstance(value, str) else ""
@@ -706,6 +710,8 @@ class Daemon:
         self._pty_env = _pty_environment()
         self._pty_lock = threading.Lock()
         self._pty_sessions: dict[str, str] = {}
+        self.workspaces = WorkspaceStore(workspace_db_path(home))
+        self.workspaces.seed_default(self.project)
         self.pty = self._new_pty("", self._pty_session_override)
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
@@ -723,15 +729,67 @@ class Daemon:
         self.router.startup_recovery()
         self.reconcile_pending_agents()
 
+    def active_workspace(self) -> dict[str, Any]:
+        workspace = self.workspaces.active()
+        if workspace is None:
+            workspace = self.workspaces.seed_default(self.project)
+        return workspace
+
+    def workspace_budget(self) -> int:
+        raw = os.environ.get("SENTINEL_TOKEN_BUDGET", "").strip()
+        if raw:
+            try:
+                value = int(raw)
+            except ValueError:
+                value = 0
+            if value > 0:
+                return value
+        workspace = self.active_workspace()
+        try:
+            value = int(workspace.get("budget_tokens") or DEFAULT_TOKEN_BUDGET)
+        except (TypeError, ValueError):
+            value = DEFAULT_TOKEN_BUDGET
+        return max(1, value)
+
+    def transcript_project(self) -> str:
+        return str(self.active_workspace().get("project_path") or self.project)
+
+    def pty_preflight(self) -> dict[str, Any]:
+        workspace = self.active_workspace()
+        project = str(workspace.get("project_path") or self.project)
+        if self._pty_command:
+            return preflight(" ".join(self._pty_command), project)
+        return preflight(str(workspace.get("command") or ""), project)
+
+    def reset_pty(self) -> None:
+        with self._pty_lock:
+            if self.pty.status().get("running"):
+                self.pty.stop()
+            self._pty_sessions.clear()
+
+    def activate_workspace(self, workspace_id: int) -> dict[str, Any]:
+        workspace = self.workspaces.activate(workspace_id)
+        self.reset_pty()
+        self._publish()
+        return workspace
+
     def _new_pty(self, role: str, session_id: str | None = None, agent_id: str = "") -> PtyManager:
+        workspace = self.active_workspace()
+        adapter = adapter_for(str(workspace.get("engine") or "claude"))
+        command_text = str(workspace.get("command") or adapter.default_command)
+        factory = (
+            None if self._pty_command else lambda sid: adapter.build_command(command_text, sid)
+        )
         return PtyManager(
-            cwd=self.project,
+            cwd=str(workspace.get("project_path") or self.project),
             command=self._pty_command,
+            command_factory=factory,
             session_id=session_id,
             env=self._pty_env,
             state_path=self.home / "pty.json",
             role=role,
             agent_id=agent_id,
+            engine=adapter.id,
         )
 
     def pty_for(self, role: str, agent_id: str = "") -> PtyManager:
@@ -1539,6 +1597,27 @@ class _Handler(BaseHTTPRequestHandler):
             return {"error": f"agent offline: {role}", "reason": "agent_offline"}
         return None
 
+    def _pty_preflight_error(self) -> dict[str, Any] | None:
+        check = self.daemon.pty_preflight()
+        return None if check.get("ok") else check
+
+    def _workspaces_payload(self) -> dict[str, Any]:
+        active = self.daemon.active_workspace()
+        return {
+            "workspaces": self.daemon.workspaces.list(),
+            "active_id": active.get("id"),
+            "active_preflight": self.daemon.pty_preflight(),
+            "engines": [
+                {
+                    "id": adapter.id,
+                    "label": adapter.label,
+                    "default_command": adapter.default_command,
+                    **adapter.capabilities(),
+                }
+                for adapter in ENGINES.values()
+            ],
+        }
+
     def _pty_role_guard(self, role: str, agent_id: str) -> dict[str, Any] | None:
         """输入/缩放必须命中当前绑定的角色与 agent_id；空 role 保留旧版全局行为。"""
         if not role:
@@ -1589,7 +1668,7 @@ class _Handler(BaseHTTPRequestHandler):
                     f"event: session\ndata: {json.dumps({'session_id': pty.session_id})}\n\n".encode()
                 )
                 return
-            result = read_appended(self.daemon.project, session, current)
+            result = read_appended(self.daemon.transcript_project(), session, current)
             if result is not None:
                 if result["reset"]:
                     current = 0
@@ -1937,7 +2016,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not session:
                 self._send(404, {"error": "no terminal session", "role": role})
                 return
-            history = read_history(self.daemon.project, session, limit=limit)
+            history = read_history(self.daemon.transcript_project(), session, limit=limit)
             if history is None:
                 self._send(404, {"error": "transcript not found", "role": role})
                 return
@@ -1960,6 +2039,10 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
+            preflight_error = self._pty_preflight_error()
+            if preflight_error is not None:
+                self._send(400, preflight_error)
+                return
             pty = self.daemon.pty_for(role, agent_id)
             try:
                 pty.ensure_started()
@@ -1967,7 +2050,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": f"pty start failed: {exc}"})
                 return
             session = pty.session_id
-            history = read_history(self.daemon.project, session)
+            history = read_history(self.daemon.transcript_project(), session)
             if history is None:
                 history = {
                     "messages": [],
@@ -1983,7 +2066,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "session_id": session,
                     "source": "pty",
                     "agent_id": agent_id,
-                    "budget_tokens": token_budget(),
+                    "budget_tokens": self.daemon.workspace_budget(),
                     **history,
                 },
             )
@@ -2000,6 +2083,10 @@ class _Handler(BaseHTTPRequestHandler):
             error = self._agent_guard(role, agent_id)
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            preflight_error = self._pty_preflight_error()
+            if preflight_error is not None:
+                self._send(400, preflight_error)
                 return
             self._stream_pty_chat(offset, role, agent_id)
             return
@@ -2023,7 +2110,15 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
+            preflight_error = self._pty_preflight_error()
+            if preflight_error is not None:
+                self._send(400, preflight_error)
+                return
             self._stream_pty(role, agent_id)
+            return
+
+        if method == "GET" and path == "/workspaces":
+            self._send(200, self._workspaces_payload())
             return
 
         if method == "GET" and path == "/events":
@@ -2055,12 +2150,63 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(status, body)
             return
 
+        if method == "POST" and path == "/workspaces/preflight":
+            self._send(
+                200,
+                preflight(_str(payload.get("command")), _str(payload.get("project_path"))),
+            )
+            return
+
+        if method == "POST" and path == "/workspaces/save":
+            try:
+                workspace = self.daemon.workspaces.save(
+                    payload, activate=bool(payload.get("activate"))
+                )
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            if workspace.get("active"):
+                self.daemon.reset_pty()
+            check = preflight(
+                str(workspace.get("command", "")), str(workspace.get("project_path", ""))
+            )
+            workspace_data = self._workspaces_payload()
+            workspace_data["workspace"] = {**workspace, "preflight": check}
+            self._send(200, workspace_data)
+            return
+
+        if method == "POST" and path == "/workspaces/delete":
+            if not self.daemon.workspaces.delete(_int(payload.get("id"))):
+                self._send(404, {"error": "workspace not found"})
+                return
+            self.daemon.reset_pty()
+            self._send(200, self._workspaces_payload())
+            return
+
+        if method == "POST" and path == "/workspaces/activate":
+            try:
+                workspace = self.daemon.activate_workspace(_int(payload.get("id")))
+            except ValueError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            check = preflight(
+                str(workspace.get("command", "")), str(workspace.get("project_path", ""))
+            )
+            workspace_data = self._workspaces_payload()
+            workspace_data["workspace"] = {**workspace, "preflight": check}
+            self._send(200, workspace_data)
+            return
+
         if method == "POST" and path == "/pty/start":
             role = _optional_role(payload)
             agent_id = _optional_agent_id(payload)
             error = self._agent_guard(role, agent_id)
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
+                return
+            preflight_error = self._pty_preflight_error()
+            if preflight_error is not None:
+                self._send(400, preflight_error)
                 return
             try:
                 self._send(200, self.daemon.pty_for(role, agent_id).start())

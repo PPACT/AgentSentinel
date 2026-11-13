@@ -23,6 +23,7 @@ secrets*.json
 .claude/orchestrator/
 .claude/tauri-target/
 .claude/logs/
+.claude/workspaces.sqlite3
 docs/local/
 
 # ===== Python 虚拟环境 =====

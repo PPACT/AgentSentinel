@@ -1,4 +1,4 @@
-import { ListTodo, PanelLeft } from "lucide-react";
+import { FolderCog, ListTodo, PanelLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { connectionLabel, daemonSummary } from "@/lib/format";
@@ -12,6 +12,8 @@ interface TopBarProps {
   onToggleAgents?: () => void;
   showTasksToggle?: boolean;
   onToggleTasks?: () => void;
+  workspaceName?: string;
+  onOpenWorkspaces?: () => void;
 }
 
 export function TopBar({
@@ -22,6 +24,8 @@ export function TopBar({
   onToggleAgents,
   showTasksToggle = false,
   onToggleTasks,
+  workspaceName,
+  onOpenWorkspaces,
 }: TopBarProps) {
   const open = connection === "open";
   return (
@@ -33,8 +37,30 @@ export function TopBar({
         <span className="hidden truncate font-mono text-[11px] text-zinc-500 sm:inline">
           {daemonSummary(daemon)}
         </span>
+        {workspaceName ? (
+          <button
+            type="button"
+            className="hidden max-w-[180px] items-center gap-1 truncate rounded border border-sky-900/60 bg-sky-950/30 px-1.5 py-0.5 text-[10px] text-sky-300 transition-colors hover:bg-sky-900/40 sm:flex"
+            title="当前工作区"
+            onClick={onOpenWorkspaces}
+          >
+            <FolderCog className="size-3" />
+            {workspaceName}
+          </button>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
+        <Button
+          aria-label="设置与工作区"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1 px-2 text-[11px]"
+          title="设置 / 工作区"
+          onClick={onOpenWorkspaces}
+        >
+          <FolderCog className="size-3.5" />
+          工作区
+        </Button>
         {showAgentsToggle ? (
           <Button
             aria-label="Agents"

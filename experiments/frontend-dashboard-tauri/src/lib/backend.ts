@@ -11,6 +11,7 @@ import type {
   TaskList,
   TokenUsage,
   WildProcess,
+  Workspace,
   WorkspacesResponse,
 } from "./types";
 import type { ChatBlock } from "./chat";
@@ -35,7 +36,7 @@ export function projectRoot(): string {
   return import.meta.env.VITE_AGENT_SENTINEL_ROOT?.trim() ?? "";
 }
 
-/** 项目默认 orchestrator home：`.claude/orchestrator`（dev/doc/MCP 注册的同一个 daemon）。 */
+/** 项目默认 orchestrator home：`.claude/orchestrator`（控制面 / 默认工作区 daemon）。 */
 export async function orchestratorHome(): Promise<string> {
   const root = projectRoot();
   if (!root) {
@@ -44,16 +45,27 @@ export async function orchestratorHome(): Promise<string> {
   return join(root, ".claude", "orchestrator");
 }
 
+let activeHome: string | null = null;
+
+/** 切换当前工作区 daemon home；未设置时回落到控制面。 */
+export function setDaemonHome(home: string | null): void {
+  activeHome = home;
+}
+
+export async function currentDaemonHome(): Promise<string> {
+  return activeHome ?? (await orchestratorHome());
+}
+
 export interface DaemonInfo {
   host: string;
   port: number;
   pid: number;
 }
 
-/** 读取项目 daemon.json；daemon 重启换端口后也能跟上。 */
-export async function readDaemonInfo(): Promise<DaemonInfo | null> {
+/** 读取指定 home 的 daemon.json；daemon 重启换端口后也能跟上。 */
+export async function readDaemonInfoAt(home: string): Promise<DaemonInfo | null> {
   try {
-    const raw = await readTextFile(await join(await orchestratorHome(), "daemon.json"));
+    const raw = await readTextFile(await join(home, "daemon.json"));
     const info = JSON.parse(raw) as { host?: unknown; port?: unknown; pid?: unknown };
     if (typeof info.host === "string" && typeof info.port === "number") {
       return {
@@ -68,10 +80,18 @@ export async function readDaemonInfo(): Promise<DaemonInfo | null> {
   return null;
 }
 
-/** 读取项目 daemon.json 得到实际 host:port。 */
-export async function daemonBase(): Promise<string> {
-  const info = await readDaemonInfo();
+export async function readDaemonInfo(): Promise<DaemonInfo | null> {
+  return readDaemonInfoAt(await currentDaemonHome());
+}
+
+export async function daemonBaseAt(home: string): Promise<string> {
+  const info = await readDaemonInfoAt(home);
   return info ? `http://${info.host}:${info.port}` : FALLBACK_BASE;
+}
+
+/** 读取当前 daemon.json 得到实际 host:port。 */
+export async function daemonBase(): Promise<string> {
+  return daemonBaseAt(await currentDaemonHome());
 }
 
 async function healthy(base: string): Promise<boolean> {
@@ -83,20 +103,16 @@ async function healthy(base: string): Promise<boolean> {
   }
 }
 
-/**
- * 返回当前真正在服务的 daemon 地址；daemon.json 陈旧时回退探测 8765。
- * 拉起前必须用这个结果判断，避免把已有 daemon 当成未启动。
- */
-async function activeDaemonBase(): Promise<string | null> {
-  const configured = await daemonBase();
-  if (await healthy(configured)) return configured;
-  if (configured !== FALLBACK_BASE && (await healthy(FALLBACK_BASE))) return FALLBACK_BASE;
-  return null;
+export async function healthyAt(home: string): Promise<boolean> {
+  const info = await readDaemonInfoAt(home);
+  if (!info) return false;
+  return healthy(`http://${info.host}:${info.port}`);
 }
 
-/** 已在线则复用；否则通过 Rust 命令静默拉起 daemon（无控制台窗口）。 */
+/** 控制面 daemon（默认 home）必须在线，用于配置中心与工作区列表。 */
 async function startDaemonOnce(): Promise<void> {
-  if (await activeDaemonBase()) return;
+  const controlHome = await orchestratorHome();
+  if (await healthyAt(controlHome)) return;
   const root = projectRoot();
   if (!root) throw new Error("未配置 VITE_AGENT_SENTINEL_ROOT（AgentSentinel 项目根目录）");
   try {
@@ -106,10 +122,35 @@ async function startDaemonOnce(): Promise<void> {
   }
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (await activeDaemonBase()) return;
+    if (await healthyAt(controlHome)) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`daemon 启动超时（root=${root}）`);
+}
+
+/** 确保指定工作区的独立 daemon 在线；离线则静默拉起。 */
+export async function ensureWorkspaceDaemon(workspace: Workspace): Promise<void> {
+  const home = workspace.daemon_home;
+  if (!home) return;
+  if (await healthyAt(home)) return;
+  const root = projectRoot();
+  if (!root) throw new Error("未配置 VITE_AGENT_SENTINEL_ROOT（AgentSentinel 项目根目录）");
+  try {
+    await invoke("start_daemon", {
+      root,
+      home,
+      project: workspace.project_path,
+      workspaceId: workspace.id,
+    });
+  } catch (error) {
+    throw new Error(`工作区 daemon 启动失败：${errorMessage(error)}`);
+  }
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (await healthyAt(home)) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`工作区 daemon 启动超时（${workspace.name}）`);
 }
 
 /** StrictMode 双挂载/并发调用共享同一次启动，避免双拉 daemon 与端口竞争。 */
@@ -127,16 +168,16 @@ export interface ShutdownResult {
   pid: number;
 }
 
-/** 请求 daemon 优雅关闭并等待清理完成；超时返回 exited=false 由调用方兜底。 */
-export async function shutdownDaemon(timeoutMs = 12_000): Promise<ShutdownResult> {
-  const info = await readDaemonInfo();
+/** 请求指定 home 的 daemon 优雅关闭并等待清理完成。 */
+export async function shutdownHome(home: string, timeoutMs = 8_000): Promise<ShutdownResult> {
+  const info = await readDaemonInfoAt(home);
   const pid = info?.pid ?? 0;
-  const base = (await activeDaemonBase()) ?? (await daemonBase());
-  if (!(await healthy(base))) return { exited: true, pid };
+  if (info === null) return { exited: true, pid };
+  const base = `http://${info.host}:${info.port}`;
   try {
     await tauriFetch(`${base}/shutdown`, {
       method: "POST",
-      headers: { ...(await tokenHeader()), "Content-Type": "application/json" },
+      headers: { ...(await tokenHeaderAt(home)), "Content-Type": "application/json" },
       body: "{}",
     });
   } catch {
@@ -144,11 +185,59 @@ export async function shutdownDaemon(timeoutMs = 12_000): Promise<ShutdownResult
   }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    // daemon 在 Job 回收 PTY/claude 之后才删除 daemon.json，以文件消失为完成信号。
-    if ((await readDaemonInfo()) === null) return { exited: true, pid };
+    if (!(await healthy(base))) return { exited: true, pid };
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   return { exited: false, pid };
+}
+
+/** 当前 daemon；超时强杀兜底。 */
+export async function shutdownDaemon(timeoutMs = 12_000): Promise<ShutdownResult> {
+  const home = await currentDaemonHome();
+  const result = await shutdownHome(home, timeoutMs);
+  if (!result.exited && result.pid > 0) {
+    try {
+      await forceKillPid(result.pid);
+    } catch {
+      // taskkill 失败时交给 clean_all
+    }
+  }
+  return result;
+}
+
+/** 关窗：关闭控制面 + 所有已配置工作区的 daemon，确保无残留。 */
+export async function shutdownAllDaemons(): Promise<void> {
+  const homes = new Set<string>();
+  try {
+    homes.add(await orchestratorHome());
+  } catch {
+    // 未配置 root
+  }
+  let workspaces: Workspace[] = [];
+  try {
+    const data = await getWorkspaces();
+    workspaces = data.workspaces ?? [];
+  } catch {
+    // 控制面离线时仍尝试关闭当前 home
+  }
+  for (const workspace of workspaces) {
+    if (workspace.daemon_home) homes.add(workspace.daemon_home);
+  }
+  try {
+    homes.add(await currentDaemonHome());
+  } catch {
+    // ignore
+  }
+  for (const home of homes) {
+    const result = await shutdownHome(home);
+    if (!result.exited && result.pid > 0) {
+      try {
+        await forceKillPid(result.pid);
+      } catch {
+        // 交给 clean_all
+      }
+    }
+  }
 }
 
 /** 兜底：daemon 超时未退出时强杀整棵进程树（含 PTY / claude）。 */
@@ -157,22 +246,30 @@ export async function forceKillPid(pid: number): Promise<void> {
   await invoke("force_kill_pid", { pid });
 }
 
-async function tokenHeader(): Promise<Record<string, string>> {
+async function tokenHeaderAt(home: string): Promise<Record<string, string>> {
   try {
-    const token = (await readTextFile(await join(await orchestratorHome(), "token"))).trim();
+    const token = (await readTextFile(await join(home, "token"))).trim();
     return token ? { Authorization: `Bearer ${token}` } : {};
   } catch {
     return {};
   }
 }
 
-async function requestJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function tokenHeader(): Promise<Record<string, string>> {
+  return tokenHeaderAt(await currentDaemonHome());
+}
+
+async function requestJSONAt<T>(
+  home: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
-    ...(await tokenHeader()),
+    ...(await tokenHeaderAt(home)),
     ...(init.headers as Record<string, string> | undefined),
   };
-  const response = await tauriFetch(`${await daemonBase()}${path}`, { ...init, headers });
+  const response = await tauriFetch(`${await daemonBaseAt(home)}${path}`, { ...init, headers });
   const raw = await response.text();
   let payload: unknown = null;
   try {
@@ -188,6 +285,15 @@ async function requestJSON<T>(path: string, init: RequestInit = {}): Promise<T> 
     throw new ApiError(response.status, detail);
   }
   return (payload ?? {}) as T;
+}
+
+async function requestJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return requestJSONAt(await currentDaemonHome(), path, init);
+}
+
+/** 配置中心/工作区列表固定走控制面 daemon。 */
+async function requestControlJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return requestJSONAt(await orchestratorHome(), path, init);
 }
 
 export function getStatus(): Promise<StatusSnapshot> {
@@ -224,11 +330,11 @@ export async function stopRole(role: string, agentId?: string): Promise<void> {
 }
 
 export function getWorkspaces(): Promise<WorkspacesResponse> {
-  return requestJSON<WorkspacesResponse>("/workspaces");
+  return requestControlJSON<WorkspacesResponse>("/workspaces");
 }
 
 function workspaceAction(path: string, body: Record<string, unknown>): Promise<WorkspacesResponse> {
-  return requestJSON<WorkspacesResponse>(path, {
+  return requestControlJSON<WorkspacesResponse>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -253,7 +359,7 @@ export function preflightWorkspace(
   command: string,
   projectPath: string,
 ): Promise<PreflightResult> {
-  return requestJSON<PreflightResult>("/workspaces/preflight", {
+  return requestControlJSON<PreflightResult>("/workspaces/preflight", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command, project_path: projectPath }),

@@ -31,8 +31,15 @@ class WorkspaceStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.control_home = db_path.parent / "orchestrator"
+        self.workspace_root = db_path.parent / "workspaces"
         self._lock = threading.RLock()
         self._init()
+
+    def _daemon_home(self, workspace_id: int) -> Path:
+        if workspace_id == 1:
+            return self.control_home
+        return self.workspace_root / str(workspace_id)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=5)
@@ -52,17 +59,27 @@ class WorkspaceStore:
                 "wake_prompt_file TEXT NOT NULL DEFAULT '', "
                 "budget_tokens INTEGER NOT NULL DEFAULT 200000, "
                 "active INTEGER NOT NULL DEFAULT 0, "
+                "daemon_home TEXT NOT NULL DEFAULT '', "
                 "created_at TEXT NOT NULL, "
                 "updated_at TEXT NOT NULL)"
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(workspaces)").fetchall()
+            }
+            if "daemon_home" not in columns:
+                connection.execute(
+                    "ALTER TABLE workspaces ADD COLUMN daemon_home TEXT NOT NULL DEFAULT ''"
+                )
 
-    @staticmethod
-    def _to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         adapter = adapter_for(str(data.get("engine", "")))
         data["engine_label"] = adapter.label
         data["capabilities"] = adapter.capabilities()
         data["wake_prompt_source"] = "file" if data.get("wake_prompt_file") else "text"
+        if not data.get("daemon_home"):
+            data["daemon_home"] = str(self._daemon_home(int(data.get("id", 0))))
         return data
 
     def list(self) -> list[dict[str, Any]]:
@@ -169,6 +186,14 @@ class WorkspaceStore:
             ).fetchone()
             if has_active is None:
                 connection.execute("UPDATE workspaces SET active=1 WHERE id=?", (saved_id,))
+            saved_home = connection.execute(
+                "SELECT daemon_home FROM workspaces WHERE id=?", (saved_id,)
+            ).fetchone()
+            if saved_home is not None and not saved_home["daemon_home"]:
+                connection.execute(
+                    "UPDATE workspaces SET daemon_home=? WHERE id=?",
+                    (str(self._daemon_home(saved_id)), saved_id),
+                )
             connection.commit()
             row = connection.execute("SELECT * FROM workspaces WHERE id=?", (saved_id,)).fetchone()
         if row is None:

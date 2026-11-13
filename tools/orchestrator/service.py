@@ -759,6 +759,8 @@ class Daemon:
         self._pty_env = _pty_environment()
         self._pty_lock = threading.Lock()
         self._pty_sessions: dict[str, str] = {}
+        self._pty_signature: tuple[Any, ...] = ()
+        self._bound_workspace_id = _int(os.environ.get("SENTINEL_WORKSPACE_ID", ""))
         self.workspaces = WorkspaceStore(workspace_db_path(home))
         self.workspaces.seed_default(self.project)
         self.pty = self._new_pty("", self._pty_session_override)
@@ -781,10 +783,23 @@ class Daemon:
         self.reconcile_pending_agents()
 
     def active_workspace(self) -> dict[str, Any]:
+        if self._bound_workspace_id > 0:
+            bound = self.workspaces.get(self._bound_workspace_id)
+            if bound is not None:
+                return bound
         workspace = self.workspaces.active()
         if workspace is None:
             workspace = self.workspaces.seed_default(self.project)
         return workspace
+
+    @staticmethod
+    def _workspace_signature(workspace: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            int(workspace.get("id") or 0),
+            str(workspace.get("project_path") or ""),
+            str(workspace.get("command") or ""),
+            str(workspace.get("engine") or ""),
+        )
 
     def workspace_budget(self) -> int:
         raw = os.environ.get("SENTINEL_TOKEN_BUDGET", "").strip()
@@ -814,9 +829,9 @@ class Daemon:
 
     def reset_pty(self) -> None:
         with self._pty_lock:
-            if self.pty.status().get("running"):
-                self.pty.stop()
+            self.pty.stop()
             self._pty_sessions.clear()
+            self.pty = self._new_pty("", self._pty_session_override)
 
     def activate_workspace(self, workspace_id: int) -> dict[str, Any]:
         workspace = self.workspaces.activate(workspace_id)
@@ -831,6 +846,7 @@ class Daemon:
         factory = (
             None if self._pty_command else lambda sid: adapter.build_command(command_text, sid)
         )
+        self._pty_signature = self._workspace_signature(workspace)
         return PtyManager(
             cwd=str(workspace.get("project_path") or self.project),
             command=self._pty_command,
@@ -971,8 +987,14 @@ class Daemon:
         """返回绑定该 Agent 的唯一实例；role 相同但 agent_id 变化视为换人。"""
         role = role.strip()
         agent_id = agent_id.strip()
+        workspace = self.active_workspace()
+        signature = self._workspace_signature(workspace)
         with self._pty_lock:
-            if self.pty.role == role and self.pty.agent_id == agent_id:
+            if (
+                self.pty.role == role
+                and self.pty.agent_id == agent_id
+                and self._pty_signature == signature
+            ):
                 return self.pty
             if self.pty.role and self.pty.session_id:
                 # 冲突重试可能换了 session id，切走前记住最新值。

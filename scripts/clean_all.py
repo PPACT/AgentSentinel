@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = ROOT / ".claude" / "orchestrator"
+WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
 DEFAULT_PORTS = (1420, 8765, 9222)
 
 targets: dict[int, str] = {}
@@ -34,27 +36,57 @@ def add(pid: object, reason: str) -> None:
     targets.setdefault(value, reason)
 
 
-def read_state(name: str) -> dict[str, object]:
+def read_state_at(home: Path, name: str) -> dict[str, object]:
     try:
-        data = json.loads((HOME / name).read_text(encoding="utf-8"))
+        data = json.loads((home / name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def collect() -> None:
-    daemon = read_state("daemon.json")
-    pty = read_state("pty.json")
-    add(daemon.get("pid"), "daemon")
-    add(pty.get("pid"), "pty")
-
-    ports = set(DEFAULT_PORTS)
-    raw_port = daemon.get("port")
-    if isinstance(raw_port, (int, str)) and not isinstance(raw_port, bool):
+def workspace_homes() -> list[Path]:
+    """控制面 + 所有已配置/已落盘的 Workspace daemon home。"""
+    homes: set[Path] = {HOME}
+    if WORKSPACES_DB.exists():
         try:
-            ports.add(int(raw_port))
-        except ValueError:
+            with sqlite3.connect(WORKSPACES_DB) as connection:
+                for workspace_id, daemon_home in connection.execute(
+                    "SELECT id, daemon_home FROM workspaces"
+                ):
+                    if daemon_home:
+                        homes.add(Path(str(daemon_home)))
+                    elif int(workspace_id) == 1:
+                        homes.add(HOME)
+                    else:
+                        homes.add(ROOT / ".claude" / "workspaces" / str(workspace_id))
+        except (sqlite3.Error, OSError):
             pass
+    workspace_root = ROOT / ".claude" / "workspaces"
+    if workspace_root.is_dir():
+        for child in workspace_root.iterdir():
+            if child.is_dir():
+                homes.add(child)
+    return sorted(homes)
+
+
+def collect() -> None:
+    ports = set(DEFAULT_PORTS)
+    sessions: set[str] = set()
+    for home in workspace_homes():
+        daemon = read_state_at(home, "daemon.json")
+        pty = read_state_at(home, "pty.json")
+        add(daemon.get("pid"), f"daemon:{home.name}")
+        add(pty.get("pid"), f"pty:{home.name}")
+        raw_port = daemon.get("port")
+        if isinstance(raw_port, (int, str)) and not isinstance(raw_port, bool):
+            try:
+                ports.add(int(raw_port))
+            except ValueError:
+                pass
+        session = str(pty.get("session_id") or "").strip().lower()
+        if session:
+            sessions.add(session)
+
     try:
         connections = psutil.net_connections(kind="inet")
     except (psutil.Error, OSError):
@@ -67,7 +99,6 @@ def collect() -> None:
         ):
             add(connection.pid, f"port:{connection.laddr.port}")
 
-    session = str(pty.get("session_id") or "").lower()
     for process in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             name = (process.info.get("name") or "").lower()
@@ -89,7 +120,8 @@ def collect() -> None:
         is_npm = name == "cmd.exe" and ("tauri dev" in command or "vite" in command)
         is_app = name == "agentsentinel-console.exe"
         is_pty_claude = name == "claude.exe" and (
-            bool(session and session in command) or "active orchestration task" in command
+            any(session in command for session in sessions)
+            or "active orchestration task" in command
         )
         if is_daemon or is_frontend or is_tauri or is_npm or is_app or is_pty_claude:
             reason = "claude" if is_pty_claude else "process"
@@ -129,11 +161,12 @@ def kill_all() -> list[int]:
 def remove_stale_state(alive: list[int]) -> None:
     if alive:
         return
-    for name in ("pty.json", "daemon.json"):
-        try:
-            (HOME / name).unlink()
-        except OSError:
-            pass
+    for home in workspace_homes():
+        for name in ("pty.json", "daemon.json"):
+            try:
+                (home / name).unlink()
+            except OSError:
+                pass
 
 
 def main() -> int:

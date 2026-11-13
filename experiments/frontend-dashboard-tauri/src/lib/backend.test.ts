@@ -41,14 +41,11 @@ describe("ensureDaemon", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("start_daemon", { root: "C:\\root" });
   });
 
-  it("reuses a daemon answering on 8765 when daemon.json is stale", async () => {
+  it("reuses a healthy control daemon without starting a new one", async () => {
     vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
     mocks.stopping.value = false;
     mocks.invoke.mockClear();
-    mocks.fetch.mockImplementation(async (url: string) => {
-      if (url.includes(":8765/")) return { ok: true };
-      throw new Error("stale daemon.json");
-    });
+    mocks.fetch.mockImplementation(async () => ({ ok: true }));
 
     const { ensureDaemon } = await import("./backend");
     await ensureDaemon();
@@ -58,7 +55,7 @@ describe("ensureDaemon", () => {
 });
 
 describe("shutdownDaemon", () => {
-  it("posts /shutdown and waits for daemon.json removal", async () => {
+  it("posts /shutdown and waits until health stops answering", async () => {
     vi.stubEnv("VITE_AGENT_SENTINEL_ROOT", "C:\\root");
     mocks.stopping.value = false;
     mocks.fetch.mockImplementation(async (url: string) => {
@@ -66,6 +63,7 @@ describe("shutdownDaemon", () => {
         mocks.stopping.value = true;
         return { ok: true };
       }
+      if (mocks.stopping.value) throw new Error("daemon exited");
       return { ok: true };
     });
 

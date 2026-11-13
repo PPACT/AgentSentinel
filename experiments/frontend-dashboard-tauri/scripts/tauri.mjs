@@ -32,6 +32,8 @@ const capability = `${JSON.stringify(
         allow: [
           { path: `${rootPosix}/.claude/orchestrator/token` },
           { path: `${rootPosix}/.claude/orchestrator/daemon.json` },
+          { path: `${rootPosix}/.claude/workspaces/*/token` },
+          { path: `${rootPosix}/.claude/workspaces/*/daemon.json` },
         ],
       },
     ],

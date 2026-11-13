@@ -25,6 +25,7 @@ export interface Workspace {
   wake_prompt_source?: "text" | "file";
   budget_tokens: number;
   active: number;
+  daemon_home?: string;
   capabilities?: EngineCapabilities;
   preflight?: PreflightResult;
   created_at?: string;

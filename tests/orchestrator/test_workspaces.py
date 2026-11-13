@@ -55,6 +55,7 @@ def test_workspace_store_crud_and_active(tmp_path: Path) -> None:
     default = store.seed_default(str(tmp_path))
     assert default["name"] == "AgentSentinel"
     assert default["active"] == 1
+    assert default["daemon_home"] == str(tmp_path / "orchestrator")
     assert len(store.list()) == 1
 
     created = store.save(
@@ -70,6 +71,7 @@ def test_workspace_store_crud_and_active(tmp_path: Path) -> None:
     )
     assert created["active"] == 1
     assert created["capabilities"]["chat"] is False
+    assert created["daemon_home"] == str(tmp_path / "workspaces" / str(created["id"]))
     active = store.active()
     assert active is not None
     assert active["id"] == created["id"]

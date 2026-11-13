@@ -16,10 +16,19 @@ fn hidden_command(program: &str) -> Command {
     command
 }
 
-fn start_daemon_blocking(root: String) -> Result<(), String> {
+fn start_daemon_blocking(
+    root: String,
+    home: Option<String>,
+    project: Option<String>,
+    workspace_id: Option<i64>,
+) -> Result<(), String> {
     let root_path = PathBuf::from(root);
-    let home = root_path.join(".claude").join("orchestrator");
-    let status = hidden_command("uv")
+    let home_path = home
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root_path.join(".claude").join("orchestrator"));
+    let workspace_db = root_path.join(".claude").join("workspaces.sqlite3");
+    let mut command = hidden_command("uv");
+    command
         .args([
             "run",
             "python",
@@ -31,9 +40,17 @@ fn start_daemon_blocking(root: String) -> Result<(), String> {
             "0",
         ])
         .current_dir(&root_path)
-        .env("SENTINEL_ORCH_HOME", &home)
+        .env("SENTINEL_ORCH_HOME", &home_path)
+        .env("SENTINEL_WORKSPACES_DB", &workspace_db)
         .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONIOENCODING", "utf-8");
+    if let Some(project) = project {
+        command.env("SENTINEL_PROJECT_ROOT", project);
+    }
+    if let Some(workspace_id) = workspace_id {
+        command.env("SENTINEL_WORKSPACE_ID", workspace_id.to_string());
+    }
+    let status = command
         .status()
         .map_err(|error| format!("无法启动 uv：{error}"))?;
     if status.success() {
@@ -43,12 +60,19 @@ fn start_daemon_blocking(root: String) -> Result<(), String> {
     }
 }
 
-/// 静默拉起 daemon（uv 与前台的 CLI 进程均不显示控制台）。
+/// 静默拉起 daemon；可为指定 Workspace 使用独立 home/project。
 #[tauri::command]
-async fn start_daemon(root: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || start_daemon_blocking(root))
-        .await
-        .map_err(|error| error.to_string())?
+async fn start_daemon(
+    root: String,
+    home: Option<String>,
+    project: Option<String>,
+    workspace_id: Option<i64>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        start_daemon_blocking(root, home, project, workspace_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// daemon 未在超时内退出时兜底强杀整棵进程树（含 PTY / claude）。

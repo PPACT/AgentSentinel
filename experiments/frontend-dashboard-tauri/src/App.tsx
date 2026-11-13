@@ -21,14 +21,15 @@ import {
   cleanupWildProcess,
   discoverAgents,
   ensureDaemon,
+  ensureWorkspaceDaemon,
   eventStreamUrl,
-  forceKillPid,
   getStatus,
   getTasks,
   getWorkspaces,
   getHandoff,
   logStreamUrl,
-  shutdownDaemon,
+  setDaemonHome,
+  shutdownAllDaemons,
   startHandoff,
   stopPty,
   stopRole,
@@ -136,7 +137,7 @@ export default function App() {
     setAgents(Array.isArray(snapshot.agents) ? snapshot.agents : []);
   }, []);
 
-  const refreshWorkspaces = useCallback(async () => {
+  const refreshWorkspaces = useCallback(async (): Promise<WorkspacesResponse | null> => {
     try {
       const data = await getWorkspaces();
       setWorkspaces(data.workspaces ?? []);
@@ -146,25 +147,12 @@ export default function App() {
           data.workspaces[0] ??
           null,
       );
+      return data;
     } catch (err) {
       appendLog("warn", `读取工作区失败：${errorMessage(err)}`);
+      return null;
     }
   }, [appendLog]);
-
-  const handleWorkspacesChanged = useCallback(
-    (data: WorkspacesResponse) => {
-      setWorkspaces(data.workspaces ?? []);
-      setEngines(data.engines ?? []);
-      const active =
-        data.workspaces.find((workspace) => workspace.id === data.active_id) ??
-        data.workspaces[0] ??
-        null;
-      setActiveWorkspace(active);
-      setWorkspaceEpoch((value) => value + 1);
-      appendLog("info", `工作区：${active?.name ?? "未选择"}`);
-    },
-    [appendLog],
-  );
 
   const handleHandoff = useCallback(async () => {
     if (!activeRole || !selectedAgentId) return;
@@ -288,6 +276,55 @@ export default function App() {
     }
   }, [applySnapshot, refreshTasks]);
 
+  const switchWorkspace = useCallback(
+    async (workspace: Workspace | null) => {
+      abortRef.current?.abort();
+      logAbortRef.current?.abort();
+      setConnection("connecting");
+      setDaemon(undefined);
+      setAgents([]);
+      setTasks([]);
+      setSelectedRole(null);
+      setHandoff(null);
+      try {
+        if (workspace) await ensureWorkspaceDaemon(workspace);
+        setDaemonHome(workspace?.daemon_home ?? null);
+        setActiveWorkspace(workspace);
+        setWorkspaceEpoch((value) => value + 1);
+        await refreshAll();
+        startStream();
+        startLogStream();
+        appendLog("info", `已切换工作区：${workspace?.name ?? "控制面"}`);
+      } catch (err) {
+        const message = errorMessage(err);
+        setError(message);
+        appendLog("error", message);
+        setConnection("stopped");
+      }
+    },
+    [appendLog, refreshAll, startLogStream, startStream],
+  );
+
+  const handleWorkspacesChanged = useCallback(
+    (data: WorkspacesResponse) => {
+      setWorkspaces(data.workspaces ?? []);
+      setEngines(data.engines ?? []);
+      const active =
+        data.workspaces.find((workspace) => workspace.id === data.active_id) ??
+        data.workspaces[0] ??
+        null;
+      if ((active?.daemon_home ?? null) !== (activeWorkspace?.daemon_home ?? null)) {
+        void switchWorkspace(active);
+        return;
+      }
+      setActiveWorkspace(active);
+      setWorkspaceEpoch((value) => value + 1);
+      void refreshAll();
+      appendLog("info", `工作区已更新：${active?.name ?? "未选择"}`);
+    },
+    [activeWorkspace, appendLog, refreshAll, switchWorkspace],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -295,7 +332,14 @@ export default function App() {
         await ensureDaemon();
         if (cancelled) return;
         appendLog("info", "daemon 已就绪，加载状态…");
-        await refreshWorkspaces();
+        const data = await refreshWorkspaces();
+        const active =
+          data?.workspaces.find((workspace) => workspace.id === data.active_id) ??
+          data?.workspaces[0] ??
+          null;
+        if (active) await ensureWorkspaceDaemon(active);
+        setDaemonHome(active?.daemon_home ?? null);
+        setActiveWorkspace(active);
         await refreshAll();
         startStream();
         startLogStream();
@@ -338,8 +382,7 @@ export default function App() {
           if (closing) return;
           closing = true;
           try {
-            const { exited, pid } = await shutdownDaemon(15_000);
-            if (!exited) await forceKillPid(pid);
+            await shutdownAllDaemons();
           } catch (error) {
             appendLog("warn", `关闭中控时清理 daemon 失败：${errorMessage(error)}`);
           } finally {

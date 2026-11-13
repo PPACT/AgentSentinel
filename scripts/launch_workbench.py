@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -18,6 +19,8 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = ROOT / ".claude" / "orchestrator"
+WORKSPACES_DB = ROOT / ".claude" / "workspaces.sqlite3"
+WORKSPACES_ROOT = ROOT / ".claude" / "workspaces"
 LOG_DIR = ROOT / ".claude" / "logs"
 FRONTEND_DIR = ROOT / "experiments" / "frontend-dashboard-tauri"
 VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -33,9 +36,9 @@ def log(message: str) -> None:
         stream.write(line)
 
 
-def daemon_healthy() -> bool:
+def daemon_healthy(home: Path = HOME) -> bool:
     try:
-        info = json.loads((HOME / "daemon.json").read_text(encoding="utf-8"))
+        info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
         url = f"http://{info['host']}:{info['port']}/health"
         with urllib.request.urlopen(url, timeout=2) as response:
             return int(response.status) == 200
@@ -68,11 +71,14 @@ def stop_port_owner(port: int) -> None:
                 pass
 
 
-def start_daemon() -> None:
+def start_daemon(home: Path = HOME, extra_env: dict[str, str] | None = None) -> None:
     env = os.environ.copy()
-    env["SENTINEL_ORCH_HOME"] = str(HOME)
+    env["SENTINEL_ORCH_HOME"] = str(home)
+    env["SENTINEL_WORKSPACES_DB"] = str(WORKSPACES_DB)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    if extra_env:
+        env.update(extra_env)
     python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with (LOG_DIR / "daemon-launch.log").open("a", encoding="utf-8") as stream:
@@ -88,7 +94,39 @@ def start_daemon() -> None:
         )
     if completed.returncode != 0:
         raise RuntimeError(f"daemon start failed: exit {completed.returncode}")
-    log(f"daemon is healthy (pid file: {HOME / 'daemon.json'})")
+    log(f"daemon is healthy (home: {home})")
+
+
+def start_active_workspace_daemon() -> None:
+    """启动当前 active Workspace 的独立 daemon（控制面之外时）。"""
+    if not WORKSPACES_DB.exists():
+        return
+    try:
+        with sqlite3.connect(WORKSPACES_DB) as connection:
+            row = connection.execute(
+                "SELECT id, project_path, daemon_home FROM workspaces "
+                "WHERE active=1 ORDER BY id LIMIT 1"
+            ).fetchone()
+    except (sqlite3.Error, OSError):
+        return
+    if not row:
+        return
+    workspace_id, project_path, daemon_home = row
+    home = (
+        Path(str(daemon_home))
+        if daemon_home
+        else (HOME if int(workspace_id) == 1 else WORKSPACES_ROOT / str(workspace_id))
+    )
+    if home == HOME or daemon_healthy(home):
+        return
+    log(f"active workspace daemon offline; starting silently (home: {home})")
+    start_daemon(
+        home,
+        {
+            "SENTINEL_PROJECT_ROOT": str(project_path),
+            "SENTINEL_WORKSPACE_ID": str(workspace_id),
+        },
+    )
 
 
 def launch_frontend() -> None:
@@ -121,6 +159,8 @@ def main() -> int:
         else:
             log("daemon offline; starting silently")
             start_daemon()
+
+        start_active_workspace_daemon()
 
         if app_running():
             log("frontend already running; skip launch")

@@ -1,3 +1,17 @@
+export interface PtyNotice {
+  seq: number;
+  kind: string;
+  message: string;
+  session_id?: string;
+}
+
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
 export interface Agent {
   role?: string;
   agent_id?: string;

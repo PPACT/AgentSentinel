@@ -3,7 +3,7 @@ import { join } from "@tauri-apps/api/path";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 
-import type { Agent, StatusSnapshot, TaskList, WildProcess } from "./types";
+import type { Agent, StatusSnapshot, TaskList, TokenUsage, WildProcess } from "./types";
 import type { ChatBlock } from "./chat";
 import { errorMessage } from "./format";
 
@@ -317,6 +317,8 @@ export interface PtyHistoryResponse {
   messages: Array<{ role: string; blocks: ChatBlock[]; timestamp?: string | null }>;
   truncated: boolean;
   context_tokens: number;
+  usage?: TokenUsage;
+  budget_tokens?: number;
   bytes: number;
   offset: number;
 }

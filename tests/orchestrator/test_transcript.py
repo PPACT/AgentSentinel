@@ -86,6 +86,12 @@ def test_read_history_filters_and_estimates(tmp_path: Path) -> None:
         "input": "读取 a.py",
     }
     assert result["context_tokens"] == 1000
+    assert result["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 900,
+        "cache_creation_input_tokens": 0,
+    }
     assert result["truncated"] is False
 
 

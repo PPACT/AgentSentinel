@@ -145,4 +145,32 @@ describe("ChatPanel", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
   });
+
+  it("shows session token usage and budget progress", () => {
+    renderPanel({
+      usage: {
+        input_tokens: 1_234,
+        output_tokens: 567,
+        cache_read_input_tokens: 10,
+        cache_creation_input_tokens: 20,
+      },
+      contextTokens: 5_000,
+      budgetTokens: 200_000,
+    });
+
+    expect(screen.getByLabelText("Token 用量")).toBeInTheDocument();
+    expect(screen.getByText(/in 1k · out 567/)).toBeInTheDocument();
+  });
+
+  it("shows PTY notices such as session conflict", () => {
+    renderPanel({
+      notice: {
+        seq: 1,
+        kind: "session_conflict",
+        message: "旧会话正被外部占用，已为您开启全新干净会话",
+      },
+    });
+
+    expect(screen.getByText(/旧会话正被外部占用/)).toBeInTheDocument();
+  });
 });

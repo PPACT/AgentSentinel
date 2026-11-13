@@ -15,6 +15,12 @@ from typing import Any
 DEFAULT_HISTORY_MESSAGES = 200
 MAX_HISTORY_MESSAGES = 500
 MAX_READ_BYTES = 8 * 1024 * 1024
+USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 _SESSION_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
@@ -102,6 +108,22 @@ def _blocks(role: str, content: Any) -> list[dict[str, Any]]:
     return blocks
 
 
+def _usage(message: dict[str, Any]) -> dict[str, int]:
+    raw = message.get("usage")
+    if not isinstance(raw, dict):
+        return {}
+    usage = {key: int(raw.get(key) or 0) for key in USAGE_KEYS}
+    return usage if any(usage.values()) else {}
+
+
+def _add_usage(total: dict[str, int], message: dict[str, Any]) -> None:
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return
+    for key in USAGE_KEYS:
+        total[key] += int(usage.get(key) or 0)
+
+
 def parse_entry(entry: Any) -> tuple[dict[str, Any] | None, int]:
     """把一行 transcript 转成 UI 消息；返回 (message, context_tokens)。"""
     if not isinstance(entry, dict) or entry.get("type") not in ("user", "assistant"):
@@ -117,23 +139,20 @@ def parse_entry(entry: Any) -> tuple[dict[str, Any] | None, int]:
     blocks = _blocks(str(role), message.get("content"))
     if not blocks:
         return None, 0
-    tokens = 0
-    if role == "assistant":
-        usage = message.get("usage")
-        if isinstance(usage, dict):
-            tokens = sum(
-                int(usage.get(key) or 0)
-                for key in (
-                    "input_tokens",
-                    "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
-                )
-            )
-    return {
+    usage = _usage(message) if role == "assistant" else {}
+    tokens = (
+        usage.get("input_tokens", 0)
+        + usage.get("cache_read_input_tokens", 0)
+        + usage.get("cache_creation_input_tokens", 0)
+    )
+    result: dict[str, Any] = {
         "role": role,
         "blocks": blocks,
         "timestamp": entry.get("timestamp"),
-    }, tokens
+    }
+    if usage:
+        result["usage"] = usage
+    return result, tokens
 
 
 def read_history(
@@ -157,6 +176,7 @@ def read_history(
 
     messages: list[dict[str, Any]] = []
     context_tokens = 0
+    usage_totals = dict.fromkeys(USAGE_KEYS, 0)
     for line in raw.decode("utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
@@ -168,6 +188,7 @@ def read_history(
         if message is None:
             continue
         context_tokens = max(context_tokens, tokens)
+        _add_usage(usage_totals, message)
         messages.append(message)
 
     bounded = max(1, min(limit, MAX_HISTORY_MESSAGES))
@@ -178,6 +199,7 @@ def read_history(
         "messages": messages,
         "truncated": truncated,
         "context_tokens": context_tokens,
+        "usage": usage_totals,
         "bytes": size,
         "offset": size,
     }
@@ -197,7 +219,14 @@ def read_appended(
     try:
         size = path.stat().st_size
     except OSError:
-        return {"messages": [], "context_tokens": 0, "offset": offset, "reset": False, "bytes": 0}
+        return {
+            "messages": [],
+            "context_tokens": 0,
+            "usage": dict.fromkeys(USAGE_KEYS, 0),
+            "offset": offset,
+            "reset": False,
+            "bytes": 0,
+        }
     reset = size < offset
     start = 0 if reset else offset
     try:
@@ -213,6 +242,7 @@ def read_appended(
         complete = b""
     messages: list[dict[str, Any]] = []
     context_tokens = 0
+    usage_totals = dict.fromkeys(USAGE_KEYS, 0)
     for line in complete.decode("utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
@@ -224,10 +254,12 @@ def read_appended(
         if message is None:
             continue
         context_tokens = max(context_tokens, tokens)
+        _add_usage(usage_totals, message)
         messages.append(message)
     return {
         "messages": messages,
         "context_tokens": context_tokens,
+        "usage": usage_totals,
         "offset": start + len(complete),
         "reset": reset,
         "bytes": size,

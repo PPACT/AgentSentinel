@@ -10,11 +10,32 @@ import {
 import type { ChatEntry } from "./chat";
 import { errorMessage } from "./format";
 import { consumePtyChatStream, type PtyChatMessage } from "./pty";
+import type { PtyNotice, TokenUsage } from "./types";
+
+const EMPTY_USAGE: TokenUsage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
+function mergeUsage(total: TokenUsage, delta: TokenUsage): TokenUsage {
+  return {
+    input_tokens: total.input_tokens + delta.input_tokens,
+    output_tokens: total.output_tokens + delta.output_tokens,
+    cache_read_input_tokens: total.cache_read_input_tokens + delta.cache_read_input_tokens,
+    cache_creation_input_tokens:
+      total.cache_creation_input_tokens + delta.cache_creation_input_tokens,
+  };
+}
 
 export interface PtyChatState {
   entries: ChatEntry[];
   busy: boolean;
   contextTokens: number;
+  usage: TokenUsage;
+  budgetTokens: number;
+  notice: PtyNotice | null;
   sessionId: string | null;
   error: string | null;
   send: (prompt: string) => Promise<void>;
@@ -36,10 +57,15 @@ export function usePtyChat(
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [contextTokens, setContextTokens] = useState(0);
+  const [usage, setUsage] = useState<TokenUsage>(EMPTY_USAGE);
+  const [budgetTokens, setBudgetTokens] = useState(0);
+  const [notice, setNotice] = useState<PtyNotice | null>(null);
+  const [epoch, setEpoch] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const nextId = useRef(0);
   const busyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastBindRef = useRef<string | null>(null);
 
   const toEntries = useCallback((messages: PtyChatMessage[]): ChatEntry[] => {
     const items: ChatEntry[] = [];
@@ -78,15 +104,23 @@ export function usePtyChat(
     }
     const controller = new AbortController();
     let cancelled = false;
+    const bindKey = `${role}:${agentId}`;
     const connect = async () => {
+      if (lastBindRef.current !== bindKey) {
+        lastBindRef.current = bindKey;
+        setNotice(null);
+      }
       setEntries([]);
       setSessionId(null);
       setContextTokens(0);
+      setUsage(EMPTY_USAGE);
       try {
         const history = await getPtyHistory(role, agentId);
         if (cancelled) return;
         setSessionId(history.session_id);
         setContextTokens(history.context_tokens);
+        setUsage(history.usage ?? EMPTY_USAGE);
+        setBudgetTokens(history.budget_tokens ?? 0);
         setEntries(toEntries(history.messages));
         const response = await streamFetch(await ptyChatStreamUrl(history.offset, role, agentId), {
           headers: { Accept: "text/event-stream" },
@@ -96,8 +130,13 @@ export function usePtyChat(
         await consumePtyChatStream(response, {
           onMessages: appendMessages,
           onContext: (tokens) => setContextTokens((previous) => Math.max(previous, tokens)),
+          onUsage: (delta) => setUsage((previous) => mergeUsage(previous, delta)),
+          onNotice: (next) => setNotice(next),
           onSession: (sid) => {
-            if (!cancelled) setSessionId(sid);
+            if (!cancelled) {
+              setSessionId(sid);
+              setEpoch((value) => value + 1);
+            }
           },
           onExit: () => {
             if (!cancelled) setBusy(false);
@@ -112,7 +151,7 @@ export function usePtyChat(
       cancelled = true;
       controller.abort();
     };
-  }, [appendMessages, toEntries, role, agentId, enabled]);
+  }, [appendMessages, toEntries, role, agentId, enabled, epoch]);
 
   const send = useCallback(
     async (prompt: string) => {
@@ -150,6 +189,9 @@ export function usePtyChat(
     entries: active ? entries : [],
     busy: active ? busy : false,
     contextTokens: active ? contextTokens : 0,
+    usage: active ? usage : EMPTY_USAGE,
+    budgetTokens: active ? budgetTokens : 0,
+    notice: active ? notice : null,
     sessionId: active ? sessionId : null,
     error: active ? error : null,
     send,

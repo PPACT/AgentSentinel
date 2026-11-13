@@ -8,12 +8,18 @@ import "highlight.js/styles/github-dark.css";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatBlock, ChatEntry } from "@/lib/chat";
+import { formatTokenCount } from "@/lib/format";
+import type { PtyNotice, TokenUsage } from "@/lib/types";
 
 interface ChatPanelProps {
   entries: ChatEntry[];
   busy: boolean;
   sessionId: string | null;
   contextWarning?: string | null;
+  contextTokens?: number;
+  usage?: TokenUsage | null;
+  budgetTokens?: number;
+  notice?: PtyNotice | null;
   onSend: (prompt: string) => void;
   onStop: () => void;
   locked?: boolean;
@@ -105,6 +111,10 @@ export function ChatPanel({
   busy,
   sessionId,
   contextWarning,
+  contextTokens = 0,
+  usage = null,
+  budgetTokens = 0,
+  notice = null,
   onSend,
   onStop,
   locked = false,
@@ -182,7 +192,51 @@ export function ChatPanel({
                   session {sessionId.slice(0, 8)}
                 </span>
               ) : null}
-              {contextWarning ? (
+              {usage ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div
+                      aria-label="Token 用量"
+                      className="flex shrink-0 cursor-help items-center gap-1.5"
+                    >
+                      {budgetTokens > 0 ? (
+                        <div className="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-800">
+                          <div
+                            className={`h-full transition-[width] ${
+                              contextTokens / budgetTokens >= 0.85
+                                ? "bg-red-500"
+                                : contextTokens / budgetTokens >= 0.6
+                                  ? "bg-amber-400"
+                                  : "bg-emerald-500"
+                            }`}
+                            style={{
+                              width: `${Math.min(100, (contextTokens / budgetTokens) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                      <span className="font-mono text-[9px] text-zinc-500">
+                        in {formatTokenCount(usage.input_tokens)} · out{" "}
+                        {formatTokenCount(usage.output_tokens)}
+                      </span>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    <div>
+                      上下文 {formatTokenCount(contextTokens)}
+                      {budgetTokens > 0 ? ` / ${formatTokenCount(budgetTokens)}` : ""}
+                    </div>
+                    <div>
+                      累计输入 {formatTokenCount(usage.input_tokens)} · 输出{" "}
+                      {formatTokenCount(usage.output_tokens)}
+                    </div>
+                    <div>
+                      缓存读 {formatTokenCount(usage.cache_read_input_tokens)} · 写入{" "}
+                      {formatTokenCount(usage.cache_creation_input_tokens)}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              ) : contextWarning ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span
@@ -209,6 +263,12 @@ export function ChatPanel({
           </div>
         </TooltipProvider>
       </header>
+
+      {notice ? (
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-200/90">
+          {notice.message}
+        </div>
+      ) : null}
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
         {rendered.length === 0 ? (

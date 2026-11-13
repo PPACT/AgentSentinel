@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { ptyStreamUrl, resizePty, sendPtyInput, startPty, streamFetch } from "@/lib/backend";
 import { errorMessage } from "@/lib/format";
 import { consumePtyStream } from "@/lib/pty";
+import type { PtyNotice } from "@/lib/types";
 
 type PtyState = "connecting" | "running" | "exited" | "error";
 
@@ -34,6 +35,13 @@ export function TerminalPanel({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<PtyState>("connecting");
   const [info, setInfo] = useState<{ command: string; sessionId: string } | null>(null);
+  const [notice, setNotice] = useState<PtyNotice | null>(null);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 10_000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     if (!role || !agentId || locked) {
@@ -102,6 +110,7 @@ export function TerminalPanel({
         setState("running");
         await consumePtyStream(response, {
           onData: (chunk) => term.write(chunk),
+          onNotice: (next) => setNotice(next),
           onExit: (status) => {
             setState("exited");
             term.write(`\r\n\x1b[33m[PTY exited${status === null ? "" : `: ${status}`}]\x1b[0m\r\n`);
@@ -165,6 +174,11 @@ export function TerminalPanel({
           {locked ? "已锁定" : STATE_LABEL[displayState]}
         </span>
       </div>
+      {notice ? (
+        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200/90">
+          {notice.message}
+        </div>
+      ) : null}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-2 py-1" />
       {locked ? (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-zinc-950/85 backdrop-blur-sm">

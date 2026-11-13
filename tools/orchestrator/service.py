@@ -54,7 +54,7 @@ from tools.orchestrator.router import (
     lost_timeout_seconds,
     watchdog_seconds,
 )
-from tools.orchestrator.transcript import read_appended, read_history
+from tools.orchestrator.transcript import USAGE_KEYS, read_appended, read_history
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOST = "127.0.0.1"
@@ -619,6 +619,19 @@ def _optional_agent_id(payload: dict[str, Any]) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+DEFAULT_TOKEN_BUDGET = 200_000
+
+
+def token_budget() -> int:
+    """会话 token 预算；Workspace 配置接入前用环境变量，默认 200k。"""
+    raw = os.environ.get("SENTINEL_TOKEN_BUDGET", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TOKEN_BUDGET
+    return value if value > 0 else DEFAULT_TOKEN_BUDGET
+
+
 def _query_role(query: dict[str, list[str]]) -> str:
     value = (query.get("role") or [""])[0]
     return value.strip().casefold() if isinstance(value, str) else ""
@@ -728,6 +741,9 @@ class Daemon:
         with self._pty_lock:
             if self.pty.role == role and self.pty.agent_id == agent_id:
                 return self.pty
+            if self.pty.role and self.pty.session_id:
+                # 冲突重试可能换了 session id，切走前记住最新值。
+                self._pty_sessions[self.pty.role] = self.pty.session_id
             self.pty.stop()
             session = self._pty_sessions.get(role)
             if not session:
@@ -749,6 +765,8 @@ class Daemon:
             if agent_id and self.pty.agent_id != agent_id:
                 # 旧句柄（同 role、旧 agent_id）不得误杀新 Agent 的 PTY。
                 return False
+            if self.pty.session_id:
+                self._pty_sessions[self.pty.role] = self.pty.session_id
             if self.pty.status().get("running"):
                 self.pty.stop()
             return True
@@ -1558,7 +1576,14 @@ class _Handler(BaseHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError):
             return
         last_ping = time.monotonic()
+        notice_seq = 0
         while True:
+            notice = pty.latest_notice()
+            if notice and int(notice.get("seq", 0)) > notice_seq:
+                notice_seq = int(notice["seq"])
+                self._write_bytes(
+                    f"event: notice\ndata: {json.dumps(notice, ensure_ascii=False)}\n\n".encode()
+                )
             if pty.session_id != session:
                 self._write_bytes(
                     f"event: session\ndata: {json.dumps({'session_id': pty.session_id})}\n\n".encode()
@@ -1573,6 +1598,11 @@ class _Handler(BaseHTTPRequestHandler):
                     if result["context_tokens"]:
                         self._write_bytes(
                             f"event: context\ndata: {json.dumps({'context_tokens': result['context_tokens']})}\n\n".encode()
+                        )
+                    usage = result.get("usage") or {}
+                    if any(usage.values()):
+                        self._write_bytes(
+                            f"event: usage\ndata: {json.dumps({'usage': usage}, ensure_ascii=False)}\n\n".encode()
                         )
                     for message in result["messages"]:
                         frame = json.dumps({"message": message}, ensure_ascii=False)
@@ -1612,6 +1642,11 @@ class _Handler(BaseHTTPRequestHandler):
                 frame = {"seq": seq, "data": base64.b64encode(chunk).decode("ascii")}
                 if not self._write_bytes(f"event: output\ndata: {json.dumps(frame)}\n\n".encode()):
                     return
+            notice = pty.latest_notice()
+            if notice:
+                self._write_bytes(
+                    f"event: notice\ndata: {json.dumps(notice, ensure_ascii=False)}\n\n".encode()
+                )
             if not pty.status().get("running"):
                 self._write_bytes(
                     f"event: exit\ndata: {json.dumps({'exit_status': None})}\n\n".encode()
@@ -1633,6 +1668,10 @@ class _Handler(BaseHTTPRequestHandler):
                         f"event: output\ndata: {json.dumps(frame)}\n\n".encode()
                     ):
                         return
+                elif event == "notice":
+                    self._write_bytes(
+                        f"event: notice\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+                    )
                 elif event == "exit":
                     self._write_bytes(f"event: exit\ndata: {json.dumps(data)}\n\n".encode())
                     return
@@ -1934,10 +1973,20 @@ class _Handler(BaseHTTPRequestHandler):
                     "messages": [],
                     "truncated": False,
                     "context_tokens": 0,
+                    "usage": dict.fromkeys(USAGE_KEYS, 0),
                     "bytes": 0,
                     "offset": 0,
                 }
-            self._send(200, {"session_id": session, "source": "pty", **history})
+            self._send(
+                200,
+                {
+                    "session_id": session,
+                    "source": "pty",
+                    "agent_id": agent_id,
+                    "budget_tokens": token_budget(),
+                    **history,
+                },
+            )
             return
 
         if method == "GET" and path == "/pty/chat/stream":

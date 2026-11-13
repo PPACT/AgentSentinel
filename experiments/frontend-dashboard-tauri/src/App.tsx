@@ -483,6 +483,10 @@ export default function App() {
                   busy={ptyChat.busy}
                   sessionId={ptyChat.sessionId}
                   contextWarning={contextWarning}
+                  contextTokens={ptyChat.contextTokens}
+                  usage={ptyChat.usage}
+                  budgetTokens={ptyChat.budgetTokens}
+                  notice={ptyChat.notice}
                   locked={!selectedOnline}
                   lockReason={chatLockReason}
                   onSend={(prompt) => {

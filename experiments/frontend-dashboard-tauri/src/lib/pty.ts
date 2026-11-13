@@ -1,5 +1,21 @@
 import { parseSSEFrames } from "./sse";
 import type { ChatBlock } from "./chat";
+import type { PtyNotice, TokenUsage } from "./types";
+
+function parseNotice(raw: string): PtyNotice | null {
+  try {
+    const payload = JSON.parse(raw) as Partial<PtyNotice>;
+    if (typeof payload.message !== "string") return null;
+    return {
+      seq: typeof payload.seq === "number" ? payload.seq : 0,
+      kind: typeof payload.kind === "string" ? payload.kind : "notice",
+      message: payload.message,
+      session_id: typeof payload.session_id === "string" ? payload.session_id : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export interface PtyChunk {
   seq: number;
@@ -35,6 +51,7 @@ export async function consumePtyStream(
   handlers: {
     onData: (chunk: Uint8Array) => void;
     onExit: (status: number | null) => void;
+    onNotice?: (notice: PtyNotice) => void;
   },
 ): Promise<void> {
   if (!response.body) throw new Error("empty pty stream");
@@ -42,6 +59,9 @@ export async function consumePtyStream(
     if (frame.event === "output") {
       const chunk = decodePtyFrame(frame.event, frame.data);
       if (chunk) handlers.onData(chunk.data);
+    } else if (frame.event === "notice") {
+      const notice = parseNotice(frame.data);
+      if (notice) handlers.onNotice?.(notice);
     } else if (frame.event === "exit") {
       let status: number | null = null;
       try {
@@ -93,6 +113,8 @@ export async function consumePtyChatStream(
   handlers: {
     onMessages: (messages: PtyChatMessage[]) => void;
     onContext: (tokens: number) => void;
+    onUsage?: (usage: TokenUsage) => void;
+    onNotice?: (notice: PtyNotice) => void;
     onSession: (sessionId: string) => void;
     onExit: () => void;
   },
@@ -107,6 +129,20 @@ export async function consumePtyChatStream(
       } catch {
         // 忽略坏帧
       }
+    } else if (frame.event === "usage") {
+      try {
+        const payload = JSON.parse(frame.data) as { usage?: Partial<TokenUsage> };
+        if (payload.usage && handlers.onUsage) {
+          handlers.onUsage({
+            input_tokens: Number(payload.usage.input_tokens) || 0,
+            output_tokens: Number(payload.usage.output_tokens) || 0,
+            cache_read_input_tokens: Number(payload.usage.cache_read_input_tokens) || 0,
+            cache_creation_input_tokens: Number(payload.usage.cache_creation_input_tokens) || 0,
+          });
+        }
+      } catch {
+        // 忽略
+      }
     } else if (frame.event === "context") {
       try {
         const payload = JSON.parse(frame.data) as { context_tokens?: unknown };
@@ -114,6 +150,9 @@ export async function consumePtyChatStream(
       } catch {
         // 忽略
       }
+    } else if (frame.event === "notice") {
+      const notice = parseNotice(frame.data);
+      if (notice) handlers.onNotice?.(notice);
     } else if (frame.event === "session") {
       try {
         const payload = JSON.parse(frame.data) as { session_id?: unknown };

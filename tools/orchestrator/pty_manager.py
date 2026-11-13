@@ -25,6 +25,16 @@ READ_CHUNK = 8192
 MAX_BACKLOG_BYTES = 512 * 1024
 INPUT_MAX_CHARS = 16 * 1024
 SSE_PING_SECONDS = 20.0
+MAX_SESSION_RETRIES = 2
+HEAD_LIMIT = 32 * 1024
+
+
+def session_conflict_detected(data: bytes) -> bool:
+    """底层引擎报告 session 被占用时，允许换新 session 重试。"""
+    lowered = data.lower()
+    if b"already in use" in lowered and b"session" in lowered:
+        return True
+    return b"session already exists" in lowered
 
 
 def claude_command(session_id: str) -> list[str]:
@@ -66,6 +76,9 @@ class PtyManager:
         self._exit_status: int | None = None
         self._pid = 0
         self._seq = 0
+        self._retries = 0
+        self._notice: dict[str, Any] | None = None
+        self._notice_seq = 0
         self._backlog: deque[tuple[int, bytes]] = deque()
         self._backlog_bytes = 0
         self._subscribers: set[queue.Queue[tuple[str, dict[str, Any]]]] = set()
@@ -85,6 +98,8 @@ class PtyManager:
             "exit_status": self._exit_status,
             "backlog_bytes": self._backlog_bytes,
             "subscribers": len(self._subscribers),
+            "retries": self._retries,
+            "notice": self._notice,
             "command": self._command[0] if self._command else "claude",
             "session_id": self.session_id,
         }
@@ -94,35 +109,40 @@ class PtyManager:
             if self._running and self._process is not None and self._process.isalive():
                 return self._status_locked()
             self._cleanup_locked()
+            self._retries = 0
+            self._notice = None
             session = self._fixed_session or str(uuid.uuid4())
-            command = self._command_override or self._command_factory(session)
-            job = create_job()
-            process: PtyProcess | None = None
-            try:
-                process = PtyProcess.spawn(
-                    command,
-                    cwd=self.cwd,
-                    env=self.env or os.environ.copy(),
-                    dimensions=(self.rows, self.cols),
-                )
-                if not assign_process(job, int(process.pid)):
-                    raise OSError("AssignProcessToJobObject failed")
-            except Exception:
-                if process is not None:
-                    process.terminate(force=True)
-                close_job(job)
-                raise
-            self._process = process
-            self._job = job
-            self._pid = int(process.pid)
-            self._command = command
-            self.session_id = session
-            self._running = True
-            self._exit_status = None
-            self._write_state_locked()
-            self._reader = threading.Thread(target=self._read_loop, daemon=True)
-            self._reader.start()
+            self._spawn_locked(session)
             return self._status_locked()
+
+    def _spawn_locked(self, session: str) -> None:
+        command = self._command_override or self._command_factory(session)
+        job = create_job()
+        process: PtyProcess | None = None
+        try:
+            process = PtyProcess.spawn(
+                command,
+                cwd=self.cwd,
+                env=self.env or os.environ.copy(),
+                dimensions=(self.rows, self.cols),
+            )
+            if not assign_process(job, int(process.pid)):
+                raise OSError("AssignProcessToJobObject failed")
+        except Exception:
+            if process is not None:
+                process.terminate(force=True)
+            close_job(job)
+            raise
+        self._process = process
+        self._job = job
+        self._pid = int(process.pid)
+        self._command = command
+        self.session_id = session
+        self._running = True
+        self._exit_status = None
+        self._write_state_locked()
+        self._reader = threading.Thread(target=self._read_loop, args=(process,), daemon=True)
+        self._reader.start()
 
     def ensure_started(self) -> dict[str, Any]:
         with self._lock:
@@ -226,10 +246,8 @@ class PtyManager:
         except OSError:
             pass
 
-    def _read_loop(self) -> None:
-        process = self._process
-        if process is None:
-            return
+    def _read_loop(self, process: PtyProcess) -> None:
+        head = bytearray()
         while True:
             try:
                 chunk = process.read(READ_CHUNK)
@@ -238,12 +256,59 @@ class PtyManager:
             if not chunk:
                 break
             data = chunk.encode("utf-8", errors="replace")
+            if len(head) < HEAD_LIMIT:
+                head.extend(data[: HEAD_LIMIT - len(head)])
             self._broadcast(data)
+        exit_status = process.exitstatus
+        retried = False
         with self._lock:
-            self._running = False
-            self._exit_status = process.exitstatus
-            self._clear_state()
-        self._broadcast_exit(self._exit_status)
+            if self._process is not process:
+                return
+            conflict = session_conflict_detected(bytes(head))
+            if conflict and self._retries < MAX_SESSION_RETRIES:
+                self._retries += 1
+                self._cleanup_locked()
+                new_session = str(uuid.uuid4())
+                try:
+                    self._spawn_locked(new_session)
+                except (OSError, RuntimeError):
+                    self._running = False
+                    self._exit_status = exit_status
+                    self._clear_state()
+                    self._set_notice_locked(
+                        "session_conflict",
+                        "旧会话正被外部占用，自动开启新会话失败，请重试",
+                        new_session,
+                    )
+                else:
+                    retried = True
+                    self._set_notice_locked(
+                        "session_conflict",
+                        "旧会话正被外部占用，已为您开启全新干净会话",
+                        new_session,
+                    )
+            else:
+                self._running = False
+                self._exit_status = exit_status
+                self._clear_state()
+        if not retried:
+            self._broadcast_exit(exit_status)
+
+    def _set_notice_locked(self, kind: str, message: str, session: str) -> None:
+        self._notice_seq += 1
+        notice = {
+            "seq": self._notice_seq,
+            "kind": kind,
+            "message": message,
+            "session_id": session,
+        }
+        self._notice = notice
+        for queue_ in self._subscribers:
+            queue_.put(("notice", dict(notice)))
+
+    def latest_notice(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._notice) if self._notice else None
 
     def _broadcast(self, data: bytes) -> None:
         with self._lock:

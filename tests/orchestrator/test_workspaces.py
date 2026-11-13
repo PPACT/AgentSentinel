@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -129,6 +130,17 @@ def test_ensure_workspace_db_migrates_legacy(
 
     assert path == tmp_path / "appdata" / "AgentSentinel" / "workspaces.sqlite3"
     assert path.read_bytes() == b"legacy-workspaces"
+
+
+def test_workspace_daemon_registers_local_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "2")
+    daemon = service.Daemon(tmp_path / "orch")
+    record = daemon.registry.get("local")
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.command == "workspace"
 
 
 def test_workspace_store_respects_control_home(tmp_path: Path) -> None:

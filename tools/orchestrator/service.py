@@ -803,6 +803,9 @@ class Daemon:
         self.pty = self._new_pty("", self._pty_session_override)
         self._handoff_lock = threading.Lock()
         self._handoff: dict[str, Any] = {"active": False, "phase": "idle", "message": ""}
+        if self._bound_workspace_id > 0:
+            # 独立工作区自带本地终端 Agent，保证空 registry 也能直接跑 CLI。
+            self._register_local_agent()
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -818,6 +821,23 @@ class Daemon:
         self._subscribers: list[queue.Queue[dict[str, Any]]] = []
         self.router.startup_recovery()
         self.reconcile_pending_agents()
+
+    def _register_local_agent(self) -> None:
+        now = utc_now()
+        self.registry.upsert(
+            AgentRecord(
+                role="local",
+                pid=os.getpid(),
+                pgid=os.getpid(),
+                job_id="",
+                status="registered",
+                started_at=now,
+                last_heartbeat=now,
+                command="workspace",
+                updated_at=now,
+                project=self.project,
+            )
+        )
 
     def active_workspace(self) -> dict[str, Any]:
         if self._bound_workspace_id > 0:

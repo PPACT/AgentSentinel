@@ -312,6 +312,29 @@ def remove_stale_state(alive: list[int]) -> None:
                 pass
 
 
+def cleanup_stale_locks(dry_run: bool) -> list[str]:
+    """删除无活进程持有的 pending/*.lock。
+
+    只做非阻塞探测：能拿到锁说明持有进程已退出，文件才可删；拿不到锁说明有活
+    Agent 持有，一律跳过。不尝试强制解锁活进程的锁（Windows 上不可能安全做到）。
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from tools.orchestrator.locking import probe, unlink_with_retry
+
+    removed: list[str] = []
+    for home in workspace_homes():
+        pending = home / "pending"
+        if not pending.is_dir():
+            continue
+        for path in sorted(pending.glob("*.lock")):
+            if probe(path) != "free":
+                continue
+            if dry_run or unlink_with_retry(path):
+                removed.append(str(path))
+    return removed
+
+
 def released_ports(alive: list[int]) -> set[int]:
     killed = set(targets) - set(alive)
     return {port for pid, port in ports.items() if pid in killed}
@@ -327,10 +350,16 @@ def main() -> int:
         print("[扫描] 未发现残留进程。", flush=True)
     print(f"[详情] 命中清单：{LOG_PATH}", flush=True)
     if dry_run:
+        stale_locks = cleanup_stale_locks(True)
+        if stale_locks:
+            print(f"[锁文件] dry-run 可清理 {len(stale_locks)} 个残留 .lock", flush=True)
         return 0
 
     alive = kill_all()
+    stale_locks = cleanup_stale_locks(False)
     remove_stale_state(alive)
+    if stale_locks:
+        print(f"[锁文件] 已清理 {len(stale_locks)} 个残留 .lock", flush=True)
     killed = len(set(targets) - set(alive))
     port_count = len(released_ports(alive))
     if alive:
@@ -341,7 +370,7 @@ def main() -> int:
         return 1
     with LOG_PATH.open("a", encoding="utf-8") as stream:
         stream.write(
-            f"RESULT killed={killed} ports={port_count} at "
+            f"RESULT killed={killed} ports={port_count} locks={len(stale_locks)} at "
             f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
     print(f"[完成] 共清理了 {killed} 个进程，释放了 {port_count} 个端口。")

@@ -18,6 +18,7 @@ import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 import pytest
 from tools.orchestrator import mcp_server
 from tools.orchestrator.launcher import hidden_creationflags
+from tools.orchestrator.locking import parse_lock_file_name, probe
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,9 +38,13 @@ def _wait_daemon(home: Path, timeout: float = 15.0) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _stop_heartbeat() -> Iterator[None]:
+def _release_registration() -> Iterator[None]:
     yield
-    mcp_server.stop_registration_heartbeat()
+    mcp_server.release_pending_registration()
+
+
+def _pending_locks(home: Path) -> list[Path]:
+    return sorted((home / "pending").glob("*.lock"))
 
 
 @pytest.fixture
@@ -233,9 +238,9 @@ def test_register_again_updates_mcp_server_pid(daemon_home: Path) -> None:
     assert agents[0]["command"] == "mcp_server session=next ref=next"
 
 
-def test_register_offline_schedules_retry(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
-
+def test_register_offline_writes_lock_file(
+    cache_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def offline(
         method: str, path: str, payload: dict[str, Any] | None
     ) -> tuple[int, dict[str, Any]]:
@@ -262,22 +267,23 @@ def test_register_offline_schedules_retry(cache_env: Path, monkeypatch: pytest.M
     assert cached is not None
     assert cached["role"] == "dev"
     assert list((cache_env / "agents").glob("*.json"))
-    assert (cache_env / "pending" / "test-session-1.json").exists()
+    locks = _pending_locks(cache_env)
+    assert len(locks) == 1
+    assert locks[0].name.startswith(f"dev_{os.getpid()}_")
 
 
-def test_offline_registration_retries_until_success(
+def test_offline_registration_does_not_retry(
     cache_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
     calls: list[dict[str, Any]] = []
 
-    def flaky(method: str, path: str, payload: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
+    def offline(
+        method: str, path: str, payload: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]]:
         calls.append(payload or {})
-        if len(calls) == 1:
-            raise urllib.error.URLError("daemon offline")
-        return 200, {"agent": {"role": (payload or {}).get("role", "")}}
+        raise urllib.error.URLError("daemon offline")
 
-    monkeypatch.setattr(mcp_server, "daemon_request", flaky)
+    monkeypatch.setattr(mcp_server, "daemon_request", offline)
     response = _call(
         {
             "jsonrpc": "2.0",
@@ -291,22 +297,28 @@ def test_offline_registration_retries_until_success(
     )
     body = json.loads(response["result"]["content"][0]["text"])
     assert body["status"] == "pending"
+    assert one_lock_name(cache_env).startswith("dev_")
 
-    deadline = time.monotonic() + 2
-    while len(calls) < 2 and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert len(calls) >= 2
-    assert calls[1]["role"] == "dev"
+    # 文件锁兜底：不再有后台网络重试。
+    time.sleep(0.2)
+    assert len(calls) == 1
 
 
-def test_register_server_error_schedules_retry(
+def one_lock_name(home: Path) -> str:
+    locks = _pending_locks(home)
+    assert len(locks) == 1
+    return locks[0].name
+
+
+def test_register_server_error_writes_lock(
     cache_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
+    calls: list[dict[str, Any]] = []
 
     def failing(
         method: str, path: str, payload: dict[str, Any] | None
     ) -> tuple[int, dict[str, Any]]:
+        calls.append(payload or {})
         return 500, {"error": "boom"}
 
     monkeypatch.setattr(mcp_server, "daemon_request", failing)
@@ -325,6 +337,8 @@ def test_register_server_error_schedules_retry(
     assert result["isError"] is False
     assert json.loads(result["content"][0]["text"])["status"] == "pending"
     assert mcp_server.load_cached_registration() is not None
+    assert _pending_locks(cache_env)
+    assert len(calls) == 1
 
 
 def test_offline_registration_recovers_when_daemon_starts(
@@ -335,7 +349,6 @@ def test_offline_registration_recovers_when_daemon_starts(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "late-session")
     monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
     monkeypatch.delenv("SENTINEL_ROLE", raising=False)
-    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
 
     response = _call(
         {
@@ -393,14 +406,14 @@ def test_offline_registration_recovers_when_daemon_starts(
                 process.kill()
 
 
-def test_pending_pidfile_is_discovered_by_late_daemon(
+def test_pending_lock_is_discovered_by_late_daemon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "pidfile-orch"
     monkeypatch.setenv("SENTINEL_ORCH_HOME", str(home))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "pidfile-session")
     monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
-    mcp_server.write_pending_registration({"role": "dev"})
+    assert mcp_server.hold_pending_registration({"role": "dev"}) is not None
 
     environment = os.environ.copy()
     environment["SENTINEL_ORCH_HOME"] = str(home)
@@ -571,36 +584,22 @@ def test_stdio_roundtrip(tmp_path: Path) -> None:
     assert "stdin EOF; exiting" in text
 
 
-def test_registration_heartbeat_repeats(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def fake_request(
-        method: str, path: str, payload: dict[str, Any] | None
-    ) -> tuple[int, dict[str, Any]]:
-        calls.append(payload or {})
-        return 200, {}
-
-    monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
-    stop = mcp_server.start_registration_heartbeat({"role": "dev", "pid": 1}, interval=0.05)
-    deadline = time.monotonic() + 2
-    while len(calls) < 2 and time.monotonic() < deadline:
-        time.sleep(0.02)
-    stop.set()
-    assert len(calls) >= 2
-    assert calls[0]["role"] == "dev"
-
-
-def test_registration_pidfile_roundtrip(cache_env: Path) -> None:
+def test_registration_lock_roundtrip(cache_env: Path) -> None:
     payload = mcp_server.registration_payload("dev", "session-a", "ref-a")
     mcp_server.save_registration(payload)
 
-    path = cache_env / "pending" / "test-session-1.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert set(data) == {"pid", "pid_create_time", "role", "cwd"}
-    assert data["pid"] == os.getpid()
-    assert data["role"] == "dev"
-    assert data["cwd"] == str(mcp_server.project_root())
-    assert abs(float(data["pid_create_time"]) - psutil.Process(os.getpid()).create_time()) < 0.01
+    locks = _pending_locks(cache_env)
+    assert len(locks) == 1
+    parsed = parse_lock_file_name(locks[0].name)
+    assert parsed is not None
+    role, pid, created = parsed
+    assert role == "dev"
+    assert pid == os.getpid()
+    assert abs(created - psutil.Process(os.getpid()).create_time()) < 1.0
+    assert probe(locks[0]) == "busy"
+
+    mcp_server.release_pending_registration()
+    assert probe(locks[0]) == "free"
 
 
 def test_registration_cache_roundtrip(cache_env: Path) -> None:
@@ -651,7 +650,7 @@ def test_registration_cache_retries_busy_replace(
     monkeypatch.setattr(os, "replace", flaky_replace)
     mcp_server.save_registration(payload)
 
-    assert sorted(attempts.values()) == [3, 3]
+    assert sorted(attempts.values()) == [3]
     assert not list((cache_env / "pending").glob("*.tmp"))
     assert mcp_server.load_cached_registration() is not None
 
@@ -669,15 +668,16 @@ def test_auto_register_falls_back_to_cached_role(
         return 200, {}
 
     monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
-    stop = mcp_server.auto_register()
-    assert stop is not None
-    stop.set()
+    mcp_server.auto_register()
     assert calls and calls[0]["role"] == "doc"
     assert calls[0]["session"] == "session-b"
+    assert _pending_locks(cache_env)
 
     # 新 session id 没有缓存：不自动注册。
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-session-2")
-    assert mcp_server.auto_register() is None
+    before = len(calls)
+    mcp_server.auto_register()
+    assert len(calls) == before
 
 
 def test_auto_register_uses_sentinel_role(cache_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -691,30 +691,27 @@ def test_auto_register_uses_sentinel_role(cache_env: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
     monkeypatch.setenv("SENTINEL_ROLE", "doc")
-    stop = mcp_server.auto_register()
-    assert stop is not None
-    stop.set()
+    mcp_server.auto_register()
     assert calls and calls[0]["role"] == "doc"
     assert calls[0]["pid"] == os.getpid()
     cached = mcp_server.load_cached_registration()
     assert cached is not None
     assert cached["role"] == "doc"
-    pending = cache_env / "pending" / "test-session-1.json"
-    assert json.loads(pending.read_text(encoding="utf-8"))["role"] == "doc"
+    locks = _pending_locks(cache_env)
+    assert len(locks) == 1
+    parsed = parse_lock_file_name(locks[0].name)
+    assert parsed is not None and parsed[0] == "doc"
 
     # 环境变量缺失时回退到本会话缓存。
     monkeypatch.delenv("SENTINEL_ROLE", raising=False)
-    fallback = mcp_server.auto_register()
-    assert fallback is not None
-    fallback.set()
+    mcp_server.auto_register()
     assert calls[-1]["role"] == "doc"
 
 
-def test_auto_register_sentinel_role_offline_writes_pending(
+def test_auto_register_sentinel_role_offline_writes_lock(
     cache_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SENTINEL_ROLE", "doc")
-    monkeypatch.setenv("SENTINEL_ORCH_HEARTBEAT_SECONDS", "0.05")
 
     def offline(
         method: str, path: str, payload: dict[str, Any] | None
@@ -722,13 +719,14 @@ def test_auto_register_sentinel_role_offline_writes_pending(
         raise urllib.error.URLError("daemon offline")
 
     monkeypatch.setattr(mcp_server, "daemon_request", offline)
-    stop = mcp_server.auto_register()
-    assert stop is not None
-    stop.set()
+    mcp_server.auto_register()
 
-    data = json.loads((cache_env / "pending" / "test-session-1.json").read_text(encoding="utf-8"))
-    assert data["role"] == "doc"
-    assert data["pid"] == os.getpid()
+    locks = _pending_locks(cache_env)
+    assert len(locks) == 1
+    parsed = parse_lock_file_name(locks[0].name)
+    assert parsed is not None
+    assert parsed[0] == "doc"
+    assert parsed[1] == os.getpid()
 
 
 def test_resume_auto_register_uses_kept_cache(
@@ -742,8 +740,6 @@ def test_resume_auto_register_uses_kept_cache(
     data["mcp_pid"] = 999_999_999
     data["claude_pid"] = 999_999_999
     cache_path.write_text(json.dumps(data), encoding="utf-8")
-    pending_path = cache_env / "pending" / "test-session-1.json"
-    pending_path.unlink(missing_ok=True)
     monkeypatch.delenv("SENTINEL_ROLE", raising=False)
 
     calls: list[dict[str, Any]] = []
@@ -755,12 +751,10 @@ def test_resume_auto_register_uses_kept_cache(
         return 200, {}
 
     monkeypatch.setattr(mcp_server, "daemon_request", fake_request)
-    stop = mcp_server.auto_register()
-    assert stop is not None
-    stop.set()
+    mcp_server.auto_register()
     assert calls and calls[0]["role"] == "dev"
     assert calls[0]["pid"] == os.getpid()
     cached = mcp_server.load_cached_registration()
     assert cached is not None
     assert cached["mcp_pid"] == os.getpid()
-    assert json.loads(pending_path.read_text(encoding="utf-8"))["role"] == "dev"
+    assert _pending_locks(cache_env)

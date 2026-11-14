@@ -42,6 +42,14 @@ from tools.orchestrator.launcher import (
     process_alive,
     sweep_leftover_real_workers,
 )
+from tools.orchestrator.locking import (
+    LOCK_SUFFIX,
+    parse_lock_file_name,
+    unlink_with_retry,
+)
+from tools.orchestrator.locking import (
+    probe as probe_lock,
+)
 from tools.orchestrator.pty_manager import PtyManager
 from tools.orchestrator.registry import AgentRecord, Registry, utc_now
 from tools.orchestrator.router import (
@@ -229,8 +237,6 @@ promptBox.addEventListener("keydown", (event) => {
 """
 AGENT_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PENDING_DIR = "pending"
-PENDING_CLEANUP_THRESHOLD = 100
-PID_CREATE_TIME_TOLERANCE = 0.01
 
 
 def agent_cache_seconds() -> float:
@@ -1317,57 +1323,54 @@ class Daemon:
         return changed, recovered, pruned
 
     def reconcile_pending_agents(self) -> tuple[bool, int, int]:
-        """home/pending/<session>.json：按 PID + create_time 惰性发现 Agent。"""
+        """pending/*.lock：锁被持有=进程存活；能拿到锁=残留并清理。
+
+        锁由 Agent 进程持有，进程退出/崩溃时由操作系统释放，因此 Daemon 无论何时
+        启动都能立即识别存量 Agent，无需网络心跳。探测一律非阻塞、绝不等待。
+        """
         pending_dir = self.home / PENDING_DIR
         if not pending_dir.is_dir():
             return False, 0, 0
-        files = sorted(pending_dir.glob("*.json"))
-        if not files:
-            return False, 0, 0
-        force_full = len(files) > PENDING_CLEANUP_THRESHOLD
         changed = False
         registered = 0
         pruned = 0
-        for path in files:
-            try:
-                parsed = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pruned += int(_unlink(path))
+        live: dict[str, tuple[float, Path, int]] = {}
+        counts: dict[str, int] = {}
+        for path in sorted(pending_dir.glob(f"*{LOCK_SUFFIX}")):
+            parsed = parse_lock_file_name(path.name)
+            if parsed is None:
+                if probe_lock(path) != "busy":
+                    pruned += int(unlink_with_retry(path))
                 continue
-            data = parsed if isinstance(parsed, dict) else None
-            role = _str(data.get("role")).casefold() if data else ""
-            pid = _int(data.get("pid")) if data else 0
-            cwd = _str(data.get("cwd")) if data else ""
-            raw_create = data.get("pid_create_time") if data else None
-            if (
-                data is None
-                or not role
-                or _ROLE_PATTERN.fullmatch(role) is None
-                or pid <= 0
-                or not cwd
-                or not isinstance(raw_create, (int, float))
-            ):
-                pruned += int(_unlink(path))
-                continue
-            if _normalize_project(cwd) != self.project:
-                # 共享 home 时其它项目的 PID File 留给对应 daemon。
-                continue
-            try:
-                actual_create = psutil.Process(pid).create_time()
-            except (psutil.Error, OSError):
-                pruned += int(_unlink(path))
-                continue
-            if abs(float(raw_create) - actual_create) > PID_CREATE_TIME_TOLERANCE:
-                pruned += int(_unlink(path))
-                continue
+            role, pid, created = parsed
+            state = probe_lock(path)
+            if state == "busy":
+                counts[role] = counts.get(role, 0) + 1
+                current = live.get(role)
+                if current is None or created >= current[0]:
+                    live[role] = (created, path, pid)
+            elif state == "free":
+                pruned += int(unlink_with_retry(path))
+        # 旧版 pending/*.json 已废弃：不再参与发现，直接清理。
+        for legacy in sorted(pending_dir.glob("*.json")):
+            pruned += int(unlink_with_retry(legacy))
+        for role, (created, path, pid) in sorted(live.items()):
             existing = self.registry.get(role)
+            if counts.get(role, 0) > 1 and (
+                existing is None or existing.pid != pid or existing.status == "stopped"
+            ):
+                print(
+                    f"pending: duplicate live role {role!r}; keeping pid {pid} ({path.name})",
+                    file=sys.stderr,
+                    flush=True,
+                )
             if existing is not None and existing.pid == pid and existing.status != "stopped":
                 continue
             now = utc_now()
             started_at = (
                 existing.started_at
                 if existing is not None and existing.pid == pid
-                else datetime.fromtimestamp(actual_create, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                else datetime.fromtimestamp(created, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             )
             self.registry.upsert(
                 AgentRecord(
@@ -1378,39 +1381,14 @@ class Daemon:
                     status="registered",
                     started_at=started_at,
                     last_heartbeat=now,
-                    command=f"pidfile {path.stem}",
+                    command=f"lockfile {path.name}",
                     updated_at=now,
                     project=self.project,
                 )
             )
             registered += 1
             changed = True
-        if force_full:
-            pruned += self._dedupe_pending(files)
         return changed, registered, pruned
-
-    def _dedupe_pending(self, files: list[Path]) -> int:
-        """超过阈值时全量清理：同一 role 只保留 mtime 最新的 PID File。"""
-        newest: dict[str, tuple[float, Path]] = {}
-        pruned = 0
-        for path in files:
-            try:
-                parsed = json.loads(path.read_text(encoding="utf-8"))
-                data = parsed if isinstance(parsed, dict) else None
-                mtime = path.stat().st_mtime
-            except (OSError, json.JSONDecodeError):
-                continue
-            role = _str(data.get("role")).casefold() if data else ""
-            if not role:
-                continue
-            current = newest.get(role)
-            if current is None or mtime > current[0]:
-                if current is not None:
-                    pruned += int(_unlink(current[1]))
-                newest[role] = (mtime, path)
-            else:
-                pruned += int(_unlink(path))
-        return pruned
 
     def discover(self) -> dict[str, Any]:
         """手动检测：恢复存活会话缓存、清理死缓存，并重新探测已登记 agent 的存活。"""

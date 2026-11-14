@@ -28,21 +28,25 @@ from typing import Any
 
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    # .mcp.json 以脚本路径启动本文件，项目的包根不在 sys.path 上。
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tools.orchestrator.locking import MAX_WAIT_MS, FileLock, lock_file_name
+
 SERVER_NAME = "sentinel"
 SUPPORTED_PROTOCOL = "2024-11-05"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HOME = PROJECT_ROOT / ".claude" / "orchestrator"
 REQUEST_TIMEOUT_SECONDS = 30.0
-HEARTBEAT_SECONDS_ENV = "SENTINEL_ORCH_HEARTBEAT_SECONDS"
-DEFAULT_HEARTBEAT_SECONDS = 15.0
 PARENT_CHECK_SECONDS_ENV = "SENTINEL_ORCH_PARENT_CHECK_SECONDS"
 DEFAULT_PARENT_CHECK_SECONDS = 2.0
 PROCESS_STARTED_AT = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 CACHE_DIR_NAME = "agents"
 PENDING_DIR_NAME = "pending"
-_heartbeat_lock = threading.Lock()
-_heartbeat_stop: threading.Event | None = None
-_heartbeat_payload: dict[str, Any] | None = None
+_registration_lock: FileLock | None = None
+_registration_lock_path: Path | None = None
+
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -62,8 +66,9 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "orchestrator_register",
         "description": (
-            "Register this MCP server as a role (idempotent). If the daemon is offline, "
-            "the registration is cached and retried by the heartbeat; the result is pending."
+            "Register this MCP server as a role (idempotent). A lock file is written to "
+            "pending/ so a daemon started later discovers this process on its next scan; "
+            "if the daemon is offline the result is pending (no network retry)."
         ),
         "inputSchema": {
             "type": "object",
@@ -279,15 +284,6 @@ def _configure_stdio() -> None:
             continue
 
 
-def heartbeat_interval_seconds() -> float:
-    raw = os.environ.get(HEARTBEAT_SECONDS_ENV, "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_HEARTBEAT_SECONDS
-    return value if value > 0 else DEFAULT_HEARTBEAT_SECONDS
-
-
 def project_root() -> Path:
     override = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
     return Path(override).resolve() if override else PROJECT_ROOT
@@ -362,47 +358,60 @@ def _replace_with_retry(src: Path, dst: Path, attempts: int = 5) -> None:
             time.sleep(0.02)
 
 
-def _pending_file() -> Path:
-    sid = session_id() or f"mcp-{os.getpid()}"
-    return orchestrator_home() / PENDING_DIR_NAME / f"{_cache_key(sid)}.json"
+def _pending_dir() -> Path:
+    return orchestrator_home() / PENDING_DIR_NAME
 
 
-def write_pending_registration(payload: dict[str, Any]) -> None:
-    """无条件落盘 PID File；daemon 是否在线都不影响，供其惰性发现。"""
+def release_pending_registration() -> None:
+    """释放注册锁；进程退出时操作系统也会自动释放，这里用于角色切换/测试。"""
+    global _registration_lock, _registration_lock_path
+    lock, _registration_lock = _registration_lock, None
+    _registration_lock_path = None
+    if lock is not None:
+        lock.release()
+
+
+def hold_pending_registration(payload: dict[str, Any]) -> Path | None:
+    """创建并持有 ``pending/<role>_<pid>_<create_time>.lock``。
+
+    锁由操作系统随进程释放，Daemon 扫描时以非阻塞加锁结果判断存活；文件名携带
+    全部元数据，扫描方无需读取内容（Windows 字节范围锁是强制锁）。
+    """
+    global _registration_lock, _registration_lock_path
     role = str(payload.get("role", "")).strip().casefold()
-    if not role or re.fullmatch(r"[a-z0-9_-]+", role) is None:
-        return
     try:
-        create_time = psutil.Process(os.getpid()).create_time()
-    except (psutil.Error, OSError):
-        return
-    data = {
-        "pid": os.getpid(),
-        "pid_create_time": create_time,
-        "role": role,
-        "cwd": str(project_root()),
-    }
-    path = _pending_file()
+        create_time = float(psutil.Process(os.getpid()).create_time())
+        name = lock_file_name(role, os.getpid(), create_time)
+    except (psutil.Error, OSError, ValueError):
+        return None
+    path = _pending_dir() / name
+    if (
+        _registration_lock is not None
+        and _registration_lock.held
+        and _registration_lock_path == path
+    ):
+        return path
+    release_pending_registration()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
     except OSError:
-        return
-    tmp_path = Path(tmp_name)
+        return None
+    lock = FileLock(path)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(data, ensure_ascii=False, indent=2))
-        _replace_with_retry(tmp_path, path)
-    except OSError:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return
+        acquired = lock.acquire(wait_ms=MAX_WAIT_MS)
+    except OSError as exc:
+        log_event(f"pending lock error: {exc}")
+        return None
+    if not acquired:
+        log_event(f"pending lock busy after {MAX_WAIT_MS:.0f}ms; giving up")
+        return None
+    _registration_lock = lock
+    _registration_lock_path = path
+    return path
 
 
 def save_registration(payload: dict[str, Any]) -> None:
-    write_pending_registration(payload)
+    hold_pending_registration(payload)
     path = _cache_file()
     if path is None:
         return
@@ -417,7 +426,7 @@ def save_registration(payload: dict[str, Any]) -> None:
         "claude_pid": claude_pid(),
         "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
-    # 原子替换：mkdir 后用唯一临时文件，避免心跳与工具调用并发写同一 .tmp。
+    # 原子替换：mkdir 后用唯一临时文件，避免并发写同一 .tmp。
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
@@ -436,45 +445,7 @@ def save_registration(payload: dict[str, Any]) -> None:
         return
 
 
-def start_registration_heartbeat(
-    payload: dict[str, Any], interval: float | None = None
-) -> threading.Event:
-    """注册后周期重注册：daemon 重启/后启动时，agent 能在下一拍被重新识别。"""
-    global _heartbeat_stop, _heartbeat_payload
-    with _heartbeat_lock:
-        _heartbeat_payload = dict(payload)
-        if _heartbeat_stop is not None and not _heartbeat_stop.is_set():
-            return _heartbeat_stop
-        stop = threading.Event()
-        _heartbeat_stop = stop
-    delay = interval if interval is not None else heartbeat_interval_seconds()
-
-    def loop() -> None:
-        while not stop.wait(delay):
-            current: dict[str, Any] | None = _heartbeat_payload
-            if current is None:
-                continue
-            try:
-                status, _ = daemon_request("POST", "/register", current)
-            except (OSError, urllib.error.URLError):
-                continue
-            if 200 <= status < 300:
-                save_registration(current)
-
-    threading.Thread(target=loop, daemon=True, name="orchestrator-heartbeat").start()
-    return stop
-
-
-def stop_registration_heartbeat() -> None:
-    global _heartbeat_stop, _heartbeat_payload
-    with _heartbeat_lock:
-        if _heartbeat_stop is not None:
-            _heartbeat_stop.set()
-        _heartbeat_stop = None
-        _heartbeat_payload = None
-
-
-def auto_register() -> threading.Event | None:
+def auto_register() -> None:
     """有 SENTINEL_ROLE 用环境角色（窗口级兜底）；否则回退到本会话缓存（--resume）。"""
     cached = load_cached_registration()
     role = os.environ.get("SENTINEL_ROLE", "").strip()
@@ -483,7 +454,7 @@ def auto_register() -> threading.Event | None:
     log_event(f"auto_register role={role!r} cached={cached is not None}")
     if not role:
         log_event("auto_register skip: no role")
-        return None
+        return
     session = str(cached.get("session", "")) if cached is not None else ""
     ref = str(cached.get("ref", "")) if cached is not None else ""
     payload = registration_payload(role, session, ref)
@@ -491,10 +462,9 @@ def auto_register() -> threading.Event | None:
         daemon_request("POST", "/register", payload)
     except (OSError, urllib.error.URLError) as exc:
         log_event(f"auto_register daemon offline: {exc}")
-    # 无论 daemon 是否在线都落盘：PID File 供中控启动后惰性发现。
+    # 无论 daemon 是否在线都留锁：中控后启动时由扫描立即发现，无需网络心跳。
     save_registration(payload)
     log_event(f"auto_register saved role={role} session={session!r} ref={ref!r}")
-    return start_registration_heartbeat(payload)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -621,14 +591,16 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         status, body = daemon_request(method, path, payload)
     except (OSError, urllib.error.URLError) as exc:
         if name == "orchestrator_register" and payload is not None:
-            # 中控未启动时也要留下缓存并启动重试心跳；daemon 起来后自动注册。
+            # 中控未启动时只留锁文件与缓存：daemon 起来后由扫描发现，不做网络重试。
             save_registration(payload)
-            start_registration_heartbeat(payload)
             return _tool_result(
                 202,
                 {
                     "status": "pending",
-                    "detail": "daemon offline; retry scheduled",
+                    "detail": "daemon offline; registration lock written",
+                    "lock": _registration_lock_path.name
+                    if _registration_lock_path is not None
+                    else None,
                     "error": str(exc),
                 },
             )
@@ -636,15 +608,16 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     if name == "orchestrator_register" and payload is not None:
         if 200 <= status < 300:
             save_registration(payload)
-            start_registration_heartbeat(payload)
         elif status >= 500:
             save_registration(payload)
-            start_registration_heartbeat(payload)
             return _tool_result(
                 202,
                 {
                     "status": "pending",
-                    "detail": "daemon error; retry scheduled",
+                    "detail": "daemon error; registration lock written",
+                    "lock": _registration_lock_path.name
+                    if _registration_lock_path is not None
+                    else None,
                     "error": str(body.get("error", "")),
                 },
             )

@@ -6,6 +6,7 @@ import { Lock } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ptyStreamUrl, resizePty, sendPtyInput, startPty, streamFetch } from "@/lib/backend";
+import { readClipboardText } from "@/lib/clipboard";
 import { errorMessage } from "@/lib/format";
 import { consumePtyStream } from "@/lib/pty";
 import type { PtyNotice } from "@/lib/types";
@@ -14,6 +15,14 @@ type PtyState = "connecting" | "running" | "exited" | "error";
 
 /** 输出合批窗口：24ms 合并多个流帧，减少 xterm 渲染次数（实测降低 CPU）。 */
 const WRITE_BATCH_MS = 24;
+
+async function pasteInto(term: Terminal): Promise<void> {
+  const text = await readClipboardText();
+  if (!text) return;
+  // term.paste 会按 DECSET 2004 自动包 bracketed paste，再经 onData 写入 PTY。
+  term.paste(text);
+  term.focus();
+}
 
 const STATE_LABEL: Record<PtyState, string> = {
   connecting: "连接中…",
@@ -47,12 +56,33 @@ export function TerminalPanel({
   const [state, setState] = useState<PtyState>("connecting");
   const [info, setInfo] = useState<{ command: string; sessionId: string } | null>(null);
   const [notice, setNotice] = useState<PtyNotice | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(null), 10_000);
     return () => clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const pasteFromMenu = () => {
+    const term = termRef.current;
+    setMenu(null);
+    if (term) void pasteInto(term);
+  };
 
   useEffect(() => {
     if (!role || !agentId || locked) {
@@ -113,6 +143,25 @@ export function TerminalPanel({
     }
 
     const controller = new AbortController();
+    // Ctrl/⌘+V、Shift+Insert：接管剪贴板，避免 WebView2 默认粘贴失效。
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") return true;
+      const pasteCombo =
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "v";
+      const shiftInsert =
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        event.key === "Insert";
+      if (!pasteCombo && !shiftInsert) return true;
+      event.preventDefault();
+      void pasteInto(term);
+      return false;
+    });
     const dataDisposable = term.onData((data) => {
       void sendPtyInput(data, role, agentId).catch(() => undefined);
     });
@@ -231,7 +280,16 @@ export function TerminalPanel({
   const displayInfo = !role || !agentId || locked ? null : info;
 
   return (
-    <section className="relative flex h-full min-h-0 min-w-0 flex-col bg-[#09090b]">
+    <section
+      className="relative flex h-full min-h-0 min-w-0 flex-col bg-[#09090b]"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({
+          x: Math.min(event.clientX, window.innerWidth - 140),
+          y: Math.min(event.clientY, window.innerHeight - 48),
+        });
+      }}
+    >
       <div className="flex h-8 shrink-0 items-center gap-2 border-x border-b border-zinc-800 bg-zinc-950 px-3 text-[11px] text-zinc-500">
         <span
           className={`size-1.5 rounded-full ${
@@ -268,6 +326,27 @@ export function TerminalPanel({
         </div>
       ) : null}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-2 py-1" />
+      {menu ? (
+        <div
+          role="menu"
+          className="fixed z-50 min-w-[120px] rounded-md border border-zinc-700 bg-zinc-900 p-1 shadow-xl"
+          style={{ left: menu.x, top: menu.y }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="w-full rounded px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-zinc-800"
+            onClick={pasteFromMenu}
+          >
+            粘贴
+          </button>
+        </div>
+      ) : null}
       {locked ? (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-zinc-950/85 backdrop-blur-sm">
           <Lock className="size-5 text-amber-400/80" />

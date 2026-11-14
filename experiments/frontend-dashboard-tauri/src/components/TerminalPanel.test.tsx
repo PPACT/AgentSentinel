@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -10,9 +10,11 @@ const mocks = vi.hoisted(() => ({
   resizePty: vi.fn(),
   streamFetch: vi.fn(),
   ptyStreamUrl: vi.fn(async () => "http://127.0.0.1/pty/stream"),
+  readClipboard: vi.fn(),
   fit: vi.fn(),
   terminals: [] as Array<Record<string, unknown>>,
   webgls: [] as Array<{ onContextLoss: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }>,
+  keyHandlers: [] as Array<(event: KeyboardEvent) => boolean>,
   webglThrows: false,
 }));
 
@@ -21,7 +23,12 @@ vi.mock("@xterm/xterm", () => ({
     const term = {
       loadAddon: vi.fn(),
       open: vi.fn(),
+      attachCustomKeyEventHandler: vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+        mocks.keyHandlers.push(handler);
+      }),
       onData: vi.fn(() => ({ dispose: vi.fn() })),
+      paste: vi.fn(),
+      focus: vi.fn(),
       write: vi.fn(),
       refresh: vi.fn(),
       dispose: vi.fn(),
@@ -55,6 +62,7 @@ vi.mock("@/lib/backend", () => ({
   streamFetch: mocks.streamFetch,
   ptyStreamUrl: mocks.ptyStreamUrl,
 }));
+vi.mock("@/lib/clipboard", () => ({ readClipboardText: mocks.readClipboard }));
 
 import { TerminalPanel } from "./TerminalPanel";
 
@@ -66,9 +74,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.terminals.length = 0;
   mocks.webgls.length = 0;
+  mocks.keyHandlers.length = 0;
   mocks.webglThrows = false;
   mocks.startPty.mockResolvedValue({ command: "claude", session_id: "session-1" });
   mocks.streamFetch.mockReturnValue(new Promise(() => undefined));
+  mocks.readClipboard.mockResolvedValue("pasted text");
 });
 
 describe("TerminalPanel", () => {
@@ -126,5 +136,60 @@ describe("TerminalPanel", () => {
 
     expect(addon.dispose).toHaveBeenCalledTimes(1);
     expect(mocks.terminals[0].refresh).toHaveBeenCalled();
+  });
+
+  it("pastes with Ctrl+V through xterm and keeps focus", async () => {
+    render(<TerminalPanel role="dev" agentId="a1" active />);
+    await waitFor(() => expect(mocks.keyHandlers).toHaveLength(1));
+    const handler = mocks.keyHandlers[0];
+    const preventDefault = vi.fn();
+    const event = {
+      type: "keydown",
+      key: "v",
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      preventDefault,
+    } as unknown as KeyboardEvent;
+
+    expect(handler(event)).toBe(false);
+    expect(preventDefault).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mocks.terminals[0].paste).toHaveBeenCalledWith("pasted text"),
+    );
+    expect(mocks.terminals[0].focus).toHaveBeenCalled();
+  });
+
+  it("lets plain Tab and other keys reach the terminal", async () => {
+    render(<TerminalPanel role="dev" agentId="a1" active />);
+    await waitFor(() => expect(mocks.keyHandlers).toHaveLength(1));
+    const handler = mocks.keyHandlers[0];
+    const event = {
+      type: "keydown",
+      key: "Tab",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    expect(handler(event)).toBe(true);
+    expect(mocks.terminals[0].paste).not.toHaveBeenCalled();
+  });
+
+  it("offers paste in the right-click context menu", async () => {
+    render(<TerminalPanel role="dev" agentId="a1" active />);
+    await waitFor(() => expect(mocks.startPty).toHaveBeenCalledTimes(1));
+
+    const section = screen.getByText("Terminal").closest("section");
+    expect(section).not.toBeNull();
+    fireEvent.contextMenu(section as HTMLElement);
+    fireEvent.click(screen.getByRole("menuitem", { name: "粘贴" }));
+
+    await waitFor(() =>
+      expect(mocks.terminals[0].paste).toHaveBeenCalledWith("pasted text"),
+    );
   });
 });

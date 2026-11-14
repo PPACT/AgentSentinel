@@ -645,7 +645,7 @@ export default function App() {
                   : "JSONL 旁路 · 零 token"}
             </span>
           </div>
-          <div className="min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1">
             {effectiveCenterTab === "chat" ? (
               <Suspense
                 fallback={
@@ -686,7 +686,15 @@ export default function App() {
                 role={selectedOnline && ptyChat.sessionId ? activeRole : null}
                 entries={ptyChat.entries}
               />
-            ) : (
+            ) : null}
+            {/* 终端常驻：切 Tab 只隐藏不卸载，避免重连 /pty/stream 回放截断的 backlog。 */}
+            <div
+              className={
+                effectiveCenterTab === "terminal"
+                  ? "h-full min-h-0"
+                  : "pointer-events-none invisible absolute inset-0"
+              }
+            >
               <Suspense
                 fallback={
                   <div className="flex h-full items-center justify-center text-xs text-zinc-600">
@@ -701,9 +709,10 @@ export default function App() {
                   workspaceName={activeWorkspace?.name ?? null}
                   locked={!selectedOnline}
                   lockReason={terminalLockReason}
+                  active={effectiveCenterTab === "terminal"}
                 />
               </Suspense>
-            )}
+            </div>
           </div>
         </main>
 

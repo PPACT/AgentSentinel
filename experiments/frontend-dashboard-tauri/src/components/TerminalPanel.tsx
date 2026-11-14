@@ -1,4 +1,5 @@
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Lock } from "lucide-react";
@@ -24,6 +25,8 @@ interface TerminalPanelProps {
   workspaceName?: string | null;
   locked?: boolean;
   lockReason?: string;
+  /** Tab 是否可见；隐藏时保持挂载与流连接，仅停渲染，避免重连回放 backlog。 */
+  active?: boolean;
 }
 
 /** 原生 PTY 终端：xterm.js 渲染 ANSI；只允许写入当前选中且在线 Agent 的 PTY。 */
@@ -33,8 +36,11 @@ export function TerminalPanel({
   workspaceName = null,
   locked = false,
   lockReason = "当前 Agent 已离线，终端已锁定",
+  active = true,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const [state, setState] = useState<PtyState>("connecting");
   const [info, setInfo] = useState<{ command: string; sessionId: string } | null>(null);
   const [notice, setNotice] = useState<PtyNotice | null>(null);
@@ -70,6 +76,8 @@ export function TerminalPanel({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
+    termRef.current = term;
+    fitRef.current = fit;
     if (import.meta.env.DEV) {
       (window as unknown as { __sentinelTerm?: Terminal }).__sentinelTerm = term;
     }
@@ -79,6 +87,28 @@ export function TerminalPanel({
       // 容器尚未布局完成，ResizeObserver 会再次 fit
     }
 
+    // WebGL 加速：加载失败或上下文丢失时回退默认渲染器，不允许黑屏。
+    let webgl: WebglAddon | null = null;
+    try {
+      webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        try {
+          webgl?.dispose();
+        } catch {
+          // 已释放
+        }
+        webgl = null;
+        try {
+          term.refresh(0, Math.max(0, term.rows - 1));
+        } catch {
+          // 终端已销毁
+        }
+      });
+      term.loadAddon(webgl);
+    } catch {
+      webgl = null;
+    }
+
     const controller = new AbortController();
     const dataDisposable = term.onData((data) => {
       void sendPtyInput(data, role, agentId).catch(() => undefined);
@@ -86,6 +116,7 @@ export function TerminalPanel({
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const applySize = () => {
+      if (container.clientWidth <= 0) return;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         try {
@@ -135,12 +166,31 @@ export function TerminalPanel({
       if (resizeTimer) clearTimeout(resizeTimer);
       observer?.disconnect();
       dataDisposable.dispose();
+      termRef.current = null;
+      fitRef.current = null;
       if ((window as unknown as { __sentinelTerm?: Terminal }).__sentinelTerm === term) {
         delete (window as unknown as { __sentinelTerm?: Terminal }).__sentinelTerm;
       }
       term.dispose();
     };
   }, [role, agentId, locked]);
+
+  // Tab 切回时重新 fit；终端全程保持挂载，不重连 /pty/stream。
+  useEffect(() => {
+    if (!active || !role || !agentId) return;
+    const timer = setTimeout(() => {
+      const container = containerRef.current;
+      const term = termRef.current;
+      if (!container || !term || container.clientWidth <= 0) return;
+      try {
+        fitRef.current?.fit();
+      } catch {
+        return;
+      }
+      void resizePty(term.cols, term.rows, role, agentId).catch(() => undefined);
+    }, 16);
+    return () => clearTimeout(timer);
+  }, [active, role, agentId]);
 
   const displayState: PtyState = !role || !agentId || locked ? "exited" : state;
   const displayInfo = !role || !agentId || locked ? null : info;

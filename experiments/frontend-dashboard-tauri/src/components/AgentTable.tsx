@@ -30,17 +30,24 @@ function sourceOf(agent: Agent): "local" | "managed" | "external" {
 }
 
 const AVATAR_TONE = [
-  "border-sky-500/30 bg-sky-500/10 text-sky-300",
-  "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  "border-amber-500/30 bg-amber-500/10 text-amber-300",
-  "border-rose-500/30 bg-rose-500/10 text-rose-300",
-  "border-cyan-500/30 bg-cyan-500/10 text-cyan-300",
+  "border-sky-500/25 bg-gradient-to-br from-sky-500/20 to-cyan-500/5 text-sky-200",
+  "border-emerald-500/25 bg-gradient-to-br from-emerald-500/20 to-teal-500/5 text-emerald-200",
+  "border-amber-500/25 bg-gradient-to-br from-amber-500/20 to-orange-500/5 text-amber-200",
+  "border-rose-500/25 bg-gradient-to-br from-rose-500/20 to-pink-500/5 text-rose-200",
+  "border-indigo-500/25 bg-gradient-to-br from-indigo-500/20 to-sky-500/5 text-indigo-200",
 ];
 
 function avatarTone(role: string): string {
   let hash = 0;
   for (const char of role) hash = (hash * 31 + char.charCodeAt(0)) % 997;
   return AVATAR_TONE[hash % AVATAR_TONE.length];
+}
+
+/** DEV / DOC / REV：多段角色取首字母，单段取前三位。 */
+function initials(role: string): string {
+  const parts = role.split(/[-_\s]+/).filter(Boolean);
+  if (parts.length >= 2) return parts.slice(0, 3).map((part) => part[0]).join("").toUpperCase();
+  return role.slice(0, 3).toUpperCase();
 }
 
 /** 左侧 Agent 列表：头像 + 角色 + 状态灯；编辑/删除仅在悬停时浮现。 */
@@ -118,9 +125,9 @@ export function AgentTable({
             >
               <span
                 aria-hidden
-                className={`flex size-7 shrink-0 items-center justify-center rounded-md border text-[11px] font-semibold uppercase ${avatarTone(role)}`}
+                className={`flex size-7 shrink-0 items-center justify-center rounded-md border text-[9px] font-semibold tracking-[0.06em] ${avatarTone(role)}`}
               >
-                {(role || "?").slice(0, 1)}
+                {initials(role) || "?"}
               </span>
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="flex items-center gap-1.5">

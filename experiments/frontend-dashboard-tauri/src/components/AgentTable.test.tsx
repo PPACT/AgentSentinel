@@ -31,7 +31,7 @@ describe("AgentTable", () => {
     );
 
     expect(screen.getByText("dev")).toBeInTheDocument();
-    expect(screen.getByText("d")).toBeInTheDocument();
+    expect(screen.getByText("DEV")).toBeInTheDocument();
     expect(screen.getByText("外部注册")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /dev/ })).toHaveAttribute("aria-current", "true");
 

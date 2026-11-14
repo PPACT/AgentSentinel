@@ -98,14 +98,25 @@ export function BudgetPopover({
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-80">
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-200">上下文预算</span>
-            <span className="font-mono text-[10px] text-zinc-500">
+      <PopoverContent
+        align="start"
+        className="w-80 border-transparent [background:linear-gradient(rgba(9,9,11,0.97),rgba(9,9,11,0.97))_padding-box,linear-gradient(140deg,rgba(56,189,248,0.35),rgba(45,212,191,0.12),rgba(99,102,241,0.28))_border-box]"
+      >
+        <div className="space-y-5">
+          <div className="flex items-baseline justify-between">
+            <span className="text-[11px] font-medium tracking-wide text-zinc-400">上下文预算</span>
+            <span className="font-mono text-[10px] text-zinc-600">
               当前 {formatBudget(contextTokens)}
             </span>
           </div>
+
+          <div className="flex items-baseline gap-1.5">
+            <span className="font-mono text-[22px] font-medium leading-none text-zinc-100">
+              {formatBudget(draft)}
+            </span>
+            <span className="font-mono text-[10px] text-zinc-600">tokens</span>
+          </div>
+
           <Slider
             min={MIN_BUDGET}
             max={MAX_BUDGET}
@@ -113,51 +124,63 @@ export function BudgetPopover({
             value={[draft]}
             onValueChange={(values) => setValue(values[0] ?? MIN_BUDGET)}
           />
-          <div className="flex flex-wrap gap-1">
+
+          <div className="flex flex-wrap gap-1.5">
             {PRESETS.map((preset) => (
               <button
                 key={preset}
                 type="button"
                 onClick={() => setValue(preset)}
-                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
+                className={`rounded-md border px-2 py-1 font-mono text-[10px] transition-colors ${
                   draft === preset
-                    ? "border-sky-700 bg-sky-950/40 text-sky-300"
-                    : "border-zinc-700 text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200"
+                    ? "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                    : "border-zinc-800/80 text-zinc-500 hover:border-zinc-700 hover:text-zinc-200"
                 }`}
               >
                 {formatBudget(preset)}
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-2">
-            <Input
-              aria-label="上下文预算 tokens"
-              type="number"
-              min={MIN_BUDGET}
-              max={MAX_BUDGET}
-              step={1_000}
-              value={input}
-              className="h-8 font-mono text-xs"
-              onChange={(event) => {
-                setInput(event.target.value);
-                const parsed = Number(event.target.value);
-                if (Number.isFinite(parsed)) {
-                  const clamped = clampBudget(parsed);
-                  setDraft(clamped);
-                  setDirty(true);
-                }
-              }}
-              onBlur={() => commit()}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  commit(true);
-                }
-              }}
-            />
-            <span className="text-[10px] text-zinc-500">tokens</span>
+
+          <div className="space-y-2 pt-1">
+            <label
+              htmlFor="budget-input"
+              className="text-[11px] font-medium tracking-wide text-zinc-400"
+            >
+              自定义
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="budget-input"
+                aria-label="上下文预算 tokens"
+                type="number"
+                min={MIN_BUDGET}
+                max={MAX_BUDGET}
+                step={1_000}
+                value={input}
+                className="h-9 rounded-md border-zinc-800/80 bg-zinc-900/40 font-mono text-[13px] text-zinc-100 focus:border-sky-500/50 focus:ring-2 focus:ring-sky-500/10"
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  const parsed = Number(event.target.value);
+                  if (Number.isFinite(parsed)) {
+                    const clamped = clampBudget(parsed);
+                    setDraft(clamped);
+                    setDirty(true);
+                  }
+                }}
+                onBlur={() => commit()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commit(true);
+                  }
+                }}
+              />
+              <span className="font-mono text-[10px] text-zinc-600">tokens</span>
+            </div>
           </div>
-          <div className="space-y-0.5 font-mono text-[10px] text-zinc-500">
+
+          <div className="space-y-1 border-t border-zinc-800/60 pt-3 font-mono text-[10px] leading-4 text-zinc-500/70">
             <div>
               累计输入 {usage.input_tokens.toLocaleString()} · 输出{" "}
               {usage.output_tokens.toLocaleString()}
@@ -166,9 +189,9 @@ export function BudgetPopover({
               缓存读 {usage.cache_read_input_tokens.toLocaleString()} · 写入{" "}
               {usage.cache_creation_input_tokens.toLocaleString()}
             </div>
-          </div>
-          <div className="text-[10px] text-zinc-600">
-            拖动滑块或输入数字；失焦或 Enter 生效
+            <div className="pt-1 text-[10px] text-zinc-600">
+              拖动滑块或输入数字；失焦或 Enter 生效
+            </div>
           </div>
         </div>
       </PopoverContent>

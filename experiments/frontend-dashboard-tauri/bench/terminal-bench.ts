@@ -11,6 +11,7 @@ declare global {
 
 const params = new URLSearchParams(window.location.search);
 const renderer = params.get("renderer") === "webgl" ? "webgl" : "default";
+const batchMs = Math.max(0, Number(params.get("batch") ?? 0));
 const container = document.getElementById("term");
 if (!container) throw new Error("no container");
 
@@ -55,6 +56,7 @@ const finish = () => {
   const elapsed = performance.now() - started;
   window.__benchResult = {
     renderer,
+    batchMs,
     webglOk,
     bytes: written,
     ms: Math.round(elapsed),
@@ -62,20 +64,35 @@ const finish = () => {
   };
 };
 
+let pending = "";
+let finished = false;
+const flush = (callback?: () => void) => {
+  const text = pending;
+  pending = "";
+  if (text) term.write(text, callback);
+  else callback?.();
+};
+const interval = batchMs > 0 ? setInterval(() => flush(), batchMs) : null;
+
 const step = () => {
+  if (finished) return;
   const remaining = totalBytes - written;
   if (remaining <= 0) {
-    finish();
+    finished = true;
+    if (interval) clearInterval(interval);
+    if (batchMs > 0) flush(finish);
+    else finish();
     return;
   }
-  if (remaining <= chunk.length) {
-    written += remaining;
-    term.write(chunk.slice(0, remaining), finish);
+  const piece = remaining <= chunk.length ? chunk.slice(0, remaining) : chunk;
+  written += piece.length;
+  if (batchMs > 0) {
+    pending += piece;
+    setTimeout(step, 0);
     return;
   }
-  term.write(chunk);
-  written += chunk.length;
-  setTimeout(step, 0);
+  term.write(piece, remaining <= chunk.length ? finish : undefined);
+  if (remaining > chunk.length) setTimeout(step, 0);
 };
 
 step();

@@ -58,8 +58,10 @@ async function waitHttp(url, timeoutMs = 30000) {
   throw new Error(`timeout waiting for ${url}`);
 }
 
-async function runOnce(renderer) {
-  const targetUrl = `http://127.0.0.1:${PORT}/bench/terminal-bench.html?renderer=${renderer}`;
+async function runOnce(mode) {
+  const targetUrl =
+    `http://127.0.0.1:${PORT}/bench/terminal-bench.html?renderer=${mode.renderer}` +
+    (mode.batch ? `&batch=${mode.batch}` : "");
   const created = await fetch(
     `http://127.0.0.1:${DEBUG_PORT}/json/new?${encodeURIComponent(targetUrl)}`,
     { method: "PUT" },
@@ -90,7 +92,7 @@ async function runOnce(renderer) {
     const cpuSeconds = Number(
       (metric(final, "TaskDuration") - metric(baseline, "TaskDuration")).toFixed(3),
     );
-    return result ? { ...result, cpuSeconds } : { renderer, error: "timeout" };
+    return result ? { ...result, cpuSeconds } : { renderer: mode.renderer, error: "timeout" };
   } finally {
     cdp.close();
     await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/close/${created.id}`).catch(() => undefined);
@@ -121,8 +123,13 @@ async function main() {
     await waitHttp(`http://127.0.0.1:${PORT}/bench/terminal-bench.html`);
     await waitHttp(`http://127.0.0.1:${DEBUG_PORT}/json/version`);
     const results = [];
-    for (const renderer of ["default", "webgl"]) {
-      results.push(await runOnce(renderer));
+    for (const mode of [
+      { renderer: "default" },
+      { renderer: "webgl" },
+      { renderer: "default", batch: 24 },
+      { renderer: "webgl", batch: 24 },
+    ]) {
+      results.push(await runOnce(mode));
     }
     console.log(JSON.stringify(results, null, 2));
   } finally {

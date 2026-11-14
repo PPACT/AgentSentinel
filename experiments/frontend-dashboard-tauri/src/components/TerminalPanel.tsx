@@ -12,6 +12,9 @@ import type { PtyNotice } from "@/lib/types";
 
 type PtyState = "connecting" | "running" | "exited" | "error";
 
+/** 输出合批窗口：24ms 合并多个流帧，减少 xterm 渲染次数（实测降低 CPU）。 */
+const WRITE_BATCH_MS = 24;
+
 const STATE_LABEL: Record<PtyState, string> = {
   connecting: "连接中…",
   running: "运行中",
@@ -114,6 +117,34 @@ export function TerminalPanel({
       void sendPtyInput(data, role, agentId).catch(() => undefined);
     });
 
+    let pendingChunks: Uint8Array[] = [];
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      flushTimer = null;
+      if (pendingChunks.length === 0) return;
+      const chunks = pendingChunks;
+      pendingChunks = [];
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      term.write(merged);
+    };
+    const enqueue = (chunk: Uint8Array) => {
+      pendingChunks.push(chunk);
+      if (flushTimer === null) flushTimer = setTimeout(flush, WRITE_BATCH_MS);
+    };
+    const flushNow = () => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      flush();
+    };
+
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const applySize = () => {
       if (container.clientWidth <= 0) return;
@@ -142,14 +173,16 @@ export function TerminalPanel({
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         setState("running");
         await consumePtyStream(response, {
-          onData: (chunk) => term.write(chunk),
+          onData: (chunk) => enqueue(chunk),
           onNotice: (next) => setNotice(next),
           onExit: (status) => {
+            flushNow();
             setState("exited");
             term.write(`\r\n\x1b[33m[PTY exited${status === null ? "" : `: ${status}`}]\x1b[0m\r\n`);
           },
         });
         if (!controller.signal.aborted) {
+          flushNow();
           setState("exited");
           term.write("\r\n\x1b[33m[PTY stream closed]\x1b[0m\r\n");
         }
@@ -164,6 +197,8 @@ export function TerminalPanel({
     return () => {
       controller.abort();
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      pendingChunks = [];
       observer?.disconnect();
       dataDisposable.dispose();
       termRef.current = null;

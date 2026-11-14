@@ -293,6 +293,7 @@ export function ChatPanel({
         ) : null}
         <div className="overflow-hidden rounded-md border border-zinc-700/80 bg-zinc-900/70 focus-within:border-sky-700/80">
           <textarea
+            data-chat-input
             className="h-20 w-full resize-none bg-transparent px-3 py-2 text-[13px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
             placeholder={locked ? "Agent 已离线，输入已禁用" : "向 PTY 发送…"}
             value={input}

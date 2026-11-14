@@ -1,4 +1,4 @@
-import { ChevronUp, ListChecks, MessageSquare, Terminal } from "lucide-react";
+import { ChevronUp, Terminal } from "lucide-react";
 import {
   lazy,
   Suspense,
@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { AgentsPanel } from "@/components/AgentsPanel";
+import { CenterTabBar } from "@/components/CenterTabBar";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { ProgressPanel } from "@/components/ProgressPanel";
@@ -38,6 +39,8 @@ import {
   updateWorkspaceBudget,
 } from "@/lib/backend";
 import { errorMessage, formatTokenCount } from "@/lib/format";
+import { CENTER_TABS, type CenterTabKey } from "@/lib/centerTabs";
+import { shortcutTarget } from "@/lib/keyboard";
 import { appendBounded, logEventText, makeLogEntry, type LogEntry, type LogLevel } from "@/lib/log";
 import { consumeEventStream, parseEventData } from "@/lib/sse";
 import type {
@@ -67,6 +70,25 @@ function isAgentOnline(agent: Agent | undefined): boolean {
   return !["stopped", "lost", "failed", "pending"].includes(agent.status ?? "");
 }
 
+/** 快捷键切换后把焦点送到目标面板：对话→输入框，终端→xterm 文本框，进度→Tab 按钮。 */
+function focusCenterPane(key: CenterTabKey): void {
+  if (key === "progress") {
+    document.querySelector<HTMLButtonElement>('[data-tab-key="progress"]')?.focus();
+    return;
+  }
+  const selector = key === "chat" ? "[data-chat-input]" : ".xterm-helper-textarea";
+  const deadline = performance.now() + 800;
+  const attempt = () => {
+    const node = document.querySelector<HTMLElement>(selector);
+    if (node) {
+      node.focus();
+      return;
+    }
+    if (performance.now() < deadline) window.setTimeout(attempt, 30);
+  };
+  window.setTimeout(attempt, 0);
+}
+
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonInfo | undefined>();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -94,6 +116,7 @@ export default function App() {
   const chatSupported =
     activeWorkspace === null ? false : (activeWorkspace.capabilities?.chat ?? true);
   const effectiveCenterTab = chatSupported ? centerTab : "terminal";
+  const visibleTabs = CENTER_TABS.filter((tab) => chatSupported || tab.key === "terminal");
   const terminalLockReason = activeRole
     ? "当前 Agent 已离线，终端已锁定"
     : "请先在左侧选择在线 Agent";
@@ -408,6 +431,21 @@ export default function App() {
     };
   }, [appendLog, refreshAll, refreshWorkspaces, startLogStream, startStream]);
 
+  // 全局切换：Ctrl/⌘+Tab（Shift 反向）、Alt+1/2/3；捕获阶段拦截，避免终端吞键。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const tabs = CENTER_TABS.filter((tab) => chatSupported || tab.key === "terminal");
+      const target = shortcutTarget(tabs, effectiveCenterTab, event);
+      if (!target) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setCenterTab(target.key);
+      focusCenterPane(target.key);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [chatSupported, effectiveCenterTab]);
+
   // 点击窗口 X：先让 daemon 优雅退出（Job Object 回收 PTY/claude），确认后再销毁窗口。
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -608,43 +646,11 @@ export default function App() {
         )}
 
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-9 shrink-0 items-center gap-1 border-x border-b border-zinc-800 bg-zinc-950 px-2">
-            {(
-              [
-                { key: "chat", label: "对话", icon: MessageSquare },
-                { key: "progress", label: "进度记录", icon: ListChecks },
-                { key: "terminal", label: "原生终端", icon: Terminal },
-              ] as const
-            )
-              .filter((tab) => chatSupported || tab.key === "terminal")
-              .map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={effectiveCenterTab === tab.key}
-                  onClick={() => setCenterTab(tab.key)}
-                  className={`flex h-7 items-center gap-1.5 rounded px-3 text-[11px] transition-colors ${
-                    effectiveCenterTab === tab.key
-                      ? "bg-zinc-800 text-zinc-100"
-                      : "text-zinc-500 hover:text-zinc-300"
-                  }`}
-                >
-                  <Icon className="size-3.5" />
-                  {tab.label}
-                </button>
-              );
-            })}
-            <span className="ml-auto pr-1 font-mono text-[10px] text-zinc-600">
-              {effectiveCenterTab === "terminal"
-                ? "PTY 常驻 · 原始 ANSI"
-                : effectiveCenterTab === "progress"
-                  ? "工具时间轴 · 零 token"
-                  : "JSONL 旁路 · 零 token"}
-            </span>
-          </div>
+          <CenterTabBar
+            tabs={visibleTabs}
+            active={effectiveCenterTab}
+            onSelect={(key) => setCenterTab(key)}
+          />
           <div className="relative min-h-0 flex-1">
             {effectiveCenterTab === "chat" ? (
               <Suspense
@@ -689,6 +695,8 @@ export default function App() {
             ) : null}
             {/* 终端常驻：切 Tab 只隐藏不卸载，避免重连 /pty/stream 回放截断的 backlog。 */}
             <div
+              aria-hidden={effectiveCenterTab !== "terminal"}
+              inert={effectiveCenterTab !== "terminal"}
               className={
                 effectiveCenterTab === "terminal"
                   ? "h-full min-h-0"

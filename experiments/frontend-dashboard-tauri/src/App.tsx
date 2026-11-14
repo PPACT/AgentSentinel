@@ -684,42 +684,54 @@ export default function App() {
             onSelect={(key) => setCenterTab(key)}
           />
           <div className="relative min-h-0 flex-1">
-            {effectiveCenterTab === "chat" ? (
-              <Suspense
-                fallback={
-                  <div className="flex h-full items-center justify-center text-xs text-zinc-600">
-                    加载对话面板…
-                  </div>
+            {/* 对话面板常驻：切 Tab 不卸载，避免重新挂载/重放历史造成卡顿与误判重连。 */}
+            {chatSupported ? (
+              <div
+                aria-hidden={effectiveCenterTab !== "chat"}
+                inert={effectiveCenterTab !== "chat"}
+                className={
+                  effectiveCenterTab === "chat"
+                    ? "h-full min-h-0"
+                    : "pointer-events-none invisible absolute inset-0"
                 }
               >
-                <ChatPanel
-                  entries={ptyChat.entries}
-                  busy={ptyChat.busy}
-                  sessionId={ptyChat.sessionId}
-                  contextWarning={contextWarning}
-                  contextTokens={ptyChat.contextTokens}
-                  usage={ptyChat.usage}
-                  budgetTokens={effectiveBudget}
-                  notice={ptyChat.notice}
-                  handoff={activeHandoff}
-                  locked={!selectedOnline}
-                  lockReason={chatLockReason}
-                  onSend={(prompt) => {
-                    void ptyChat.send(prompt);
-                  }}
-                  onStop={() => {
-                    void ptyChat.stop();
-                  }}
-                  onHandoff={() => {
-                    void handleHandoff();
-                  }}
-                  onBudgetChange={(tokens) => {
-                    void handleBudgetChange(tokens);
-                  }}
-                  onOpenTerminal={() => setCenterTab("terminal")}
-                />
-              </Suspense>
-            ) : effectiveCenterTab === "progress" ? (
+                <Suspense
+                  fallback={
+                    <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+                      加载对话面板…
+                    </div>
+                  }
+                >
+                  <ChatPanel
+                    entries={ptyChat.entries}
+                    busy={ptyChat.busy}
+                    sessionId={ptyChat.sessionId}
+                    contextWarning={contextWarning}
+                    contextTokens={ptyChat.contextTokens}
+                    usage={ptyChat.usage}
+                    budgetTokens={effectiveBudget}
+                    notice={ptyChat.notice}
+                    handoff={activeHandoff}
+                    locked={!selectedOnline}
+                    lockReason={chatLockReason}
+                    onSend={(prompt) => {
+                      void ptyChat.send(prompt);
+                    }}
+                    onStop={() => {
+                      void ptyChat.stop();
+                    }}
+                    onHandoff={() => {
+                      void handleHandoff();
+                    }}
+                    onBudgetChange={(tokens) => {
+                      void handleBudgetChange(tokens);
+                    }}
+                    onOpenTerminal={() => setCenterTab("terminal")}
+                  />
+                </Suspense>
+              </div>
+            ) : null}
+            {effectiveCenterTab === "progress" ? (
               <ProgressPanel
                 role={selectedOnline && ptyChat.sessionId ? activeRole : null}
                 entries={ptyChat.entries}

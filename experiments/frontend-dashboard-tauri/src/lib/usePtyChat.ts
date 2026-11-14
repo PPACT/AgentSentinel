@@ -8,6 +8,14 @@ import {
   streamFetch,
 } from "./backend";
 import type { ChatEntry } from "./chat";
+import {
+  breakdownFromBase,
+  computeContextBreakdown,
+  contextBaseParts,
+  estimateTokens,
+  requestTokens,
+  type ContextBreakdown,
+} from "./context";
 import { errorMessage } from "./format";
 import { consumePtyChatStream, type PtyChatMessage } from "./pty";
 import type { PtyNotice, TokenUsage } from "./types";
@@ -33,6 +41,9 @@ export interface PtyChatState {
   entries: ChatEntry[];
   busy: boolean;
   contextTokens: number;
+  contextBreakdown: ContextBreakdown | null;
+  contextDelta: number;
+  contextDeltaSeq: number;
   usage: TokenUsage;
   budgetTokens: number;
   notice: PtyNotice | null;
@@ -58,6 +69,9 @@ export function usePtyChat(
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [contextTokens, setContextTokens] = useState(0);
+  const [contextBreakdown, setContextBreakdown] = useState<ContextBreakdown | null>(null);
+  const [contextDelta, setContextDelta] = useState(0);
+  const [contextDeltaSeq, setContextDeltaSeq] = useState(0);
   const [usage, setUsage] = useState<TokenUsage>(EMPTY_USAGE);
   const [budgetTokens, setBudgetTokens] = useState(0);
   const [notice, setNotice] = useState<PtyNotice | null>(null);
@@ -66,6 +80,11 @@ export function usePtyChat(
   const [error, setError] = useState<string | null>(null);
   const nextId = useRef(0);
   const busyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deltaAccumRef = useRef(0);
+  const lastContextRef = useRef(0);
+  const baseTokensRef = useRef(0);
+  const firstUserTokensRef = useRef(-1);
   const lastBindRef = useRef<string | null>(null);
 
   const toEntries = useCallback((messages: PtyChatMessage[]): ChatEntry[] => {
@@ -83,8 +102,40 @@ export function usePtyChat(
     return items;
   }, []);
 
+  /** 记录首条用户消息与首条 assistant usage，供对话中途进入时也能算出分类。 */
+  const rememberContextParts = useCallback((messages: PtyChatMessage[]) => {
+    if (firstUserTokensRef.current < 0) {
+      const firstUser = messages.find((message) => message.role === "user");
+      if (firstUser) {
+        firstUserTokensRef.current = firstUser.blocks.reduce(
+          (sum, block) => sum + (block.kind === "text" ? estimateTokens(block.text) : 0),
+          0,
+        );
+      }
+    }
+    if (baseTokensRef.current <= 0) {
+      const firstAssistant = messages.find(
+        (message) => message.role === "assistant" && requestTokens(message.usage) > 0,
+      );
+      if (firstAssistant) baseTokensRef.current = requestTokens(firstAssistant.usage);
+    }
+  }, []);
+
+  const syncBreakdown = useCallback((tokens: number) => {
+    if (baseTokensRef.current <= 0 || tokens <= 0) return;
+    setContextBreakdown(
+      breakdownFromBase(
+        baseTokensRef.current,
+        Math.max(0, firstUserTokensRef.current),
+        tokens,
+      ),
+    );
+  }, []);
+
   const appendMessages = useCallback(
     (messages: PtyChatMessage[]) => {
+      rememberContextParts(messages);
+      syncBreakdown(lastContextRef.current);
       const items = toEntries(messages);
       if (items.length > 0) setEntries((previous) => [...previous, ...items]);
       const hasText = messages.some(
@@ -96,7 +147,41 @@ export function usePtyChat(
         if (busyTimer.current) clearTimeout(busyTimer.current);
       }
     },
-    [toEntries],
+    [rememberContextParts, syncBreakdown, toEntries],
+  );
+
+  /** 上下文变化只做本地状态更新：数字增加时触发一次浮动增量动画。 */
+  const applyContext = useCallback(
+    (tokens: number) => {
+      const previous = lastContextRef.current;
+      if (tokens <= previous) {
+        setContextTokens((value) => Math.max(value, tokens));
+        syncBreakdown(tokens);
+        return;
+      }
+      lastContextRef.current = tokens;
+      setContextTokens(tokens);
+      syncBreakdown(tokens);
+      if (previous <= 0) return;
+      // 同一轮里可能有多次 API 调用：动画窗口内的增量累加，避免数字频繁跳变。
+      const accumulated = deltaAccumRef.current + (tokens - previous);
+      deltaAccumRef.current = accumulated;
+      setContextDelta(accumulated);
+      setContextDeltaSeq((seq) => seq + 1);
+      if (deltaTimer.current) clearTimeout(deltaTimer.current);
+      deltaTimer.current = setTimeout(() => {
+        deltaAccumRef.current = 0;
+        setContextDelta(0);
+      }, 2_200);
+    },
+    [syncBreakdown],
+  );
+
+  useEffect(
+    () => () => {
+      if (deltaTimer.current) clearTimeout(deltaTimer.current);
+    },
+    [],
   );
 
   useEffect(() => {
@@ -114,12 +199,25 @@ export function usePtyChat(
       setEntries([]);
       setSessionId(null);
       setContextTokens(0);
+      setContextBreakdown(null);
+      setContextDelta(0);
+      deltaAccumRef.current = 0;
+      lastContextRef.current = 0;
+      baseTokensRef.current = 0;
+      firstUserTokensRef.current = -1;
       setUsage(EMPTY_USAGE);
       try {
         const history = await getPtyHistory(role, agentId);
         if (cancelled) return;
         setSessionId(history.session_id);
         setContextTokens(history.context_tokens);
+        lastContextRef.current = history.context_tokens;
+        const parts = contextBaseParts(history.messages);
+        baseTokensRef.current = parts?.base ?? 0;
+        firstUserTokensRef.current = parts?.firstUserTokens ?? -1;
+        setContextBreakdown(
+          computeContextBreakdown(history.messages, history.context_tokens),
+        );
         setUsage(history.usage ?? EMPTY_USAGE);
         setBudgetTokens(history.budget_tokens ?? 0);
         setEntries(toEntries(history.messages));
@@ -130,7 +228,7 @@ export function usePtyChat(
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         await consumePtyChatStream(response, {
           onMessages: appendMessages,
-          onContext: (tokens) => setContextTokens((previous) => Math.max(previous, tokens)),
+          onContext: applyContext,
           onUsage: (delta) => setUsage((previous) => mergeUsage(previous, delta)),
           onNotice: (next) => setNotice(next),
           onSession: (sid) => {
@@ -152,7 +250,7 @@ export function usePtyChat(
       cancelled = true;
       controller.abort();
     };
-  }, [appendMessages, toEntries, role, agentId, enabled, epoch, generation]);
+  }, [appendMessages, applyContext, toEntries, role, agentId, enabled, epoch, generation]);
 
   const send = useCallback(
     async (prompt: string) => {
@@ -190,6 +288,9 @@ export function usePtyChat(
     entries: active ? entries : [],
     busy: active ? busy : false,
     contextTokens: active ? contextTokens : 0,
+    contextBreakdown: active ? contextBreakdown : null,
+    contextDelta: active ? contextDelta : 0,
+    contextDeltaSeq,
     usage: active ? usage : EMPTY_USAGE,
     budgetTokens: active ? budgetTokens : 0,
     notice: active ? notice : null,

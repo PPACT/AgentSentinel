@@ -9,6 +9,7 @@ import { BudgetPopover } from "@/components/BudgetPopover";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatBlock, ChatEntry } from "@/lib/chat";
+import type { ContextBreakdown } from "@/lib/context";
 import type { HandoffStatus, PtyNotice, TokenUsage } from "@/lib/types";
 
 interface ChatPanelProps {
@@ -17,6 +18,9 @@ interface ChatPanelProps {
   sessionId: string | null;
   contextWarning?: string | null;
   contextTokens?: number;
+  contextBreakdown?: ContextBreakdown | null;
+  contextDelta?: number;
+  contextDeltaSeq?: number;
   usage?: TokenUsage | null;
   budgetTokens?: number;
   notice?: PtyNotice | null;
@@ -116,6 +120,9 @@ export function ChatPanel({
   sessionId,
   contextWarning,
   contextTokens = 0,
+  contextBreakdown = null,
+  contextDelta = 0,
+  contextDeltaSeq = 0,
   usage = null,
   budgetTokens = 0,
   notice = null,
@@ -203,6 +210,9 @@ export function ChatPanel({
               {usage ? (
                 <BudgetPopover
                   contextTokens={contextTokens}
+                  contextBreakdown={contextBreakdown}
+                  contextDelta={contextDelta}
+                  contextDeltaSeq={contextDeltaSeq}
                   usage={usage}
                   budgetTokens={budgetTokens}
                   onBudgetChange={onBudgetChange}

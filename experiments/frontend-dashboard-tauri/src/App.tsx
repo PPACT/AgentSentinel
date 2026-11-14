@@ -35,7 +35,6 @@ import {
   setDaemonHome,
   shutdownAllDaemons,
   startHandoff,
-  stopPty,
   stopRole,
   streamFetch,
   updateWorkspaceBudget,
@@ -484,17 +483,7 @@ export default function App() {
     };
   }, [appendLog]);
 
-  // 切换 Agent 时释放上一个角色的 PTY；必须带旧 agent_id，避免误杀同名新 Agent。
-  const previousRoleRef = useRef<{ role: string; agentId: string } | null>(null);
-  useEffect(() => {
-    const previous = previousRoleRef.current;
-    previousRoleRef.current =
-      activeRole && selectedAgentId ? { role: activeRole, agentId: selectedAgentId } : null;
-    if (previous && (previous.role !== activeRole || previous.agentId !== selectedAgentId)) {
-      void stopPty(previous.role, previous.agentId).catch(() => undefined);
-    }
-  }, [activeRole, selectedAgentId]);
-
+  // 切换 Agent 只切换视图；PTY/session 由后端续接，前端不再主动 stop。
   const handleStop = useCallback(
     async (role: string) => {
       setPendingRole(role);
@@ -708,6 +697,9 @@ export default function App() {
                     sessionId={ptyChat.sessionId}
                     contextWarning={contextWarning}
                     contextTokens={ptyChat.contextTokens}
+                    contextBreakdown={ptyChat.contextBreakdown}
+                    contextDelta={ptyChat.contextDelta}
+                    contextDeltaSeq={ptyChat.contextDeltaSeq}
                     usage={ptyChat.usage}
                     budgetTokens={effectiveBudget}
                     notice={ptyChat.notice}

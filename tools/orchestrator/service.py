@@ -813,14 +813,49 @@ class TerminalManager:
     只替换本类内部实现，调用方保持不变。
     """
 
-    def __init__(self, factory: Callable[[str, str | None, str], PtyManager]) -> None:
+    def __init__(
+        self,
+        factory: Callable[[str, str | None, str], PtyManager],
+        sessions_path: str | os.PathLike[str] | None = None,
+    ) -> None:
         self._factory = factory
         self._lock = threading.RLock()
         self._terminals: dict[str, PtyManager] = {}
         self._active_id = DEFAULT_TERMINAL_ID
-        self._sessions: dict[str, str] = {}
+        self._sessions_path = str(sessions_path) if sessions_path is not None else None
+        self._sessions: dict[str, str] = self._load_sessions()
         self._signature: tuple[Any, ...] = ()
         self._terminals[self._active_id] = self._factory("", None, "")
+
+    def _load_sessions(self) -> dict[str, str]:
+        """角色 → session 持久化；daemon 重启后切回仍能续接同一会话。"""
+        if not self._sessions_path:
+            return {}
+        try:
+            data = json.loads(Path(self._sessions_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(role): str(session)
+            for role, session in data.items()
+            if isinstance(role, str) and isinstance(session, str) and session.strip()
+        }
+
+    def _save_sessions_locked(self) -> None:
+        if not self._sessions_path:
+            return
+        path = Path(self._sessions_path)
+        try:
+            temp = f"{self._sessions_path}.tmp"
+            Path(temp).write_text(
+                json.dumps(self._sessions, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temp, path)
+        except OSError:
+            pass
 
     @property
     def lock(self) -> threading.RLock:
@@ -857,6 +892,7 @@ class TerminalManager:
         with self._lock:
             self._terminals[self._active_id].stop()
             self._sessions.clear()
+            self._save_sessions_locked()
             self._terminals[self._active_id] = self._factory("", None, "")
             return self._terminals[self._active_id]
 
@@ -866,11 +902,14 @@ class TerminalManager:
                 pty.stop()
 
     def session_for(self, role: str) -> str | None:
-        return self._sessions.get(role)
+        with self._lock:
+            return self._sessions.get(role)
 
     def remember_session(self, role: str, session: str) -> None:
-        if role and session:
-            self._sessions[role] = session
+        with self._lock:
+            if role and session:
+                self._sessions[role] = session
+                self._save_sessions_locked()
 
     def remember_current_session(self) -> None:
         pty = self.active()
@@ -918,7 +957,8 @@ class Daemon:
                 role,
                 session if session is not None else self._pty_session_override,
                 agent_id,
-            )
+            ),
+            sessions_path=self.home / "pty_sessions.json",
         )
         self._handoff_lock = threading.Lock()
         self._handoff: dict[str, Any] = {"active": False, "phase": "idle", "message": ""}
@@ -1053,17 +1093,30 @@ class Daemon:
             return ""
         return str(config.get("command") or "").strip()
 
-    def _new_pty(self, role: str, session_id: str | None = None, agent_id: str = "") -> PtyManager:
+    def _new_pty(
+        self,
+        role: str,
+        session_id: str | None = None,
+        agent_id: str = "",
+        *,
+        resume: bool = False,
+    ) -> PtyManager:
         workspace = self.active_workspace()
         adapter = adapter_for(str(workspace.get("engine") or "claude"))
         command_text = self._effective_command(workspace, role)
-        factory = (
-            None
-            if self._pty_command
-            else lambda sid: adapter.build_command(
+        # 切回某个角色时必须用 --resume：复用 --session-id 会让 CC 报
+        # “session already exists”，随后降级成一个全新的空会话。
+        resume = resume and bool(adapter.resume_flag)
+        if self._pty_command:
+            factory = None
+        elif resume:
+            factory = lambda sid: adapter.build_resume_command(
                 command_text, sid, self._claude_hook_args(adapter)
             )
-        )
+        else:
+            factory = lambda sid: adapter.build_command(
+                command_text, sid, self._claude_hook_args(adapter)
+            )
         manager = getattr(self, "terminals", None)
         if manager is not None:
             manager.signature = self._workspace_signature(workspace, command_text)
@@ -1273,7 +1326,16 @@ class Daemon:
             # 冲突重试可能换了 session id，切走前记住最新值。
             self.terminals.remember_current_session()
             current.stop()
+            project = str(workspace.get("project_path") or self.project)
+            adapter = adapter_for(str(workspace.get("engine") or "claude"))
             session = self.terminals.session_for(role)
+            resume = False
+            if session and adapter.resume_flag and not self._pty_command:
+                # 只有 JSONL 真实存在时才续接；否则换新 id，避免 --resume 失败。
+                if transcript_path(project, session) is not None:
+                    resume = True
+                else:
+                    session = None
             if not session:
                 session = (
                     self._pty_session_override
@@ -1281,7 +1343,7 @@ class Daemon:
                     else str(uuid.uuid4())
                 )
                 self.terminals.remember_session(role, session)
-            pty = self.terminals.install(self._new_pty(role, session, agent_id))
+            pty = self.terminals.install(self._new_pty(role, session, agent_id, resume=resume))
         self._maybe_inject_wake(role, session, pty)
         return pty
 

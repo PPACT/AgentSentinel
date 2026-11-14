@@ -138,3 +138,33 @@
     transform: translateY(0) scale(1);
   }
 }
+
+/* Token 增量：向上飘动并淡出，约 2s。只由本地 usage 变化触发。 */
+@keyframes token-delta {
+  0% {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  14% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  68% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+.token-delta {
+  animation: token-delta 2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .token-delta {
+    animation-duration: 0.01ms;
+  }
+}

@@ -105,6 +105,7 @@ export interface PtyChatMessage {
   role: string;
   blocks: ChatBlock[];
   timestamp?: string | null;
+  usage?: TokenUsage;
 }
 
 /** 读取 /pty/chat/stream 的 JSONL 旁路事件。 */

@@ -69,6 +69,21 @@ def test_engine_build_command_includes_session_for_claude() -> None:
     assert generic.capabilities() == {"chat": False, "usage": False, "clear": False}
 
 
+def test_engine_build_resume_command_uses_resume_flag() -> None:
+    claude = adapter_for("claude")
+    assert claude.build_resume_command("claude --foo", "session-1") == [
+        "claude",
+        "--foo",
+        "--resume",
+        "session-1",
+    ]
+    # 不支持续接的引擎退回普通命令，不拼 --session-id。
+    assert adapter_for("codex").build_resume_command("codex exec", "session-1") == [
+        "codex",
+        "exec",
+    ]
+
+
 def test_workspace_store_crud_and_active(tmp_path: Path) -> None:
     store = WorkspaceStore(tmp_path / "workspaces.sqlite3")
     default = store.seed_default(str(tmp_path))

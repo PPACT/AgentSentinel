@@ -22,6 +22,7 @@ class EngineAdapter:
     supports_usage: bool
     supports_clear: bool
     session_flag: str = ""
+    resume_flag: str = ""
 
     def build_command(
         self,
@@ -29,9 +30,27 @@ class EngineAdapter:
         session_id: str,
         extra_args: list[str] | None = None,
     ) -> list[str]:
+        return self._build(command, session_id, self.session_flag, extra_args)
+
+    def build_resume_command(
+        self,
+        command: str,
+        session_id: str,
+        extra_args: list[str] | None = None,
+    ) -> list[str]:
+        """续接已有会话：``--resume`` 不会触发 “session already exists”。"""
+        return self._build(command, session_id, self.resume_flag, extra_args)
+
+    def _build(
+        self,
+        command: str,
+        session_id: str,
+        flag: str,
+        extra_args: list[str] | None,
+    ) -> list[str]:
         parts = split_command(command) or split_command(self.default_command)
-        if self.session_flag and session_id:
-            parts.extend([self.session_flag, session_id])
+        if flag and session_id:
+            parts.extend([flag, session_id])
         if extra_args:
             parts.extend(extra_args)
         return parts
@@ -53,6 +72,7 @@ ENGINES: dict[str, EngineAdapter] = {
         supports_usage=True,
         supports_clear=True,
         session_flag="--session-id",
+        resume_flag="--resume",
     ),
     "codex": EngineAdapter(
         id="codex",

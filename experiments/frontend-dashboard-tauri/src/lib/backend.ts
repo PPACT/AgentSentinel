@@ -532,7 +532,12 @@ export function stopPty(role?: string, agentId?: string): Promise<void> {
 export interface PtyHistoryResponse {
   session_id: string;
   source: "pty";
-  messages: Array<{ role: string; blocks: ChatBlock[]; timestamp?: string | null }>;
+  messages: Array<{
+    role: string;
+    blocks: ChatBlock[];
+    timestamp?: string | null;
+    usage?: TokenUsage;
+  }>;
   truncated: boolean;
   context_tokens: number;
   usage?: TokenUsage;

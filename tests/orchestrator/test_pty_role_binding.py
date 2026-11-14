@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from tools.orchestrator import service
@@ -77,6 +78,45 @@ def test_role_switch_reclaims_and_resumes_session(
     assert resumed.role == "dev"
     assert resumed.session_id == dev_session
     resumed.stop()
+
+
+def test_role_switch_back_builds_resume_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """切回角色必须用 --resume；--session-id 会触发 session already exists。"""
+    monkeypatch.delenv("SENTINEL_PTY_COMMAND", raising=False)
+    daemon = service.Daemon(tmp_path / "orch")
+    dev_id = _register(daemon, _record("dev", os.getpid()))
+    doc_id = _register(daemon, _record("doc", os.getpid()))
+    monkeypatch.setattr(
+        service,
+        "transcript_path",
+        lambda project, session: tmp_path / "transcript.jsonl",
+    )
+
+    dev_pty = daemon.pty_for("dev", dev_id)
+    dev_session = dev_pty.session_id
+    daemon.pty_for("doc", doc_id)
+    resumed = daemon.pty_for("dev", dev_id)
+
+    assert resumed.session_id == dev_session
+    assert resumed._command_factory(dev_session) == ["claude", "--resume", dev_session]
+    fresh = daemon._new_pty("doc", "session-fresh", doc_id)
+    assert fresh._command_factory("session-fresh") == [
+        "claude",
+        "--session-id",
+        "session-fresh",
+    ]
+
+
+def test_role_sessions_persist_across_manager_restart(tmp_path: Path) -> None:
+    path = tmp_path / "pty_sessions.json"
+    first = service.TerminalManager(lambda *_: MagicMock(), sessions_path=path)
+    first.remember_session("dev", "session-1")
+    assert path.exists()
+
+    restarted = service.TerminalManager(lambda *_: MagicMock(), sessions_path=path)
+    assert restarted.session_for("dev") == "session-1"
 
 
 def test_stale_agent_id_cannot_stop_current_pty(

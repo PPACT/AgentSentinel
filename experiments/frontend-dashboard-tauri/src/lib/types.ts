@@ -34,6 +34,7 @@ export interface WorkspaceAgent {
   role: string;
   wake_prompt_type: "text" | "file";
   wake_prompt_content: string;
+  command?: string;
   configured: boolean;
   updated_at?: string;
 }

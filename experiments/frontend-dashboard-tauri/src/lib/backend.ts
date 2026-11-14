@@ -387,6 +387,7 @@ export function saveWorkspaceAgent(payload: {
   role: string;
   wake_prompt_type: "text" | "file";
   wake_prompt_content: string;
+  command?: string;
 }): Promise<{ agent: WorkspaceAgent; agents: WorkspaceAgent[] }> {
   return requestControlJSON("/workspaces/agents/save", {
     method: "POST",
@@ -484,8 +485,11 @@ export interface PtyStatus {
   session_id: string;
 }
 
+/** v1 单终端；接口已按 /pty/<terminal_id>/... 设计，未来多终端只改这个标识来源。 */
+export const ACTIVE_TERMINAL_ID = "1";
+
 export function startPty(role?: string, agentId?: string): Promise<PtyStatus> {
-  return requestJSON<PtyStatus>("/pty/start", {
+  return requestJSON<PtyStatus>(`/pty/${ACTIVE_TERMINAL_ID}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role: role ?? "", agent_id: agentId ?? "" }),
@@ -493,7 +497,7 @@ export function startPty(role?: string, agentId?: string): Promise<PtyStatus> {
 }
 
 export function sendPtyInput(data: string, role?: string, agentId?: string): Promise<void> {
-  return requestJSON<unknown>("/pty/input", {
+  return requestJSON<unknown>(`/pty/${ACTIVE_TERMINAL_ID}/input`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ data, role: role ?? "", agent_id: agentId ?? "" }),
@@ -506,7 +510,7 @@ export function resizePty(
   role?: string,
   agentId?: string,
 ): Promise<PtyStatus> {
-  return requestJSON<PtyStatus>("/pty/resize", {
+  return requestJSON<PtyStatus>(`/pty/${ACTIVE_TERMINAL_ID}/resize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cols, rows, role: role ?? "", agent_id: agentId ?? "" }),
@@ -514,11 +518,11 @@ export function resizePty(
 }
 
 export async function ptyStreamUrl(role?: string, agentId?: string): Promise<string> {
-  return `${await daemonBase()}/pty/stream?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
+  return `${await daemonBase()}/pty/${ACTIVE_TERMINAL_ID}/stream?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
 }
 
 export function stopPty(role?: string, agentId?: string): Promise<void> {
-  return requestJSON<unknown>("/pty/stop", {
+  return requestJSON<unknown>(`/pty/${ACTIVE_TERMINAL_ID}/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role: role ?? "", agent_id: agentId ?? "" }),
@@ -539,7 +543,7 @@ export interface PtyHistoryResponse {
 
 export function getPtyHistory(role?: string, agentId?: string): Promise<PtyHistoryResponse> {
   return requestJSON<PtyHistoryResponse>(
-    `/pty/history?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`,
+    `/pty/${ACTIVE_TERMINAL_ID}/history?role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`,
   );
 }
 
@@ -548,7 +552,7 @@ export async function ptyChatStreamUrl(
   role?: string,
   agentId?: string,
 ): Promise<string> {
-  return `${await daemonBase()}/pty/chat/stream?offset=${offset}&role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
+  return `${await daemonBase()}/pty/${ACTIVE_TERMINAL_ID}/chat/stream?offset=${offset}&role=${encodeURIComponent(role ?? "")}&agent_id=${encodeURIComponent(agentId ?? "")}`;
 }
 
 /** 发起某一角色的一轮聊天，返回可直接读取的 SSE 响应流。 */

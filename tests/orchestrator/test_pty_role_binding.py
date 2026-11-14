@@ -50,7 +50,7 @@ def test_role_offline_reclaims_bound_pty(tmp_path: Path, monkeypatch: pytest.Mon
 
     daemon.registry.set_status("dev", "stopped")
     assert daemon.enforce_pty_binding() is True
-    assert daemon.pty.status()["running"] is False
+    assert daemon.terminals.active().status()["running"] is False
     assert not (tmp_path / "orch" / "pty.json").exists()
 
 
@@ -89,9 +89,9 @@ def test_stale_agent_id_cannot_stop_current_pty(
     pty = daemon.pty_for("dev", agent_id)
     pty.start()
     assert daemon.stop_pty_for_role("dev", "deadbeefdeadbeef") is False
-    assert daemon.pty.status()["running"] is True
+    assert daemon.terminals.active().status()["running"] is True
     assert daemon.stop_pty_for_role("dev", agent_id) is True
-    assert daemon.pty.status()["running"] is False
+    assert daemon.terminals.active().status()["running"] is False
 
 
 def test_re_registered_role_reclaims_old_binding(
@@ -106,4 +106,4 @@ def test_re_registered_role_reclaims_old_binding(
     second_id = _register(daemon, _record("dev", os.getppid()))
     assert second_id != first_id
     assert daemon.enforce_pty_binding() is True
-    assert daemon.pty.status()["running"] is False
+    assert daemon.terminals.active().status()["running"] is False

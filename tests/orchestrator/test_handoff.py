@@ -116,7 +116,7 @@ def test_handoff_pipeline_injects_four_steps_and_relocates_session(
     )
     daemon = service.Daemon(tmp_path / "orch")
     fake = _FakePty()
-    monkeypatch.setattr(daemon, "pty", fake)
+    daemon.terminals.install(fake)  # type: ignore[arg-type]
 
     daemon._run_handoff("dev", OLD_SESSION, str(tmp_path), 0, "开始工作\n第二行")
 
@@ -125,7 +125,7 @@ def test_handoff_pipeline_injects_four_steps_and_relocates_session(
     assert fake.writes[2].startswith("\x1b[200~开始工作")
     assert fake.writes[2].endswith("\x1b[201~\r")
     assert fake.session_id == NEW_SESSION
-    assert daemon._pty_sessions["dev"] == NEW_SESSION
+    assert daemon.terminals.session_for("dev") == NEW_SESSION
     status = daemon.handoff_status()
     assert status["active"] is False
     assert status["phase"] == "done"

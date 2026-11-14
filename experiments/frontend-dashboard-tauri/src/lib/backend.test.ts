@@ -87,13 +87,13 @@ describe("pty agent binding", () => {
     const { getPtyHistory, sendPtyInput, startPty } = await import("./backend");
     await startPty("doc", "id-doc");
     expect(mocks.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:8954/pty/start",
+      "http://127.0.0.1:8954/pty/1/start",
       expect.objectContaining({ body: JSON.stringify({ role: "doc", agent_id: "id-doc" }) }),
     );
 
     await sendPtyInput("hi", "doc", "id-doc");
     expect(mocks.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:8954/pty/input",
+      "http://127.0.0.1:8954/pty/1/input",
       expect.objectContaining({
         body: JSON.stringify({ data: "hi", role: "doc", agent_id: "id-doc" }),
       }),
@@ -101,7 +101,7 @@ describe("pty agent binding", () => {
 
     await getPtyHistory("doc", "id-doc");
     expect(mocks.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:8954/pty/history?role=doc&agent_id=id-doc",
+      "http://127.0.0.1:8954/pty/1/history?role=doc&agent_id=id-doc",
       expect.anything(),
     );
   });

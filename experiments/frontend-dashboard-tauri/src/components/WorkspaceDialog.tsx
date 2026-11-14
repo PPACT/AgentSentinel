@@ -37,6 +37,7 @@ interface WorkspaceDialogProps {
   engines: EngineOption[];
   activeId: number | null;
   onRefresh: (data: WorkspacesResponse) => void;
+  onAgentChanged?: () => void;
 }
 
 interface FormState {
@@ -92,6 +93,7 @@ export function WorkspaceDialog({
   engines,
   activeId,
   onRefresh,
+  onAgentChanged,
 }: WorkspaceDialogProps) {
   const initial = workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0];
   const [selectedId, setSelectedId] = useState<number | null>(initial?.id ?? null);
@@ -104,6 +106,7 @@ export function WorkspaceDialog({
   const [agentRole, setAgentRole] = useState("");
   const [agentType, setAgentType] = useState<"text" | "file">("text");
   const [agentContent, setAgentContent] = useState("");
+  const [agentCommand, setAgentCommand] = useState("");
   const [agentMessage, setAgentMessage] = useState<string | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
 
@@ -257,6 +260,7 @@ export function WorkspaceDialog({
     setAgentRole(agent.role);
     setAgentType(agent.wake_prompt_type === "file" ? "file" : "text");
     setAgentContent(agent.wake_prompt_content);
+    setAgentCommand(agent.command ?? "");
     setAgentMessage(null);
   };
 
@@ -264,6 +268,7 @@ export function WorkspaceDialog({
     setAgentRole("");
     setAgentType("text");
     setAgentContent("");
+    setAgentCommand("");
     setAgentMessage(null);
   };
 
@@ -277,8 +282,8 @@ export function WorkspaceDialog({
       setAgentMessage("请填写角色名（如 dev / doc / local）");
       return;
     }
-    if (!agentContent.trim()) {
-      setAgentMessage("唤醒词内容不能为空");
+    if (!agentContent.trim() && !agentCommand.trim()) {
+      setAgentMessage("唤醒词和启动命令至少填写一项");
       return;
     }
     setAgentBusy(true);
@@ -289,10 +294,12 @@ export function WorkspaceDialog({
         role,
         wake_prompt_type: agentType,
         wake_prompt_content: agentContent,
+        command: agentCommand.trim(),
       });
       setAgentConfigs(data.agents ?? []);
       setAgentRole(role);
-      setAgentMessage(`已保存 ${role} 的唤醒词`);
+      setAgentMessage(`已保存 ${role} 的角色配置`);
+      onAgentChanged?.();
     } catch (error) {
       setAgentMessage(errorMessage(error));
     } finally {
@@ -309,7 +316,8 @@ export function WorkspaceDialog({
       const data = await deleteWorkspaceAgent(selectedId, agentRole);
       setAgentConfigs(data.agents ?? []);
       resetAgent();
-      setAgentMessage("已删除该角色的唤醒词");
+      setAgentMessage("已删除该角色的配置");
+      onAgentChanged?.();
     } catch (error) {
       setAgentMessage(errorMessage(error));
     } finally {
@@ -479,6 +487,18 @@ export function WorkspaceDialog({
                     <option value="text">直接输入</option>
                     <option value="file">读取 .md / .txt 文件</option>
                   </select>
+                </Field>
+              </div>
+              <div className="mt-2">
+                <Field
+                  label="启动命令（可选）"
+                  hint="留空则使用工作区默认命令；保存后该角色会出现在左侧列表"
+                >
+                  <Input
+                    value={agentCommand}
+                    placeholder={form.command || "claude"}
+                    onChange={(event) => setAgentCommand(event.target.value)}
+                  />
                 </Field>
               </div>
               {agentType === "text" ? (

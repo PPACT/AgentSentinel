@@ -80,9 +80,18 @@ class WorkspaceStore:
                 "role TEXT NOT NULL, "
                 "wake_prompt_type TEXT NOT NULL DEFAULT 'text', "
                 "wake_prompt_content TEXT NOT NULL DEFAULT '', "
+                "command TEXT NOT NULL DEFAULT '', "
                 "updated_at TEXT NOT NULL, "
                 "PRIMARY KEY (workspace_id, role))"
             )
+            agent_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(workspace_agents)").fetchall()
+            }
+            if "command" not in agent_columns:
+                connection.execute(
+                    "ALTER TABLE workspace_agents ADD COLUMN command TEXT NOT NULL DEFAULT ''"
+                )
             # 旧数据迁移：Workspace 级唤醒词下放给该工作区的 local 角色。
             legacy_rows = connection.execute(
                 "SELECT id, wake_prompt, wake_prompt_file FROM workspaces"
@@ -286,6 +295,7 @@ class WorkspaceStore:
         role = str(payload.get("role", "")).strip().casefold()
         prompt_type = str(payload.get("wake_prompt_type", "text")).strip().lower()
         content = str(payload.get("wake_prompt_content", "") or "")
+        command = str(payload.get("command", "") or "").strip()
         if prompt_type not in ("text", "file"):
             raise ValueError("wake_prompt_type must be text or file")
         if workspace_id <= 0:
@@ -301,13 +311,14 @@ class WorkspaceStore:
                 raise ValueError(f"unknown workspace: {workspace_id}")
             connection.execute(
                 "INSERT INTO workspace_agents "
-                "(workspace_id, role, wake_prompt_type, wake_prompt_content, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "(workspace_id, role, wake_prompt_type, wake_prompt_content, command, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(workspace_id, role) DO UPDATE SET "
                 "wake_prompt_type=excluded.wake_prompt_type, "
                 "wake_prompt_content=excluded.wake_prompt_content, "
+                "command=excluded.command, "
                 "updated_at=excluded.updated_at",
-                (workspace_id, role, prompt_type, content, now),
+                (workspace_id, role, prompt_type, content, command, now),
             )
             connection.commit()
             row = connection.execute(

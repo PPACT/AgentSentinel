@@ -828,6 +828,9 @@ export default function App() {
           engines={engines}
           activeId={activeWorkspace?.id ?? null}
           onRefresh={handleWorkspacesChanged}
+          onAgentChanged={() => {
+            void refreshAll();
+          }}
         />
       ) : null}
     </div>

@@ -57,6 +57,7 @@ export function AgentTable({
             const role = agent.role ?? "";
             const pending = pendingRole === role;
             const managed = Boolean(agent.job_id);
+            const local = agent.command === "workspace";
             const details = [
               `role=${row.role}`,
               `status=${row.status}`,
@@ -101,7 +102,18 @@ export function AgentTable({
                   }`}
                   title={details}
                 >
-                  <div className="truncate font-medium text-zinc-100">{row.role}</div>
+                  <div className="flex min-w-0 items-center gap-1">
+                    <span className="truncate font-medium text-zinc-100">{row.role}</span>
+                    <span
+                      className={`shrink-0 rounded border px-1 text-[9px] ${
+                        local
+                          ? "border-sky-800/60 bg-sky-950/40 text-sky-300"
+                          : "border-zinc-700 bg-zinc-900 text-zinc-500"
+                      }`}
+                    >
+                      {local ? "本地" : "外部"}
+                    </span>
+                  </div>
                   {row.project !== "—" ? (
                     <div className="truncate font-mono text-[10px] text-zinc-600">
                       {shortProject(row.project)}
@@ -134,6 +146,13 @@ export function AgentTable({
                     >
                       {pending ? "停止中…" : "停止"}
                     </Button>
+                  ) : local ? (
+                    <span
+                      className="whitespace-nowrap text-[10px] text-sky-400/80"
+                      title="配置角色（本地）：由中控按角色启动命令拉起，切换角色时自动回收"
+                    >
+                      本地
+                    </span>
                   ) : (
                     <span
                       className="whitespace-nowrap text-[10px] text-zinc-600"

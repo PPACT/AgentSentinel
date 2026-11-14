@@ -86,7 +86,7 @@ describe("WorkspaceDialog", () => {
 
     fireEvent.change(screen.getByLabelText("引擎预设"), { target: { value: "codex" } });
 
-    expect(screen.getByLabelText(/启动命令/)).toHaveValue("codex");
+    expect(screen.getByDisplayValue("codex")).toBeInTheDocument();
   });
 
   it("shows the preflight error without starting anything", async () => {
@@ -153,6 +153,7 @@ describe("WorkspaceDialog", () => {
         role: "dev",
         wake_prompt_type: "text",
         wake_prompt_content: "接续",
+        command: "",
       }),
     );
   });

@@ -65,8 +65,20 @@ describe("AgentTable", () => {
         onStop={() => {}}
       />,
     );
-    expect(screen.getByText("外部")).toBeInTheDocument();
+    expect(screen.getAllByText("外部").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+  });
+
+  it("labels configured local roles and hides external marker", () => {
+    render(
+      <AgentTable
+        agents={[{ role: "reviewer", pid: 42, alive: true, command: "workspace" }]}
+        pendingRole={null}
+        onStop={() => {}}
+      />,
+    );
+    expect(screen.getAllByText("本地").length).toBeGreaterThan(0);
+    expect(screen.queryByText("外部")).not.toBeInTheDocument();
   });
 
   it("selects a role by click and stop does not change selection", () => {

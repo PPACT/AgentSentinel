@@ -713,6 +713,15 @@ def handoff_timeout_seconds() -> float:
     return value if value > 0 else DEFAULT_HANDOFF_TIMEOUT_SECONDS
 
 
+def wake_inject_delay_seconds() -> float:
+    raw = os.environ.get("SENTINEL_WAKE_INJECT_DELAY_SECONDS", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 8.0
+    return value if value >= 0 else 8.0
+
+
 def _transcript_offset(project: str, session: str) -> int:
     path = transcript_path(project, session)
     if path is None:
@@ -777,6 +786,81 @@ def _cache_expired(data: dict[str, Any], path: Path) -> bool:
     return datetime.now(UTC) - timestamp > timedelta(seconds=AGENT_CACHE_TTL_SECONDS)
 
 
+DEFAULT_TERMINAL_ID = "1"
+
+
+class TerminalManager:
+    """终端代理层：业务只通过它拿 PtyManager。
+
+    v1 只管理一个终端（id="1"），但 API/标识已按多终端设计；未来扩成池时
+    只替换本类内部实现，调用方保持不变。
+    """
+
+    def __init__(self, factory: Callable[[str, str | None, str], PtyManager]) -> None:
+        self._factory = factory
+        self._lock = threading.RLock()
+        self._terminals: dict[str, PtyManager] = {}
+        self._active_id = DEFAULT_TERMINAL_ID
+        self._sessions: dict[str, str] = {}
+        self._signature: tuple[Any, ...] = ()
+        self._terminals[self._active_id] = self._factory("", None, "")
+
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
+    @property
+    def active_id(self) -> str:
+        return self._active_id
+
+    @property
+    def signature(self) -> tuple[Any, ...]:
+        return self._signature
+
+    @signature.setter
+    def signature(self, value: tuple[Any, ...]) -> None:
+        self._signature = value
+
+    def active(self) -> PtyManager:
+        with self._lock:
+            return self._terminals[self._active_id]
+
+    def get(self, terminal_id: str | None = None) -> PtyManager | None:
+        with self._lock:
+            key = (terminal_id or "").strip() or self._active_id
+            return self._terminals.get(key)
+
+    def install(self, pty: PtyManager, terminal_id: str | None = None) -> PtyManager:
+        with self._lock:
+            key = (terminal_id or "").strip() or self._active_id
+            self._terminals[key] = pty
+            return pty
+
+    def reset(self) -> PtyManager:
+        with self._lock:
+            self._terminals[self._active_id].stop()
+            self._sessions.clear()
+            self._terminals[self._active_id] = self._factory("", None, "")
+            return self._terminals[self._active_id]
+
+    def stop_all(self) -> None:
+        with self._lock:
+            for pty in self._terminals.values():
+                pty.stop()
+
+    def session_for(self, role: str) -> str | None:
+        return self._sessions.get(role)
+
+    def remember_session(self, role: str, session: str) -> None:
+        if role and session:
+            self._sessions[role] = session
+
+    def remember_current_session(self) -> None:
+        pty = self.active()
+        if pty.role and pty.session_id:
+            self.remember_session(pty.role, pty.session_id)
+
+
 class Daemon:
     def __init__(self, home: Path, host: str = DEFAULT_HOST, port: int = 0) -> None:
         self.home = home
@@ -800,11 +884,10 @@ class Daemon:
         self._pty_command = tuple(shlex.split(pty_override)) if pty_override else None
         self._pty_session_override = os.environ.get("SENTINEL_PTY_SESSION_ID", "").strip() or None
         self._pty_env = _pty_environment()
-        self._pty_lock = threading.Lock()
-        self._pty_sessions: dict[str, str] = {}
-        self._pty_signature: tuple[Any, ...] = ()
         self._hook_notice_lock = threading.Lock()
         self._hook_notice_seen: dict[tuple[str, str], float] = {}
+        self._wake_lock = threading.Lock()
+        self._wake_injected: set[str] = set()
         self._bound_workspace_id = _int(os.environ.get("SENTINEL_WORKSPACE_ID", ""))
         db_path = ensure_workspace_db(home)
         is_global_db = db_path == user_data_dir() / "workspaces.sqlite3"
@@ -813,12 +896,17 @@ class Daemon:
             control_home=control_daemon_home() if is_global_db else None,
         )
         self.workspaces.seed_default(self.project)
-        self.pty = self._new_pty("", self._pty_session_override)
+        self.terminals = TerminalManager(
+            lambda role, session, agent_id: self._new_pty(
+                role,
+                session if session is not None else self._pty_session_override,
+                agent_id,
+            )
+        )
         self._handoff_lock = threading.Lock()
         self._handoff: dict[str, Any] = {"active": False, "phase": "idle", "message": ""}
-        if self._bound_workspace_id > 0:
-            # 独立工作区自带本地终端 Agent，保证空 registry 也能直接跑 CLI。
-            self._register_local_agent()
+        # 配置角色（含 local）进入 registry，左侧列表按配置动态展示。
+        self._register_workspace_agents()
         self.ack_timeout = ack_timeout_seconds()
         self.lost_seconds = lost_timeout_seconds()
         self.watchdog_seconds = watchdog_seconds()
@@ -835,22 +923,54 @@ class Daemon:
         self.router.startup_recovery()
         self.reconcile_pending_agents()
 
-    def _register_local_agent(self) -> None:
+    def _register_workspace_agents(self) -> None:
+        """把当前 Workspace 的配置角色（含 local）注册为本地 Agent。
+
+        外部 / 托管 Agent 存活时优先，不覆盖；本地记录沿用 started_at，
+        避免保存配置或重启后 agent_id 漂移。
+        """
+        workspace = self.active_workspace()
+        workspace_id = int(workspace.get("id") or 0)
+        roles = {
+            str(agent.get("role") or "").strip().casefold()
+            for agent in self.workspaces.list_agents(workspace_id)
+        }
+        if self._bound_workspace_id > 0:
+            # 独立工作区自带本地终端 Agent，保证空 registry 也能直接跑 CLI。
+            roles.add("local")
+        roles.discard("")
         now = utc_now()
-        self.registry.upsert(
-            AgentRecord(
-                role="local",
-                pid=os.getpid(),
-                pgid=os.getpid(),
-                job_id="",
-                status="registered",
-                started_at=now,
-                last_heartbeat=now,
-                command="workspace",
-                updated_at=now,
-                project=self.project,
+        for role in sorted(roles):
+            existing = self.registry.get(role)
+            if existing is not None and existing.pid != os.getpid() and process_alive(existing.pid):
+                # 外部 MCP / 托管 worker 存活，保持其身份。
+                continue
+            started = (
+                existing.started_at
+                if existing is not None and existing.command == "workspace"
+                else now
             )
-        )
+            self.registry.upsert(
+                AgentRecord(
+                    role=role,
+                    pid=os.getpid(),
+                    pgid=os.getpid(),
+                    job_id="",
+                    status="registered",
+                    started_at=started,
+                    last_heartbeat=now,
+                    command="workspace",
+                    updated_at=now,
+                    project=self.project,
+                )
+            )
+        for record in self.registry.list():
+            if (
+                record.command == "workspace"
+                and record.role not in roles
+                and record.status != "stopped"
+            ):
+                self.registry.set_status(record.role, "stopped")
 
     def active_workspace(self) -> dict[str, Any]:
         if self._bound_workspace_id > 0:
@@ -863,11 +983,11 @@ class Daemon:
         return workspace
 
     @staticmethod
-    def _workspace_signature(workspace: dict[str, Any]) -> tuple[Any, ...]:
+    def _workspace_signature(workspace: dict[str, Any], command_text: str = "") -> tuple[Any, ...]:
         return (
             int(workspace.get("id") or 0),
             str(workspace.get("project_path") or ""),
-            str(workspace.get("command") or ""),
+            command_text or str(workspace.get("command") or ""),
             str(workspace.get("engine") or ""),
         )
 
@@ -890,29 +1010,36 @@ class Daemon:
     def transcript_project(self) -> str:
         return str(self.active_workspace().get("project_path") or self.project)
 
-    def pty_preflight(self) -> dict[str, Any]:
+    def pty_preflight(self, role: str = "") -> dict[str, Any]:
         workspace = self.active_workspace()
         project = str(workspace.get("project_path") or self.project)
         if self._pty_command:
             return preflight(" ".join(self._pty_command), project)
-        return preflight(str(workspace.get("command") or ""), project)
+        return preflight(self._effective_command(workspace, role), project)
 
     def reset_pty(self) -> None:
-        with self._pty_lock:
-            self.pty.stop()
-            self._pty_sessions.clear()
-            self.pty = self._new_pty("", self._pty_session_override)
+        with self.terminals.lock:
+            self.terminals.reset()
 
     def activate_workspace(self, workspace_id: int) -> dict[str, Any]:
         workspace = self.workspaces.activate(workspace_id)
         self.reset_pty()
+        self._register_workspace_agents()
         self._publish()
         return workspace
+
+    def _role_command(self, workspace: dict[str, Any], role: str) -> str:
+        if not role:
+            return ""
+        config = self.workspaces.get_agent(int(workspace.get("id") or 0), role)
+        if config is None:
+            return ""
+        return str(config.get("command") or "").strip()
 
     def _new_pty(self, role: str, session_id: str | None = None, agent_id: str = "") -> PtyManager:
         workspace = self.active_workspace()
         adapter = adapter_for(str(workspace.get("engine") or "claude"))
-        command_text = str(workspace.get("command") or adapter.default_command)
+        command_text = self._effective_command(workspace, role)
         factory = (
             None
             if self._pty_command
@@ -920,7 +1047,9 @@ class Daemon:
                 command_text, sid, self._claude_hook_args(adapter)
             )
         )
-        self._pty_signature = self._workspace_signature(workspace)
+        manager = getattr(self, "terminals", None)
+        if manager is not None:
+            manager.signature = self._workspace_signature(workspace, command_text)
         return PtyManager(
             cwd=str(workspace.get("project_path") or self.project),
             command=self._pty_command,
@@ -951,7 +1080,7 @@ class Daemon:
         with self._hook_notice_lock:
             last = self._hook_notice_seen.get(key)
             if last is not None and now - last < HOOK_NOTICE_DEDUPE_SECONDS:
-                return {"deduped": True, "notice": self.pty.latest_notice()}
+                return {"deduped": True, "notice": self.terminals.active().latest_notice()}
             self._hook_notice_seen[key] = now
             if len(self._hook_notice_seen) > 64:
                 cutoff = now - HOOK_NOTICE_DEDUPE_SECONDS * 4
@@ -959,7 +1088,7 @@ class Daemon:
                     entry for entry, seen in self._hook_notice_seen.items() if seen < cutoff
                 ]:
                     del self._hook_notice_seen[stale]
-        notice = self.pty.notify(PERMISSION_MATCHER, CLAUDE_HOOK_NOTICE_MESSAGE)
+        notice = self.terminals.active().notify(PERMISSION_MATCHER, CLAUDE_HOOK_NOTICE_MESSAGE)
         return {"deduped": False, "notice": notice}
 
     def resolve_agent_wake_prompt(self, workspace_id: int, role: str) -> str:
@@ -1000,7 +1129,7 @@ class Daemon:
             wake = self.resolve_agent_wake_prompt(workspace_id, role)
         except ValueError as exc:
             return 400, {"error": str(exc), "reason": "wake_prompt_required"}
-        pty = self.pty
+        pty = self.terminals.active()
         if not pty.status().get("running"):
             return 409, {"error": "PTY 未运行，无法交接", "reason": "pty_not_running"}
         session = pty.session_id
@@ -1031,7 +1160,7 @@ class Daemon:
         return 202, self.handoff_status()
 
     def _run_handoff(self, role: str, session: str, project: str, offset: int, wake: str) -> None:
-        pty = self.pty
+        pty = self.terminals.active()
         try:
             _inject_prompt(pty, handoff_prompt())
             self._handoff_phase("waiting", "等待 Agent 完成…")
@@ -1048,8 +1177,7 @@ class Daemon:
             warning = ""
             if new_session:
                 pty.set_session(new_session)
-                with self._pty_lock:
-                    self._pty_sessions[role] = new_session
+                self.terminals.remember_session(role, new_session)
             else:
                 warning = "未能定位新会话 JSONL，对话页可能仍显示旧会话"
             with self._handoff_lock:
@@ -1103,47 +1231,104 @@ class Daemon:
             time.sleep(0.5)
         return ""
 
+    def _effective_command(self, workspace: dict[str, Any], role: str) -> str:
+        adapter = adapter_for(str(workspace.get("engine") or "claude"))
+        return (
+            self._role_command(workspace, role)
+            or str(workspace.get("command") or "")
+            or adapter.default_command
+        )
+
     def pty_for(self, role: str, agent_id: str = "") -> PtyManager:
         """返回绑定该 Agent 的唯一实例；role 相同但 agent_id 变化视为换人。"""
         role = role.strip()
         agent_id = agent_id.strip()
         workspace = self.active_workspace()
-        signature = self._workspace_signature(workspace)
-        with self._pty_lock:
+        signature = self._workspace_signature(workspace, self._effective_command(workspace, role))
+        with self.terminals.lock:
+            current = self.terminals.active()
             if (
-                self.pty.role == role
-                and self.pty.agent_id == agent_id
-                and self._pty_signature == signature
+                current.role == role
+                and current.agent_id == agent_id
+                and self.terminals.signature == signature
             ):
-                return self.pty
-            if self.pty.role and self.pty.session_id:
-                # 冲突重试可能换了 session id，切走前记住最新值。
-                self._pty_sessions[self.pty.role] = self.pty.session_id
-            self.pty.stop()
-            session = self._pty_sessions.get(role)
+                return current
+            # 冲突重试可能换了 session id，切走前记住最新值。
+            self.terminals.remember_current_session()
+            current.stop()
+            session = self.terminals.session_for(role)
             if not session:
                 session = (
                     self._pty_session_override
                     if role == "" and self._pty_session_override
                     else str(uuid.uuid4())
                 )
-                self._pty_sessions[role] = session
-            self.pty = self._new_pty(role, session, agent_id)
-            return self.pty
+                self.terminals.remember_session(role, session)
+            pty = self.terminals.install(self._new_pty(role, session, agent_id))
+        self._maybe_inject_wake(role, session, pty)
+        return pty
+
+    def _maybe_inject_wake(self, role: str, session: str, pty: PtyManager) -> None:
+        """新会话首次启动时注入该角色唤醒词；已有历史或主动交接时不重复注入。"""
+        if not role or not session:
+            return
+        workspace = self.active_workspace()
+        try:
+            wake = self.resolve_agent_wake_prompt(int(workspace.get("id") or 0), role)
+        except ValueError:
+            return
+        project = str(workspace.get("project_path") or self.project)
+        history = read_history(project, session, limit=1)
+        if history is not None and history.get("messages"):
+            return
+        key = f"{role}:{session}"
+        with self._wake_lock:
+            if key in self._wake_injected:
+                return
+            self._wake_injected.add(key)
+        threading.Thread(
+            target=self._inject_wake_when_ready,
+            args=(role, session, pty, wake),
+            daemon=True,
+        ).start()
+
+    def _inject_wake_when_ready(self, role: str, session: str, pty: PtyManager, wake: str) -> None:
+        key = f"{role}:{session}"
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if self.terminals.active() is not pty or pty.session_id != session:
+                    return
+                if pty.status().get("running"):
+                    break
+                time.sleep(0.2)
+            else:
+                return
+            time.sleep(wake_inject_delay_seconds())
+            if (
+                self.terminals.active() is not pty
+                or pty.session_id != session
+                or not pty.status().get("running")
+            ):
+                return
+            _inject_prompt(pty, wake)
+        except (OSError, RuntimeError, ValueError):
+            with self._wake_lock:
+                self._wake_injected.discard(key)
 
     def stop_pty_for_role(self, role: str, agent_id: str = "") -> bool:
         role = role.strip()
         agent_id = agent_id.strip()
-        with self._pty_lock:
-            if self.pty.role != role:
+        with self.terminals.lock:
+            pty = self.terminals.active()
+            if pty.role != role:
                 return False
-            if agent_id and self.pty.agent_id != agent_id:
+            if agent_id and pty.agent_id != agent_id:
                 # 旧句柄（同 role、旧 agent_id）不得误杀新 Agent 的 PTY。
                 return False
-            if self.pty.session_id:
-                self._pty_sessions[self.pty.role] = self.pty.session_id
-            if self.pty.status().get("running"):
-                self.pty.stop()
+            self.terminals.remember_current_session()
+            if pty.status().get("running"):
+                pty.stop()
             return True
 
     def check_agent_id(self, role: str, agent_id: str) -> bool:
@@ -1165,7 +1350,8 @@ class Daemon:
 
     def enforce_pty_binding(self) -> bool:
         """PTY 绑定的 Agent 离线/停止/被同角色新注册顶替时，立即回收 PTY 与 claude。"""
-        role = self.pty.role
+        pty = self.terminals.active()
+        role = pty.role
         if not role:
             return False
         record = self.registry.get(role)
@@ -1173,7 +1359,7 @@ class Daemon:
             return self.stop_pty_for_role(role)
         if record.status in ("stopped", "lost", "failed", "pending"):
             return self.stop_pty_for_role(role)
-        if not process_alive(record.pid) or _agent_id(record) != self.pty.agent_id:
+        if not process_alive(record.pid) or _agent_id(record) != pty.agent_id:
             return self.stop_pty_for_role(role)
         return False
 
@@ -1559,6 +1745,7 @@ class Daemon:
                 "project": self.project,
             },
             "agents": [self._agent_dict(record) for record in self.registry.list()],
+            "active_terminal_id": self.terminals.active_id,
         }
 
     def start(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -1805,7 +1992,7 @@ class Daemon:
                 watch_thread.join(timeout=5)
             self._wait_subscribers(timeout=2.0)
             self.chat.stop_all()
-            self.pty.stop()
+            self.terminals.stop_all()
             self.launcher.stop_all()
             server.server_close()
             (self.home / "daemon.json").unlink(missing_ok=True)
@@ -1840,6 +2027,27 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._dispatch("POST")
+
+    def _normalize_terminal_path(self, path: str) -> str | None:
+        """`/pty/<terminal_id>/<action>` → 旧内部路由；未知终端返回 None。
+
+        v1 只有 `"1"`；`/pty/<action>` 仍作为默认终端兼容写法。
+        """
+        if not path.startswith("/pty/"):
+            return path
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 3:
+            return path
+        if parts[1] == "chat" and len(parts) == 3:
+            return path
+        terminal_id = parts[1]
+        if self.daemon.terminals.get(terminal_id) is None:
+            return None
+        if len(parts) == 3:
+            return f"/pty/{parts[2]}"
+        if len(parts) == 4 and parts[2] == "chat" and parts[3] == "stream":
+            return "/pty/chat/stream"
+        return None
 
     def _authorized(self, path: str) -> bool:
         if path == "/health":
@@ -1887,8 +2095,8 @@ class _Handler(BaseHTTPRequestHandler):
             return {"error": f"agent offline: {role}", "reason": "agent_offline"}
         return None
 
-    def _pty_preflight_error(self) -> dict[str, Any] | None:
-        check = self.daemon.pty_preflight()
+    def _pty_preflight_error(self, role: str = "") -> dict[str, Any] | None:
+        check = self.daemon.pty_preflight(role)
         return None if check.get("ok") else check
 
     def _workspaces_payload(self) -> dict[str, Any]:
@@ -1915,7 +2123,7 @@ class _Handler(BaseHTTPRequestHandler):
         error = self._agent_guard(role, agent_id)
         if error is not None:
             return error
-        bound = self.daemon.pty
+        bound = self.daemon.terminals.active()
         if bound.role != role or bound.agent_id != agent_id:
             return {
                 "error": f"pty bound to {bound.role or 'global'}/{bound.agent_id or '-'}",
@@ -2290,6 +2498,11 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized(path):
             self._send(401, {"error": "unauthorized"})
             return
+        normalized = self._normalize_terminal_path(path)
+        if normalized is None:
+            self._send(404, {"error": "unknown terminal"})
+            return
+        path = normalized
         if method == "POST" and path == CLAUDE_HOOK_NOTIFICATION_PATH:
             body = self._read_json()
             if body is None:
@@ -2302,7 +2515,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(session_id, str) or not session_id.strip():
                 self._send(400, {"error": "session_id is required"})
                 return
-            active_session = self.daemon.pty.session_id
+            active_session = self.daemon.terminals.active().session_id
             if not active_session or session_id != active_session:
                 self._send(409, {"error": "session mismatch"})
                 return
@@ -2347,7 +2560,7 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
-            preflight_error = self._pty_preflight_error()
+            preflight_error = self._pty_preflight_error(role)
             if preflight_error is not None:
                 self._send(400, preflight_error)
                 return
@@ -2392,7 +2605,7 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
-            preflight_error = self._pty_preflight_error()
+            preflight_error = self._pty_preflight_error(role)
             if preflight_error is not None:
                 self._send(400, preflight_error)
                 return
@@ -2403,7 +2616,7 @@ class _Handler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             role = _query_role(query)
             agent_id = _query_agent_id(query)
-            pty_status = self.daemon.pty.status()
+            pty_status = self.daemon.terminals.active().status()
             if role:
                 pty_status["role_online"] = self.daemon.role_online(role)
                 pty_status["agent_match"] = self.daemon.check_agent_id(role, agent_id)
@@ -2418,7 +2631,7 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
-            preflight_error = self._pty_preflight_error()
+            preflight_error = self._pty_preflight_error(role)
             if preflight_error is not None:
                 self._send(400, preflight_error)
                 return
@@ -2499,6 +2712,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": str(exc)})
                 return
             workspace_id = int(workspace_agent.get("workspace_id") or 0)
+            active = self.daemon.active_workspace()
+            if workspace_id == int(active.get("id") or 0):
+                self.daemon._register_workspace_agents()
+                self.daemon._publish()
             self._send(
                 200,
                 {
@@ -2510,8 +2727,16 @@ class _Handler(BaseHTTPRequestHandler):
 
         if method == "POST" and path == "/workspaces/agents/delete":
             workspace_id = _int(payload.get("workspace_id"))
-            role = _str(payload.get("role"))
+            role = _str(payload.get("role")).strip().casefold()
             deleted = self.daemon.workspaces.delete_agent(workspace_id, role)
+            active = self.daemon.active_workspace()
+            if deleted and workspace_id == int(active.get("id") or 0) and role:
+                self.daemon.stop_pty_for_role(role)
+                record = self.daemon.registry.get(role)
+                if record is not None and record.command == "workspace":
+                    self.daemon.registry.set_status(role, "stopped")
+                self.daemon._register_workspace_agents()
+                self.daemon._publish()
             self._send(
                 200,
                 {
@@ -2587,7 +2812,7 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
-            preflight_error = self._pty_preflight_error()
+            preflight_error = self._pty_preflight_error(role)
             if preflight_error is not None:
                 self._send(400, preflight_error)
                 return
@@ -2609,7 +2834,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
             try:
-                ok = self.daemon.pty.write(data)
+                ok = self.daemon.terminals.active().write(data)
             except ValueError as exc:
                 self._send(400, {"error": str(exc)})
                 return
@@ -2632,7 +2857,7 @@ class _Handler(BaseHTTPRequestHandler):
             if error is not None:
                 self._send(409 if error.get("reason") != "agent_id_required" else 400, error)
                 return
-            self._send(200, self.daemon.pty.resize(cols, rows))
+            self._send(200, self.daemon.terminals.active().resize(cols, rows))
             return
 
         if method == "POST" and path == "/pty/stop":
@@ -2645,7 +2870,7 @@ class _Handler(BaseHTTPRequestHandler):
                 stopped = self.daemon.stop_pty_for_role(role, agent_id)
                 self._send(200, {"stopped": stopped, "role": role, "agent_id": agent_id})
                 return
-            self._send(200, self.daemon.pty.stop())
+            self._send(200, self.daemon.terminals.active().stop())
             return
 
         if method == "POST" and path in ("/chat", "/chat/stop"):

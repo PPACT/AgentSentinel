@@ -12,6 +12,7 @@ declare global {
 const params = new URLSearchParams(window.location.search);
 const renderer = params.get("renderer") === "webgl" ? "webgl" : "default";
 const batchMs = Math.max(0, Number(params.get("batch") ?? 0));
+const hidden = params.get("hidden") === "1";
 const container = document.getElementById("term");
 if (!container) throw new Error("no container");
 
@@ -26,6 +27,10 @@ const fit = new FitAddon();
 term.loadAddon(fit);
 term.open(container);
 fit.fit();
+if (hidden) {
+  // 复刻工作台“终端常驻但 Tab 隐藏”：visibility 保留布局尺寸，xterm 继续解析。
+  container.style.visibility = "hidden";
+}
 
 let webglOk = false;
 if (renderer === "webgl") {

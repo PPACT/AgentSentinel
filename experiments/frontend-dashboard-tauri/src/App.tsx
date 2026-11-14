@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { AgentsPanel } from "@/components/AgentsPanel";
+import { AgentConfigSheet } from "@/components/AgentConfigSheet";
 import { CenterTabBar } from "@/components/CenterTabBar";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConsolePanel } from "@/components/ConsolePanel";
@@ -20,6 +21,7 @@ import { TopBar } from "@/components/TopBar";
 import { WorkspaceDialog } from "@/components/WorkspaceDialog";
 import {
   cleanupWildProcess,
+  deleteWorkspaceAgent,
   discoverAgents,
   ensureDaemon,
   ensureWorkspaceDaemon,
@@ -103,6 +105,7 @@ export default function App() {
   const [engines, setEngines] = useState<EngineOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [agentSheet, setAgentSheet] = useState<{ role: string | null } | null>(null);
   const [workspaceEpoch, setWorkspaceEpoch] = useState(0);
   const [budgetOverride, setBudgetOverride] = useState<number | null>(null);
   const [handoff, setHandoff] = useState<HandoffStatus | null>(null);
@@ -521,6 +524,30 @@ export default function App() {
     [agents, appendLog, applySnapshot, refreshTasks],
   );
 
+  const handleAgentSaved = useCallback(
+    (role: string) => {
+      setSelectedRole(role);
+      void refreshAll();
+    },
+    [refreshAll],
+  );
+
+  const handleDeleteAgent = useCallback(
+    async (role: string) => {
+      const workspaceId = activeWorkspace?.id;
+      if (!workspaceId) return;
+      if (!window.confirm(`删除角色 ${role}？配置会移除，关联的 PTY 将被回收。`)) return;
+      try {
+        await deleteWorkspaceAgent(workspaceId, role);
+        if (selectedRole === role) setSelectedRole(null);
+        await refreshAll();
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    },
+    [activeWorkspace?.id, refreshAll, selectedRole],
+  );
+
   const handleDiscover = useCallback(async () => {
     setDiscovering(true);
     try {
@@ -601,6 +628,11 @@ export default function App() {
       }}
       selectedRole={activeRole}
       onSelectRole={setSelectedRole}
+      onNewAgent={() => setAgentSheet({ role: null })}
+      onEditAgent={(role) => setAgentSheet({ role })}
+      onDeleteAgent={(role) => {
+        void handleDeleteAgent(role);
+      }}
       wild={wild}
       wildOpen={wildOpen}
       onToggleWild={setWildOpen}
@@ -828,11 +860,17 @@ export default function App() {
           engines={engines}
           activeId={activeWorkspace?.id ?? null}
           onRefresh={handleWorkspacesChanged}
-          onAgentChanged={() => {
-            void refreshAll();
-          }}
         />
       ) : null}
+      <AgentConfigSheet
+        open={agentSheet !== null}
+        onOpenChange={(open) => {
+          if (!open) setAgentSheet(null);
+        }}
+        workspaceId={activeWorkspace?.id ?? null}
+        role={agentSheet?.role ?? null}
+        onSaved={handleAgentSaved}
+      />
     </div>
   );
 }

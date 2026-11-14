@@ -1368,6 +1368,12 @@ class Daemon:
         data["alive"] = process_alive(record.pid)
         data["agent_id"] = _agent_id(record)
         data["external_session_id"] = self.external_session(record.role)
+        if record.command == "workspace" or record.job_id:
+            data["source"] = "local"
+        elif record.command.startswith("mcp_server"):
+            data["source"] = "external"
+        else:
+            data["source"] = "external"
         return data
 
     def external_session(self, role: str) -> str | None:

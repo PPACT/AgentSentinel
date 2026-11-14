@@ -101,6 +101,8 @@ export interface Agent {
   project?: string;
   alive?: boolean;
   external_session_id?: string | null;
+  /** local=中控配置/托管；external=外部终端注册。 */
+  source?: "local" | "external";
 }
 
 /** `/discover` 返回的未注册野生进程（只读展示）。 */

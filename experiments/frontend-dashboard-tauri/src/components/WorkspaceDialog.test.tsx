@@ -9,9 +9,6 @@ const mocks = vi.hoisted(() => ({
   preflight: vi.fn(),
   activate: vi.fn(),
   remove: vi.fn(),
-  agents: vi.fn(),
-  saveAgent: vi.fn(),
-  deleteAgent: vi.fn(),
   openDialog: vi.fn(),
 }));
 
@@ -22,9 +19,6 @@ vi.mock("@/lib/backend", () => ({
   preflightWorkspace: mocks.preflight,
   activateWorkspace: mocks.activate,
   deleteWorkspace: mocks.remove,
-  getWorkspaceAgents: mocks.agents,
-  saveWorkspaceAgent: mocks.saveAgent,
-  deleteWorkspaceAgent: mocks.deleteAgent,
 }));
 
 import type { EngineOption, Workspace, WorkspacesResponse } from "@/lib/types";
@@ -69,10 +63,6 @@ beforeEach(() => {
   mocks.preflight.mockReset();
   mocks.activate.mockReset();
   mocks.remove.mockReset();
-  mocks.agents.mockReset();
-  mocks.agents.mockResolvedValue({ agents: [], workspace_id: 1 });
-  mocks.saveAgent.mockReset();
-  mocks.deleteAgent.mockReset();
   mocks.openDialog.mockReset();
 });
 
@@ -104,57 +94,36 @@ describe("WorkspaceDialog", () => {
     );
   });
 
-  it("saves the configured command and engine", async () => {
+  it("saves project config including budget", async () => {
     const saved: WorkspacesResponse = {
-      workspaces: [
-        {
-          ...WORKSPACE,
-          engine: "codex",
-          command: "codex",
-          capabilities: { chat: false, usage: false, clear: false },
-        },
-      ],
+      workspaces: [{ ...WORKSPACE, engine: "codex", command: "codex", budget_tokens: 300_000 }],
       active_id: 1,
       engines: ENGINES,
-      workspace: { ...WORKSPACE, engine: "codex", command: "codex" },
+      workspace: { ...WORKSPACE, engine: "codex", command: "codex", budget_tokens: 300_000 },
     };
     mocks.save.mockResolvedValue(saved);
     const { onRefresh } = renderDialog();
 
     fireEvent.change(screen.getByLabelText("引擎预设"), { target: { value: "codex" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.change(screen.getByDisplayValue("200000"), { target: { value: "300000" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存工作区" }));
 
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
-    expect(mocks.save.mock.calls[0][0]).toMatchObject({ engine: "codex", command: "codex" });
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled());
+    expect(mocks.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 1,
+        engine: "codex",
+        command: "codex",
+        budget_tokens: 300_000,
+        activate: false,
+      }),
+    );
     expect(onRefresh).toHaveBeenCalledWith(saved);
   });
 
-  it("saves a per-role wake prompt", async () => {
-    const agent = {
-      workspace_id: 1,
-      role: "dev",
-      wake_prompt_type: "text" as const,
-      wake_prompt_content: "接续",
-      configured: true,
-    };
-    mocks.saveAgent.mockResolvedValue({ agent, agents: [agent] });
+  it("no longer contains the agent wake-prompt module", () => {
     renderDialog();
-    await waitFor(() => expect(mocks.agents).toHaveBeenCalledWith(1));
-
-    fireEvent.change(screen.getByLabelText("角色"), { target: { value: "dev" } });
-    fireEvent.change(screen.getByPlaceholderText(/该 Agent 专属唤醒词/), {
-      target: { value: "接续" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存角色唤醒词" }));
-
-    await waitFor(() =>
-      expect(mocks.saveAgent).toHaveBeenCalledWith({
-        workspace_id: 1,
-        role: "dev",
-        wake_prompt_type: "text",
-        wake_prompt_content: "接续",
-        command: "",
-      }),
-    );
+    expect(screen.queryByText("Agent 唤醒词")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/该 Agent 专属唤醒词/)).not.toBeInTheDocument();
   });
 });

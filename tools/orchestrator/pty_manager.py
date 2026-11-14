@@ -324,6 +324,14 @@ class PtyManager:
         with self._lock:
             return dict(self._notice) if self._notice else None
 
+    def notify(self, kind: str, message: str = "", session: str = "") -> dict[str, Any] | None:
+        """外部事件（如 Claude Hook）转为 notice；PTY 未运行时忽略。"""
+        with self._lock:
+            if not self._running:
+                return None
+            self._set_notice_locked(kind, message, session or self.session_id)
+            return dict(self._notice) if self._notice else None
+
     def _broadcast(self, data: bytes) -> None:
         with self._lock:
             self._seq += 1

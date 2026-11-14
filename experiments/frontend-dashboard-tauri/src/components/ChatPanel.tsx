@@ -25,6 +25,7 @@ interface ChatPanelProps {
   onStop: () => void;
   onHandoff?: () => void;
   onBudgetChange?: (tokens: number) => void;
+  onOpenTerminal?: () => void;
   locked?: boolean;
   lockReason?: string;
 }
@@ -123,6 +124,7 @@ export function ChatPanel({
   onStop,
   onHandoff = () => undefined,
   onBudgetChange = () => undefined,
+  onOpenTerminal = () => undefined,
   locked = false,
   lockReason = "当前 Agent 已离线，对话已锁定",
 }: ChatPanelProps) {
@@ -234,8 +236,19 @@ export function ChatPanel({
       </header>
 
       {notice ? (
-        <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-200/90">
-          {notice.message}
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-200/90">
+          <span className="truncate">{notice.message}</span>
+          {notice.kind === "permission_prompt" ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 shrink-0 gap-1 border-amber-500/40 px-2 text-[11px] text-amber-100"
+              title="切换后请手动确认权限，助手不会代按"
+              onClick={onOpenTerminal}
+            >
+              切换到原生终端
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {handoff ? (

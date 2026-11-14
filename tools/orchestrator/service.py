@@ -34,8 +34,23 @@ from urllib.parse import parse_qs, urlparse
 import psutil  # type: ignore[import-untyped]  # psutil 未随包提供 stubs
 
 from tools.orchestrator.chat import PROMPT_MAX_CHARS, ChatBusy, ChatManager
+from tools.orchestrator.claude_hooks import (
+    NOTIFICATION_PATH as CLAUDE_HOOK_NOTIFICATION_PATH,
+)
+from tools.orchestrator.claude_hooks import (
+    PERMISSION_MATCHER,
+)
+from tools.orchestrator.claude_hooks import (
+    write_settings as write_claude_hook_settings,
+)
 from tools.orchestrator.drivers.cwd_process import CwdProcessDriver, _normalize_path, _within
-from tools.orchestrator.engines import ENGINES, adapter_for, bracketed_paste, preflight
+from tools.orchestrator.engines import (
+    ENGINES,
+    EngineAdapter,
+    adapter_for,
+    bracketed_paste,
+    preflight,
+)
 from tools.orchestrator.launcher import (
     Launcher,
     kill_process_tree,
@@ -237,6 +252,8 @@ promptBox.addEventListener("keydown", (event) => {
 """
 AGENT_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PENDING_DIR = "pending"
+CLAUDE_HOOK_NOTICE_MESSAGE = "Claude Code 正在等待权限确认，请切换到原生终端处理"
+HOOK_NOTICE_DEDUPE_SECONDS = 30.0
 
 
 def agent_cache_seconds() -> float:
@@ -786,6 +803,8 @@ class Daemon:
         self._pty_lock = threading.Lock()
         self._pty_sessions: dict[str, str] = {}
         self._pty_signature: tuple[Any, ...] = ()
+        self._hook_notice_lock = threading.Lock()
+        self._hook_notice_seen: dict[tuple[str, str], float] = {}
         self._bound_workspace_id = _int(os.environ.get("SENTINEL_WORKSPACE_ID", ""))
         db_path = ensure_workspace_db(home)
         is_global_db = db_path == user_data_dir() / "workspaces.sqlite3"
@@ -895,7 +914,11 @@ class Daemon:
         adapter = adapter_for(str(workspace.get("engine") or "claude"))
         command_text = str(workspace.get("command") or adapter.default_command)
         factory = (
-            None if self._pty_command else lambda sid: adapter.build_command(command_text, sid)
+            None
+            if self._pty_command
+            else lambda sid: adapter.build_command(
+                command_text, sid, self._claude_hook_args(adapter)
+            )
         )
         self._pty_signature = self._workspace_signature(workspace)
         return PtyManager(
@@ -909,6 +932,35 @@ class Daemon:
             agent_id=agent_id,
             engine=adapter.id,
         )
+
+    def _claude_hook_args(self, adapter: EngineAdapter) -> list[str]:
+        """Claude 引擎追加 --settings（daemon 未绑定端口前跳过）。"""
+        if adapter.id != "claude" or self.port <= 0:
+            return []
+        try:
+            path = write_claude_hook_settings(self.home, self.host, self.port, self.token)
+        except OSError as exc:
+            print(f"claude hook settings failed: {exc}", file=sys.stderr, flush=True)
+            return []
+        return ["--settings", str(path)]
+
+    def notify_claude_hook(self, session_id: str) -> dict[str, Any]:
+        """Claude Hook 回调 → PTY notice；同 session/kind 30s 去重，不记录消息内容。"""
+        now = time.monotonic()
+        key = (session_id, PERMISSION_MATCHER)
+        with self._hook_notice_lock:
+            last = self._hook_notice_seen.get(key)
+            if last is not None and now - last < HOOK_NOTICE_DEDUPE_SECONDS:
+                return {"deduped": True, "notice": self.pty.latest_notice()}
+            self._hook_notice_seen[key] = now
+            if len(self._hook_notice_seen) > 64:
+                cutoff = now - HOOK_NOTICE_DEDUPE_SECONDS * 4
+                for stale in [
+                    entry for entry, seen in self._hook_notice_seen.items() if seen < cutoff
+                ]:
+                    del self._hook_notice_seen[stale]
+        notice = self.pty.notify(PERMISSION_MATCHER, CLAUDE_HOOK_NOTICE_MESSAGE)
+        return {"deduped": False, "notice": notice}
 
     def resolve_agent_wake_prompt(self, workspace_id: int, role: str) -> str:
         """按 workspace_id + role 取该 Agent 的专属唤醒词。"""
@@ -1705,6 +1757,7 @@ class Daemon:
         server.daemon = self
         self.server = server
         port = int(server.server_address[1])
+        self.port = port
         self.router.orchestrator_url = f"http://{self.host}:{port}"
         write_daemon_info(
             self.home,
@@ -2236,6 +2289,24 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if not self._authorized(path):
             self._send(401, {"error": "unauthorized"})
+            return
+        if method == "POST" and path == CLAUDE_HOOK_NOTIFICATION_PATH:
+            body = self._read_json()
+            if body is None:
+                return
+            notification_type = body.get("notification_type")
+            if notification_type != PERMISSION_MATCHER:
+                self._send(400, {"error": "unsupported notification_type"})
+                return
+            session_id = body.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                self._send(400, {"error": "session_id is required"})
+                return
+            active_session = self.daemon.pty.session_id
+            if not active_session or session_id != active_session:
+                self._send(409, {"error": "session mismatch"})
+                return
+            self._send(200, self.daemon.notify_claude_hook(session_id))
             return
         if method == "GET" and path == "/sessions/history":
             query = parse_qs(urlparse(self.path).query)

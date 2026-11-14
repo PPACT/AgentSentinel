@@ -678,6 +678,7 @@ export default function App() {
                   onBudgetChange={(tokens) => {
                     void handleBudgetChange(tokens);
                   }}
+                  onOpenTerminal={() => setCenterTab("terminal")}
                 />
               </Suspense>
             ) : effectiveCenterTab === "progress" ? (

@@ -23,10 +23,17 @@ class EngineAdapter:
     supports_clear: bool
     session_flag: str = ""
 
-    def build_command(self, command: str, session_id: str) -> list[str]:
+    def build_command(
+        self,
+        command: str,
+        session_id: str,
+        extra_args: list[str] | None = None,
+    ) -> list[str]:
         parts = split_command(command) or split_command(self.default_command)
         if self.session_flag and session_id:
             parts.extend([self.session_flag, session_id])
+        if extra_args:
+            parts.extend(extra_args)
         return parts
 
     def capabilities(self) -> dict[str, bool]:

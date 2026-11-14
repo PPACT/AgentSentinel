@@ -197,4 +197,25 @@ describe("ChatPanel", () => {
     expect(screen.getByText("交接中：等待 Agent 完成…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /交接中/ })).toBeDisabled();
   });
+
+  it("offers terminal switch for permission_prompt notices", () => {
+    const onOpenTerminal = vi.fn();
+    renderPanel({
+      notice: { seq: 1, kind: "permission_prompt", message: "Claude Code 正在等待权限确认" },
+      onOpenTerminal,
+    });
+
+    expect(screen.getByText(/正在等待权限确认/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "切换到原生终端" }));
+
+    expect(onOpenTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not offer terminal switch for other notice kinds", () => {
+    renderPanel({
+      notice: { seq: 2, kind: "session_conflict", message: "旧会话正被外部占用" },
+    });
+
+    expect(screen.queryByRole("button", { name: "切换到原生终端" })).not.toBeInTheDocument();
+  });
 });

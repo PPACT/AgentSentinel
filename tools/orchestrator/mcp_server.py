@@ -159,6 +159,10 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+# 工具定义在缓存前缀最前面（tools → system → messages）：顺序一旦漂移，DeepSeek 的
+# 自动前缀缓存会从 byte 0 全部失配。按名称固定排序，保证每次 tools/list 字节稳定。
+TOOLS.sort(key=lambda tool: str(tool["name"]))
+
 
 def orchestrator_home() -> Path:
     override = os.environ.get("SENTINEL_ORCH_HOME", "").strip()

@@ -136,6 +136,13 @@ def test_tools_list_contains_orchestrator_tools() -> None:
     assert "attempts" in ack["inputSchema"]["properties"]
 
 
+def test_tools_list_is_name_sorted_and_unique() -> None:
+    """工具定义位于缓存前缀最前；顺序必须稳定，避免 DeepSeek 前缀缓存从 byte 0 失配。"""
+    names = [str(tool["name"]) for tool in mcp_server.TOOLS]
+    assert names == sorted(names)
+    assert len(names) == len(set(names))
+
+
 def test_tool_request_ack_passes_attempts() -> None:
     method, path, payload = mcp_server.tool_request(
         "orchestrator_ack",

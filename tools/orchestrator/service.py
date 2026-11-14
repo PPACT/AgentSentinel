@@ -649,7 +649,18 @@ def _release_instance_lock(home: Path) -> None:
 
 
 def _pty_environment() -> dict[str, str]:
-    """PTY 里必须是独立的 claude 会话，不能继承外层 Claude Code 的子会话标记。"""
+    """PTY 里必须是独立的 claude 会话，不能继承外层 Claude Code 的子会话标记。
+
+    同时固定 prompt cache 相关环境：
+    - ``ENABLE_PROMPT_CACHING_1H=1``：把默认 5 分钟 TTL 拉长到 1 小时，长命令/挂机后
+      前缀仍可命中（CC >= 2.1.108）。
+    - ``ENABLE_TOOL_SEARCH=true``：自定义 ``ANTHROPIC_BASE_URL``（如 cc-switch 代理）下
+      CC 会停止延迟加载工具、每轮重新内联完整工具集，导致缓存前缀从 byte 0 失配。
+    - 清除 ``FORCE_PROMPT_CACHING_5M`` / ``DISABLE_PROMPT_CACHING*``：用户环境里的
+      这两个变量分别会强制 5 分钟 TTL 和彻底关闭缓存，必须让 1h 生效。
+    - ``CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1``：从系统提示词中移除 git status
+      快照（编辑文件即变化，会把 DeepSeek 的前缀缓存从该处整段打断）。
+    """
     env = os.environ.copy()
     for key in list(env):
         if (
@@ -658,6 +669,12 @@ def _pty_environment() -> dict[str, str]:
             and key != "CLAUDE_CODE_GIT_BASH_PATH"
         ):
             env.pop(key, None)
+    for key in list(env):
+        if key.startswith("DISABLE_PROMPT_CACHING") or key == "FORCE_PROMPT_CACHING_5M":
+            env.pop(key, None)
+    env["ENABLE_PROMPT_CACHING_1H"] = "1"
+    env["ENABLE_TOOL_SEARCH"] = "true"
+    env["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"] = "1"
     return env
 
 

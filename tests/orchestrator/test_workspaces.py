@@ -41,6 +41,23 @@ def test_pty_environment_inherits_os_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "CLAUDE_CODE_SESSION_ID" not in env
 
 
+def test_pty_environment_forces_1h_cache_and_stable_tool_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层环境不能把 1h TTL 或工具搜索覆盖掉。"""
+    monkeypatch.setenv("ENABLE_PROMPT_CACHING_1H", "0")
+    monkeypatch.setenv("ENABLE_TOOL_SEARCH", "false")
+    monkeypatch.setenv("FORCE_PROMPT_CACHING_5M", "1")
+    monkeypatch.setenv("DISABLE_PROMPT_CACHING", "1")
+    monkeypatch.setenv("DISABLE_PROMPT_CACHING_CLAUDE_SONNET", "1")
+    env = _pty_environment()
+    assert env["ENABLE_PROMPT_CACHING_1H"] == "1"
+    assert env["ENABLE_TOOL_SEARCH"] == "true"
+    assert env["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"] == "1"
+    assert "FORCE_PROMPT_CACHING_5M" not in env
+    assert not any(key.startswith("DISABLE_PROMPT_CACHING") for key in env)
+
+
 def test_engine_build_command_includes_session_for_claude() -> None:
     claude = adapter_for("claude")
     command = claude.build_command("claude --foo", "session-1")

@@ -320,7 +320,11 @@ def cleanup_stale_locks(dry_run: bool) -> list[str]:
     """
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from tools.orchestrator.locking import probe, unlink_with_retry
+    try:
+        from tools.orchestrator.locking import probe, unlink_with_retry
+    except ImportError:
+        # 清理失败不能阻断进程清理主流程。
+        return []
 
     removed: list[str] = []
     for home in workspace_homes():
